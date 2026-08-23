@@ -2,7 +2,7 @@ import type { ChartSession } from "../chart-session/chartSessionTypes.js";
 import type { ChartSettings } from "../settings/chartAppearanceSettings.js";
 import type { IndicatorDefinition } from "../indicators/indicatorTypes.js";
 
-export const CHART_WORKSPACE_SCHEMA_VERSION = 7 as const;
+export const CHART_WORKSPACE_SCHEMA_VERSION = 8 as const;
 export const CHART_WORKSPACE_RECORD_SCHEMA_VERSION = 1 as const;
 export type ChartCellId = string;
 export type ChartWindowId = string;
@@ -87,6 +87,20 @@ export interface ChartCellPriceScale {
   priceScaleMode: number;
 }
 
+export interface ChartStrategyAttachmentRecord {
+  schemaVersion: 1;
+  strategyDraftId: string | null;
+  strategyRevisionId: string | null;
+  displayName: string;
+  language: "pyne" | "pine";
+  parameters: Record<string, unknown>;
+  rangeMode: "ALL_AVAILABLE" | "VISIBLE" | "CUSTOM";
+  customRange: { startMs: number; endMs: number } | null;
+  fidelityPreference: "FAST" | "PRECISE";
+  quickPresetId: string;
+  autoRun: boolean;
+}
+
 export interface ChartLinkIndicatorSettings {
   definitions: boolean;
   parameters: boolean;
@@ -128,6 +142,7 @@ export interface ChartCellState {
   chartSettings: ChartCellChartSettings;
   priceScale: ChartCellPriceScale;
   indicators: IndicatorDefinition[];
+  strategyAttachment: ChartStrategyAttachmentRecord | null;
 }
 
 export interface ChartWindowBoundsDip {

@@ -24,6 +24,7 @@ import {
   type ChartCellId,
   type ChartCellPriceScale,
   type ChartCellState,
+  type ChartStrategyAttachmentRecord,
   type ChartDrawingLayerSetId,
   type ChartLinkGroup,
   type ChartLinkGroupId,
@@ -49,6 +50,7 @@ import {
   visibleCellIds,
 } from "./chartWorkspaceLayout.js";
 
+export const CHART_WORKSPACE_V8_STORAGE_KEY = "candlescope-chart-workspace-v8";
 export const CHART_WORKSPACE_V7_STORAGE_KEY = "candlescope-chart-workspace-v7";
 
 export interface ChartWorkspaceStorageLike {
@@ -64,6 +66,7 @@ export interface ChartWorkspaceNormalizationDiagnostic {
     | "invalid-cell-record"
     | "invalid-cell-id"
     | "invalid-cell-link-group"
+    | "invalid-strategy-attachment"
     | "invalid-link-groups"
     | "invalid-link-group"
     | "invalid-link-parent"
@@ -205,6 +208,110 @@ function defaultCell(
     chartSettings: { ...chartSettings },
     priceScale: { invertScale: false, priceScaleMode: 0 },
     indicators: indicators.map((indicator) => ({ ...indicator })),
+    strategyAttachment: null,
+  };
+}
+
+function cloneJsonValue(value: unknown, depth = 0): unknown | undefined {
+  if (value === null || typeof value === "boolean") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+  if (typeof value === "string") return value.length <= 16_384 ? value : undefined;
+  if (depth >= 6) return undefined;
+  if (Array.isArray(value)) {
+    if (value.length > 256) return undefined;
+    const cloned = value.map((item) => cloneJsonValue(item, depth + 1));
+    return cloned.some((item) => item === undefined) ? undefined : cloned;
+  }
+  if (!isRecord(value) || Object.keys(value).length > 256) return undefined;
+  const result: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (!key || key.length > 128 || key === "__proto__" || key === "constructor") {
+      return undefined;
+    }
+    const cloned = cloneJsonValue(item, depth + 1);
+    if (cloned === undefined) return undefined;
+    result[key] = cloned;
+  }
+  return result;
+}
+
+function normalizeAttachment(
+  value: unknown,
+  path: string,
+  diagnostics: ChartWorkspaceNormalizationDiagnostic[],
+): ChartStrategyAttachmentRecord | null {
+  if (value === null || value === undefined) return null;
+  if (!isRecord(value) || value.schemaVersion !== 1) {
+    diagnostics.push({ code: "invalid-strategy-attachment", path });
+    return null;
+  }
+  const optionalId = (candidate: unknown): string | null | undefined => {
+    if (candidate === null) return null;
+    if (typeof candidate !== "string") return undefined;
+    const normalized = candidate.trim();
+    return normalized && normalized.length <= 160 ? normalized : undefined;
+  };
+  const strategyDraftId = optionalId(value.strategyDraftId);
+  const strategyRevisionId = optionalId(value.strategyRevisionId);
+  const displayName = typeof value.displayName === "string"
+    ? value.displayName.trim().slice(0, 120)
+    : "";
+  const language = value.language === "pyne" || value.language === "pine"
+    ? value.language
+    : null;
+  const parameters = cloneJsonValue(value.parameters);
+  const rangeMode = value.rangeMode === "ALL_AVAILABLE"
+    || value.rangeMode === "VISIBLE"
+    || value.rangeMode === "CUSTOM"
+    ? value.rangeMode
+    : null;
+  const customRangeSource = isRecord(value.customRange) ? value.customRange : null;
+  const startMs = Number(customRangeSource?.startMs);
+  const endMs = Number(customRangeSource?.endMs);
+  const customRange = value.customRange === null
+    ? null
+    : customRangeSource
+      && Number.isSafeInteger(startMs)
+      && Number.isSafeInteger(endMs)
+      && startMs >= 0
+      && startMs < endMs
+      ? { startMs, endMs }
+      : undefined;
+  const fidelityPreference = value.fidelityPreference === "FAST"
+    || value.fidelityPreference === "PRECISE"
+    ? value.fidelityPreference
+    : null;
+  const quickPresetId = typeof value.quickPresetId === "string"
+    ? value.quickPresetId.trim()
+    : "";
+  const valid = strategyDraftId !== undefined
+    && strategyRevisionId !== undefined
+    && displayName.length > 0
+    && language !== null
+    && isRecord(parameters)
+    && rangeMode !== null
+    && customRange !== undefined
+    && (rangeMode === "CUSTOM" ? customRange !== null : customRange === null)
+    && fidelityPreference !== null
+    && quickPresetId.length > 0
+    && quickPresetId.length <= 120
+    && typeof value.autoRun === "boolean";
+  if (!valid) {
+    diagnostics.push({ code: "invalid-strategy-attachment", path });
+    return null;
+  }
+  return {
+    schemaVersion: 1,
+    strategyDraftId,
+    strategyRevisionId,
+    displayName,
+    language,
+    parameters: parameters as Record<string, unknown>,
+    rangeMode,
+    customRange,
+    fidelityPreference,
+    quickPresetId,
+    autoRun: value.autoRun as boolean,
   };
 }
 
@@ -310,6 +417,7 @@ function normalizeCellState(
   fallback: ChartCellState,
   linkGroups: Record<ChartLinkGroupId, ChartLinkGroup>,
   diagnostics: ChartWorkspaceNormalizationDiagnostic[],
+  migrateFromV7: boolean,
 ): ChartCellState {
   const source = isRecord(value) ? value : {};
   const requestedLinkGroupId = source.linkGroupId === null
@@ -329,6 +437,13 @@ function normalizeCellState(
     chartSettings: normalizeCellChartSettings(source.chartSettings),
     priceScale: normalizePriceScale(source.priceScale),
     indicators: normalizeIndicators(source.indicators),
+    strategyAttachment: migrateFromV7
+      ? null
+      : normalizeAttachment(
+        source.strategyAttachment,
+        `cells.${id}.strategyAttachment`,
+        diagnostics,
+      ),
   };
 }
 
@@ -359,8 +474,9 @@ function failResult(
   };
 }
 
-function normalizeV7ChartWorkspace(
+function normalizeCurrentChartWorkspace(
   value: Record<string, unknown>,
+  migratedFromSchemaVersion: 7 | null,
 ): NormalizeChartWorkspaceResult {
   const fallback = createDefaultChartWorkspace();
   const diagnostics: ChartWorkspaceNormalizationDiagnostic[] = [];
@@ -388,6 +504,7 @@ function normalizeV7ChartWorkspace(
       fallback.cells[key] ?? { ...dynamicFallback, id: key },
       linkGroups,
       diagnostics,
+      migratedFromSchemaVersion === 7,
     );
   }
   const sourceWindows = isRecord(value.windows) ? value.windows : null;
@@ -465,7 +582,7 @@ function normalizeV7ChartWorkspace(
       cells,
     },
     diagnostics: [],
-    migratedFromSchemaVersion: null,
+    migratedFromSchemaVersion,
     usedFallback: false,
   };
 }
@@ -479,7 +596,10 @@ export function normalizeChartWorkspaceWithDiagnostics(
   }
   const rawSchemaVersion = value.schemaVersion == null ? 1 : Number(value.schemaVersion);
   if (rawSchemaVersion === CHART_WORKSPACE_SCHEMA_VERSION) {
-    return normalizeV7ChartWorkspace(value);
+    return normalizeCurrentChartWorkspace(value, null);
+  }
+  if (rawSchemaVersion === 7) {
+    return normalizeCurrentChartWorkspace(value, 7);
   }
   return failResult(fallback, [{ code: "unsupported-schema", path: "schemaVersion" }]);
 }
@@ -509,8 +629,11 @@ export function loadChartWorkspace(
 ): ChartWorkspaceDocument {
   if (!storage) return createDefaultChartWorkspace();
   try {
-    const v7 = loadRawWorkspace(storage, [CHART_WORKSPACE_V7_STORAGE_KEY]);
-    return v7 ? normalizeChartWorkspace(v7) : createDefaultChartWorkspace();
+    const stored = loadRawWorkspace(storage, [
+      CHART_WORKSPACE_V8_STORAGE_KEY,
+      CHART_WORKSPACE_V7_STORAGE_KEY,
+    ]);
+    return stored ? normalizeChartWorkspace(stored) : createDefaultChartWorkspace();
   } catch {
     return createDefaultChartWorkspace();
   }
@@ -523,7 +646,7 @@ export function saveChartWorkspace(
   if (!storage) return;
   try {
     storage.setItem(
-      CHART_WORKSPACE_V7_STORAGE_KEY,
+      CHART_WORKSPACE_V8_STORAGE_KEY,
       JSON.stringify(normalizeChartWorkspace(workspace)),
     );
   } catch {

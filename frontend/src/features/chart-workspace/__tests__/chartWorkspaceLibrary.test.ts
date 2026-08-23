@@ -137,7 +137,7 @@ test("legacy default workspace records gain built-in name provenance during norm
   assert.equal(legacyTemplate && chartWorkspaceDisplayName(legacyTemplate, "en"), "Left-right workspace 2");
 });
 
-test("library normalization fails a structurally malformed v7 document closed", () => {
+test("library normalization fails a structurally malformed current document closed", () => {
   const record = createDefaultChartWorkspaceRecord(100);
   const raw = structuredClone(record) as unknown as Record<string, unknown>;
   const rawDocument = raw.document as Record<string, unknown>;

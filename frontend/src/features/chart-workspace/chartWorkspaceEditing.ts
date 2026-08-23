@@ -88,6 +88,7 @@ function blankCell(
     session: cloneSerializable(source.session),
     priceScale: { invertScale: false, priceScaleMode: 0 },
     indicators: [],
+    strategyAttachment: null,
   };
 }
 

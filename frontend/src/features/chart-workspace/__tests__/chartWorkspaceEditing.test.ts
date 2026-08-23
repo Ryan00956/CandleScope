@@ -33,6 +33,19 @@ test("copy split duplicates cell configuration into the first unused stable cell
   const document = createDefaultChartWorkspace();
   cellOf(document, "cell-1").linkGroupId = DEFAULT_CHART_LINK_GROUP_ID;
   cellOf(document, "cell-1").indicators = [{ id: "copy-me", params: { length: 21 } }];
+  cellOf(document, "cell-1").strategyAttachment = {
+    schemaVersion: 1,
+    strategyDraftId: "draft-12345678",
+    strategyRevisionId: "revision-1",
+    displayName: "Copy me",
+    language: "pyne",
+    parameters: { length: 21 },
+    rangeMode: "ALL_AVAILABLE",
+    customRange: null,
+    fidelityPreference: "FAST",
+    quickPresetId: "CRYPTO_PERP_STANDARD_V1",
+    autoRun: false,
+  };
   const result = splitChartWorkspaceDocument(document, "cell-1", "columns", "copy");
 
   assert.deepEqual(visible(result.document), ["cell-1", "cell-2"]);
@@ -42,6 +55,14 @@ test("copy split duplicates cell configuration into the first unused stable cell
   assert.deepEqual(cellOf(result.document, "cell-2").session, cellOf(document, "cell-1").session);
   assert.deepEqual(cellOf(result.document, "cell-2").indicators, cellOf(document, "cell-1").indicators);
   assert.notEqual(cellOf(result.document, "cell-2").indicators, cellOf(document, "cell-1").indicators);
+  assert.deepEqual(
+    cellOf(result.document, "cell-2").strategyAttachment,
+    cellOf(document, "cell-1").strategyAttachment,
+  );
+  assert.notEqual(
+    cellOf(result.document, "cell-2").strategyAttachment,
+    cellOf(document, "cell-1").strategyAttachment,
+  );
 });
 
 test("blank split keeps market context while clearing links, indicators, and price transforms", () => {
@@ -49,6 +70,19 @@ test("blank split keeps market context while clearing links, indicators, and pri
   cellOf(document, "cell-1").linkGroupId = DEFAULT_CHART_LINK_GROUP_ID;
   cellOf(document, "cell-1").priceScale = { invertScale: true, priceScaleMode: 2 };
   cellOf(document, "cell-1").indicators = [{ id: "do-not-copy" }];
+  cellOf(document, "cell-1").strategyAttachment = {
+    schemaVersion: 1,
+    strategyDraftId: "draft-12345678",
+    strategyRevisionId: null,
+    displayName: "Do not copy",
+    language: "pine",
+    parameters: {},
+    rangeMode: "VISIBLE",
+    customRange: null,
+    fidelityPreference: "FAST",
+    quickPresetId: "CRYPTO_PERP_STANDARD_V1",
+    autoRun: false,
+  };
   const result = splitChartWorkspaceDocument(document, "cell-1", "rows", "blank");
   const blank = cellOf(result.document, "cell-2");
 
@@ -56,6 +90,7 @@ test("blank split keeps market context while clearing links, indicators, and pri
   assert.equal(blank.linkGroupId, null);
   assert.deepEqual(blank.indicators, []);
   assert.deepEqual(blank.priceScale, { invertScale: false, priceScaleMode: 0 });
+  assert.equal(blank.strategyAttachment, null);
 });
 
 test("close collapses parent splits without deleting the hidden cell state", () => {

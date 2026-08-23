@@ -343,7 +343,7 @@ function LiveChartCell({
   );
 
   const indicators = useIndicatorRuntime({
-    // Workspace schema v7 persists an explicit indicator list for every cell.
+    // Workspace schema v8 persists an explicit indicator list for every cell.
     // An empty list is therefore intentional (and is required by capacity
     // scenarios such as S3), not a signal to inject the legacy VOL default.
     autoAddVolume: false,

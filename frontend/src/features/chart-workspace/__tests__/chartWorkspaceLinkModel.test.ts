@@ -35,6 +35,19 @@ function hierarchicalWorkspace(): ChartWorkspaceDocument {
 
 test("parent events reach peers and descendants while child events never reach the parent", () => {
   const document = hierarchicalWorkspace();
+  chartWorkspaceCell(document, "cell-2").strategyAttachment = {
+    schemaVersion: 1,
+    strategyDraftId: "draft-12345678",
+    strategyRevisionId: null,
+    displayName: "Cell-local strategy",
+    language: "pyne",
+    parameters: {},
+    rangeMode: "ALL_AVAILABLE",
+    customRange: null,
+    fidelityPreference: "FAST",
+    quickPresetId: "CRYPTO_PERP_STANDARD_V1",
+    autoRun: false,
+  };
   const fromParent = applyLinkedSessionUpdate(document, "cell-1", {
     ...chartWorkspaceCell(document, "cell-1").session,
     symbol: "ETHUSDT",
@@ -43,6 +56,11 @@ test("parent events reach peers and descendants while child events never reach t
   for (const cellId of ["cell-1", "cell-2", "cell-3", "cell-4"]) {
     assert.equal(chartWorkspaceCell(fromParent, cellId).session.symbol, "ETHUSDT");
   }
+  assert.equal(chartWorkspaceCell(fromParent, "cell-1").strategyAttachment, null);
+  assert.equal(
+    chartWorkspaceCell(fromParent, "cell-2").strategyAttachment?.displayName,
+    "Cell-local strategy",
+  );
 
   const fromChild = applyLinkedSessionUpdate(fromParent, "cell-3", {
     ...chartWorkspaceCell(fromParent, "cell-3").session,

@@ -1,0 +1,114 @@
+{
+  "schemaVersion": "candlescope.backtest-chart-first.phase3/1",
+  "generatedAt": "2026-08-24T02:32:19+08:00",
+  "status": "COMPLETE_READY_FOR_COMMIT",
+  "identity": {
+    "baseGitHead": "d09297d14d80ab6d5684bccf257047be6c4b3356",
+    "branch": "codex/backtest-chart-first-ux",
+    "worktree": "H:\\program\\CandleScope-backtest-chart-first"
+  },
+  "scope": {
+    "phase": 3,
+    "phase4OrLaterCode": false,
+    "frontendUserInterfaceChanged": false,
+    "defaultFlagEnabled": false,
+    "push": false,
+    "merge": false,
+    "deploy": false,
+    "mainWorktreeUserChangesCopied": false
+  },
+  "persistence": {
+    "workspaceSchemaFrom": 7,
+    "workspaceSchemaTo": 8,
+    "attachmentSchema": 1,
+    "draftStoreSchema": 1,
+    "draftStorageKey": "candlescope-strategy-drafts-v1",
+    "workspaceStoresSource": false,
+    "workspaceStoresRunState": false,
+    "legacyPayloadMigratesInNormalizationBoundary": true,
+    "indexedDbContainerVersionChanged": false
+  },
+  "stateMachine": {
+    "reactRequired": false,
+    "networkRequired": false,
+    "generationTokenFields": ["cellScope", "generation"],
+    "staleReasonCount": 12,
+    "projectionHiddenOnStaleTransition": true,
+    "completedResultIdentityPreservedOnStale": true,
+    "crossCellResponseAccepted": false
+  },
+  "runtime": {
+    "flag": "VITE_CHART_STRATEGY_TESTER_ENABLED=0",
+    "unattachedCellsTested": 64,
+    "unattachedRuntimeCount": 0,
+    "attachedCellsTested": 16,
+    "maximumAttachedRuntimeCount": 16,
+    "resourcesDisposed": [
+      "timers",
+      "abortControllers",
+      "cleanups",
+      "markerSource",
+      "resultReference",
+      "listeners"
+    ],
+    "appImportsRuntime": false,
+    "appImportsDraftStore": false,
+    "editorProductChunkAdded": false
+  },
+  "checks": {
+    "phase3Targeted": { "result": "PASS", "tests": 45, "failures": 0 },
+    "chartWorkspace": {
+      "result": "PASS",
+      "tests": 81,
+      "failures": 0,
+      "elapsedMs": 675
+    },
+    "frontendBacktest": {
+      "result": "PASS",
+      "tests": 55,
+      "suites": 3,
+      "failures": 0,
+      "elapsedMs": 475.9497
+    },
+    "frontendFull": {
+      "result": "PASS",
+      "tests": 3329,
+      "suites": 3,
+      "failures": 0,
+      "elapsedMs": 123740.1885
+    },
+    "frontendTypecheck": { "result": "PASS" },
+    "frontendArchitecture": { "result": "PASS", "allowlistEntries": 0 },
+    "frontendI18n": { "result": "PASS", "catalogKeys": 3562, "sourceFiles": 596 },
+    "frontendLint": { "result": "PASS", "scope": "full frontend" },
+    "frontendBuild": {
+      "result": "PASS_WITH_EXISTING_CHUNK_WARNING",
+      "modules": 630,
+      "elapsedSeconds": 6.41,
+      "backtestRawKb": 93.01,
+      "backtestGzipKb": 22.47,
+      "liveRawKb": 533.71,
+      "liveGzipKb": 154.87,
+      "phase2LiveRawKb": 531.72,
+      "phase2LiveGzipKb": 154.30,
+      "testerOrEditorProductChunkAdded": false
+    },
+    "diffCheck": { "result": "PASS" }
+  },
+  "browser": {
+    "requiredForPhase": false,
+    "claim": "NO_USER_VISIBLE_PHASE3_UI"
+  },
+  "knownNonPassAttempts": [
+    {
+      "step": "first TypeScript check after reducer implementation",
+      "result": "SYNC_INPUTS_NULL_NARROWING_ERROR",
+      "resolution": "use the already guarded non-null input explicitly; no contract relaxation"
+    }
+  ],
+  "cleanup": {
+    "taskPortsOpened": [],
+    "taskProcessesRemaining": false
+  },
+  "decision": "PHASE3_COMPLETE_PHASE4_NOT_STARTED"
+}

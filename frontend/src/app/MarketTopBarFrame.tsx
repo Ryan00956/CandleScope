@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-
+import BrandMark, { BrandWordmark } from "../components/brand/BrandMark.js";
 
 export interface MarketTopBarFrameProps {
   readonly source?: "live" | "replay" | "local";
@@ -19,8 +19,8 @@ export interface MarketTopBarFrameProps {
 export default function MarketTopBarFrame({
   source = "live",
   className = "",
-  brandIcon = "📈",
-  brandText = "CandleScope",
+  brandIcon,
+  brandText,
   navigation = null,
   identity = null,
   controls = null,
@@ -37,8 +37,12 @@ export default function MarketTopBarFrame({
       data-market-shell-owner="top-bar"
     >
       <div className="logo">
-        <div className="logo-icon">{brandIcon}</div>
-        <span className="logo-text">{brandText}</span>
+        <div className="logo-icon">
+          {brandIcon === undefined ? <BrandMark size={24} /> : brandIcon}
+        </div>
+        {brandText === undefined
+          ? <BrandWordmark />
+          : <span className="logo-text">{brandText}</span>}
       </div>
       {navigation}
       {identity}

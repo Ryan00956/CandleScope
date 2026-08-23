@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="frontend/public/brand/candlescope-lockup-on-dark.svg" />
+    <img src="frontend/public/brand/candlescope-lockup.svg" width="520" alt="CandleScope" />
+  </picture>
+</p>
+
 # CandleScope
 
 [English](README.md)

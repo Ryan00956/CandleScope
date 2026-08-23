@@ -1765,11 +1765,23 @@ body {
   font-size: 14px;
 }
 
+.brand-mark {
+  display: block;
+  flex: 0 0 auto;
+  user-select: none;
+}
+
 .logo-text {
-  background: linear-gradient(135deg, var(--accent-blue), var(--accent-cyan));
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+  color: var(--text-primary);
+}
+
+.brand-wordmark {
+  display: inline-flex;
+  letter-spacing: -0.025em;
+}
+
+.brand-wordmark-scope {
+  color: #12bfae;
 }
 
 /* ── 交易对选择器（触发按钮） ────────────────────────────── */

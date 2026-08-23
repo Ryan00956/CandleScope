@@ -1588,7 +1588,6 @@ input[type="color"] {
 }
 
 .st-about-logo {
-  font-size: 48px;
   margin-bottom: 12px;
   filter: drop-shadow(0 4px 12px rgba(59, 130, 246, 0.3));
 }
@@ -1598,6 +1597,10 @@ input[type="color"] {
   font-weight: 700;
   color: var(--text-primary, #f1f5f9);
   letter-spacing: 0.01em;
+}
+
+.st-about-name-accent {
+  color: #12bfae;
 }
 
 .st-about-version {

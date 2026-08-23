@@ -36,6 +36,7 @@
       }
     ],
     "win": {
+      "icon": "public/brand/candlescope-mark-compact.svg",
       "target": [
         "dir"
       ]

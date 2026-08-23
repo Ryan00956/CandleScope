@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" fill="none">
+  <title>CandleScope compact mark</title>
+  <defs><linearGradient id="tile" x1="112" y1="70" x2="902" y2="954" gradientUnits="userSpaceOnUse"><stop stop-color="#0b2138"/><stop offset="1" stop-color="#04101f"/></linearGradient></defs>
+  <rect width="1024" height="1024" rx="224" fill="url(#tile)"/>
+  <g stroke="#f8fafc" stroke-width="22" stroke-linecap="round">
+    <path d="M525.12 136.23 A376 376 0 0 0 154.41 628.20"/><path d="M498.88 887.77 A376 376 0 0 0 869.59 395.80"/>
+    <path d="M496.09 208.42 A304 304 0 0 0 215.79 580.39"/><path d="M527.91 815.58 A304 304 0 0 0 808.21 443.61"/>
+  </g>
+  <g fill="#1473e6"><circle cx="628.20" cy="154.41" r="23"/><circle cx="733.01" cy="207.84" r="23"/><circle cx="816.16" cy="290.99" r="23"/><circle cx="395.80" cy="869.59" r="23"/><circle cx="290.99" cy="816.16" r="23"/><circle cx="207.84" cy="733.01" r="23"/></g>
+  <path d="M374 357V667" stroke="#12bfae" stroke-width="24"/><path d="M512 272V752" stroke="#f8fafc" stroke-width="24"/><path d="M650 357V667" stroke="#12bfae" stroke-width="24"/>
+  <rect x="322" y="421" width="104" height="182" fill="#12bfae"/><rect x="460" y="370" width="104" height="284" fill="#f8fafc"/><rect x="598" y="421" width="104" height="182" fill="#12bfae"/>
+</svg>

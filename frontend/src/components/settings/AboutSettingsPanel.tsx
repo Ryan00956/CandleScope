@@ -1,3 +1,5 @@
+import BrandMark from "../brand/BrandMark.js";
+
 export type AboutSettingsPanelProps = Record<string, never>;
 
 export default function AboutSettingsPanel(props: AboutSettingsPanelProps) {
@@ -6,8 +8,12 @@ export default function AboutSettingsPanel(props: AboutSettingsPanelProps) {
         <>
             <div className="st-group">
                 <div className="st-about-header">
-                    <div className="st-about-logo">📈</div>
-                    <div className="st-about-name">CandleScope</div>
+                    <div className="st-about-logo">
+                        <BrandMark size={88} label="CandleScope" variant="full" />
+                    </div>
+                    <div className="st-about-name">
+                        <span>Candle</span><span className="st-about-name-accent">Scope</span>
+                    </div>
                     <div className="st-about-version">v0.2.0</div>
                     <div className="st-about-tagline">开源 K 线看盘・实时行情</div>
                 </div>

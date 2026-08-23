@@ -21,6 +21,7 @@ import {
   MarketDataWorkspaceContext,
   type MarketDataWorkspaceResources,
 } from "./marketDataWorkspaceContext.js";
+import { MarketDataWorkspaceEffectGuard } from "./marketDataWorkspaceLifecycle.js";
 import { desktopWindowManager } from "../../desktop/desktopWindowManager.js";
 import { CHART_WORKSPACE_FEATURE_FLAGS } from "../chart-workspace/chartWorkspaceCapacity.js";
 import { defaultWorkspaceBus } from "../chart-workspace/workspaceBus.js";
@@ -79,6 +80,7 @@ export function MarketDataWorkspaceProvider({
       }),
     };
   });
+  const [resourceEffectGuard] = useState(() => new MarketDataWorkspaceEffectGuard());
 
   useEffect(() => {
     if (!resources.indicatorStreamCoordinator) return undefined;
@@ -180,13 +182,8 @@ export function MarketDataWorkspaceProvider({
   }, [batchStreamEnabled, resources]);
 
   useEffect(() => {
-    return () => {
-      resources.streamCoordinator.closeAll();
-      resources.requestCoordinator?.closeAll();
-      resources.indicatorStreamCoordinator?.closeAll();
-      resources.workScheduler?.dispose();
-    };
-  }, [resources]);
+    return resourceEffectGuard.mount(resources);
+  }, [resourceEffectGuard, resources]);
 
   return (
     <MarketDataWorkspaceContext.Provider value={resources}>

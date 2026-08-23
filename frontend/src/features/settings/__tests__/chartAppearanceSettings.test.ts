@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { normalizeSettings, parseStoredSettings } from "../chartAppearanceSettings.js";
+import {
+  normalizeSettings,
+  parseStoredSettings,
+  settingsFromStorageChange,
+} from "../chartAppearanceSettings.js";
 
 test("settings normalization backfills cache budget defaults for old saved settings", () => {
   const settings = normalizeSettings({
@@ -25,6 +29,26 @@ test("settings normalization backfills cache budget defaults for old saved setti
   assert.equal(settings.frontendCacheBudgetBytes, 64 * 1024 * 1024);
   assert.equal(settings.sqliteStorageBudgetBytes, null);
   assert.equal(settings.storageRowLimitsEnabled, false);
+  assert.equal(settings.locale, "zh-CN");
+});
+
+test("settings normalization defaults locale to zh-CN and accepts English aliases", () => {
+  assert.equal(normalizeSettings({}).locale, "zh-CN");
+  assert.equal(normalizeSettings({ locale: "en" }).locale, "en");
+  assert.equal(normalizeSettings({ locale: "en-US" }).locale, "en");
+  assert.equal(normalizeSettings({ locale: "zh-Hans" }).locale, "zh-CN");
+  assert.equal(normalizeSettings({ locale: "fr-FR" }).locale, "zh-CN");
+});
+
+test("settings storage changes synchronize the complete settings snapshot across windows", () => {
+  const incoming = settingsFromStorageChange("candlescope-settings", JSON.stringify({
+    theme: "light",
+    locale: "en-US",
+  }));
+  assert.equal(incoming?.theme, "light");
+  assert.equal(incoming?.locale, "en");
+  assert.equal(settingsFromStorageChange("unrelated-key", "{}"), null);
+  assert.equal(settingsFromStorageChange(null, null)?.locale, "zh-CN");
 });
 
 test("settings normalization preserves supported chart types and rejects stale values", () => {

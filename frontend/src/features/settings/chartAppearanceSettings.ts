@@ -1,4 +1,10 @@
 import { useEffect, useState } from "react";
+import {
+  DEFAULT_LOCALE,
+  hydrateLocale,
+  normalizeLocale,
+  type LocaleId,
+} from "../../i18n/index.js";
 import { normalizeMainChartType } from "../../shared/mainChartTypes.js";
 import type { Dispatch, SetStateAction } from "react";
 import type { MainChartType } from "../../shared/mainChartTypes.js";
@@ -38,6 +44,7 @@ export interface ChartSettings extends Record<string, unknown> {
   sqliteStorageBudgetBytes: number | null;
   storageRowLimitsEnabled: boolean;
   timezone?: string;
+  locale: LocaleId;
 }
 
 export const DEFAULT_SETTINGS: ChartSettings = {
@@ -63,6 +70,7 @@ export const DEFAULT_SETTINGS: ChartSettings = {
   frontendCacheBudgetBytes: 64 * 1024 * 1024,
   sqliteStorageBudgetBytes: null,
   storageRowLimitsEnabled: false,
+  locale: DEFAULT_LOCALE,
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -169,6 +177,7 @@ export function normalizeSettings(settings: unknown = {}): ChartSettings {
   normalized.storageRowLimitsEnabled = typeof source.storageRowLimitsEnabled === "boolean"
     ? source.storageRowLimitsEnabled
     : DEFAULT_SETTINGS.storageRowLimitsEnabled;
+  normalized.locale = normalizeLocale(source.locale ?? normalized.locale);
   return normalized;
 }
 
@@ -186,6 +195,14 @@ export function parseStoredSettings(saved: string | null | undefined): ChartSett
   }
 }
 
+export function settingsFromStorageChange(
+  key: string | null,
+  newValue: string | null,
+): ChartSettings | null {
+  if (key !== SETTINGS_STORAGE_KEY && key !== null) return null;
+  return parseStoredSettings(newValue);
+}
+
 function loadSettings(): ChartSettings {
   if (typeof localStorage === "undefined") return normalizeSettings();
   try {
@@ -193,6 +210,10 @@ function loadSettings(): ChartSettings {
   } catch {
     return normalizeSettings();
   }
+}
+
+export function readPersistedLocale(): LocaleId {
+  return loadSettings().locale;
 }
 
 export interface ChartSettingsRuntime {
@@ -223,6 +244,20 @@ export function useChartSettingsRuntime(): ChartSettingsRuntime {
   }, []);
 
   useEffect(() => {
+    if (typeof window === "undefined") return undefined;
+    const handleStorageChange = (event: StorageEvent) => {
+      if (event.storageArea && event.storageArea !== window.localStorage) return;
+      const incoming = settingsFromStorageChange(event.key, event.newValue);
+      if (!incoming) return;
+      setSettings((current) => (
+        JSON.stringify(current) === JSON.stringify(incoming) ? current : incoming
+      ));
+    };
+    window.addEventListener("storage", handleStorageChange);
+    return () => window.removeEventListener("storage", handleStorageChange);
+  }, []);
+
+  useEffect(() => {
     const root = document.documentElement;
     root.setAttribute("data-theme", resolvedTheme);
     if (settings.theme === "custom") {
@@ -234,6 +269,7 @@ export function useChartSettingsRuntime(): ChartSettingsRuntime {
     }
     root.style.setProperty("--candle-up", settings.upColor);
     root.style.setProperty("--candle-down", settings.downColor);
+    hydrateLocale(settings.locale);
     try {
       localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
     } catch {

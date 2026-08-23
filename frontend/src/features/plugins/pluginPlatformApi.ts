@@ -133,7 +133,11 @@ export function pluginManagementAvailable(): boolean {
 }
 
 export class PluginPlatformApiError extends Error {
-  constructor(message: string, readonly status: number) {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code: string | null = null,
+  ) {
     super(message);
     this.name = "PluginPlatformApiError";
   }
@@ -150,7 +154,11 @@ async function responseJson(response: Response): Promise<unknown> {
       : detail && typeof detail === "object" && "message" in detail && typeof (detail as { message?: unknown }).message === "string"
         ? String((detail as { message: string }).message)
         : `Plugin Platform request failed (${response.status})`;
-    throw new PluginPlatformApiError(message, response.status);
+    const code = detail && typeof detail === "object" && "code" in detail
+      && typeof (detail as { code?: unknown }).code === "string"
+      ? String((detail as { code: string }).code)
+      : null;
+    throw new PluginPlatformApiError(message, response.status, code);
   }
   return payload;
 }
@@ -382,10 +390,10 @@ export function parsePluginSettingsValue(response: unknown): Record<string, Json
   return value;
 }
 
-export async function invokePluginCommand(id: string, input: Record<string, JsonValue>): Promise<JsonValue> {
+export async function invokePluginCommand(id: string, input: Record<string, JsonValue>, locale: string): Promise<JsonValue> {
   const payload = object(await managementRequest(`/manage/commands/${encodeURIComponent(id)}/invoke`, {
     method: "POST",
-    body: { input },
+    body: { input, locale },
     action: "invoke-command",
   }), "command");
   return safeJson(payload.result, "command.result");

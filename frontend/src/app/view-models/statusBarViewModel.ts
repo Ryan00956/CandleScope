@@ -18,6 +18,7 @@ export function buildStatusBarViewModel({
     dataSource: marketView.dataSource || "",
     exchangeLabel,
     marketLabel,
+    wsStatus: marketView.wsStatus,
     wsStatusLabel,
     barCount: marketStatus.barCount,
     loadingMoreLeft: marketStatus.loadingMoreLeft,

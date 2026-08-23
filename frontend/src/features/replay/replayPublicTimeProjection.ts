@@ -2,6 +2,7 @@ import type {
   ReplayPublicTimeBatchResponse,
 } from "./replayIntegrityModel.js";
 import type { ReplayV2TimeDisclosurePolicy } from "./replayV2Types.js";
+import { t } from "../../i18n/index.js";
 
 export const REPLAY_PUBLIC_TIME_BATCH_SIZE = 2_000;
 export const REPLAY_PUBLIC_TIME_MAX_TIMELINE_VALUES = 20_000;
@@ -71,7 +72,7 @@ function needsServerProjection(scope: ReplayPublicTimeProjectionScope): boolean 
 }
 
 function projectionError(cause: unknown): string {
-  return cause instanceof Error ? cause.message : "公开时间投影失败";
+  return cause instanceof Error ? cause.message : t("core.error.replayPublicTime");
 }
 
 function isAbortError(cause: unknown): boolean {

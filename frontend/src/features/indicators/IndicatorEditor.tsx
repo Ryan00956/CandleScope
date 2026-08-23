@@ -9,6 +9,8 @@
  *   - Code snippet templates for common indicators
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { t } from "../../i18n/index.js";
+import { useLocale } from "../../i18n/useLocale.js";
 import Editor from "@monaco-editor/react";
 import type * as Monaco from "monaco-editor";
 import {
@@ -87,6 +89,7 @@ export default function IndicatorEditor({
   previewState, // { id: string | null, error: string | null, visible: boolean, isComputing: boolean }
   onToggleVisibility
 }: IndicatorEditorProps) {
+  useLocale();
   const [name, setName] = useState(indicator?.name || "My Indicator");
   const [script, setScript] = useState(indicator?.script || "");
   const [language, setLanguage] = useState(indicator?.language || "");
@@ -242,7 +245,7 @@ export default function IndicatorEditor({
     if (!allowedSecurityModes.includes(nextMode)) return;
     if (
       nextMode === "unsafe" &&
-      !window.confirm("不安全模式允许脚本执行任意 Python 代码，包括访问文件、网络和交易 API。仅在本机运行完全信任的脚本时启用。")
+      !window.confirm(t("indicator.editor.unsafeConfirm"))
     ) {
       return;
     }
@@ -304,8 +307,8 @@ export default function IndicatorEditor({
         <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
           <span className="indicator-editor-title" style={{ fontWeight: 600, fontSize: '15px', color: 'var(--text-primary)', letterSpacing: '0.5px' }}>
             {readOnly
-              ? "内置指标参考实现"
-              : `${displayedLanguage?.name || requestedLanguageId || "脚本运行时"} 指标编辑器`}
+              ? t("indicator.editor.builtinRef")
+              : t("indicator.editor.title", { language: displayedLanguage?.name || requestedLanguageId || t("indicator.editor.fallbackLanguage") })}
           </span>
           <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>{name}</span>
         </div>
@@ -317,7 +320,7 @@ export default function IndicatorEditor({
                 if (previewState.id) onToggleVisibility(previewState.id);
               }}
               style={{ background: 'transparent', color: 'var(--text-secondary)', border: '1px solid var(--border-color)', padding: '6px 10px', borderRadius: '6px', cursor: 'pointer', display: 'flex', alignItems: 'center', transition: 'all 0.15s' }}
-              title={previewState.visible ? "隐藏图表指标" : "显示图表指标"}
+              title={previewState.visible ? t("indicator.editor.hideOnChart") : t("indicator.editor.showOnChart")}
             >
               {previewState.visible ? "👁" : "👁‍🗨"}
             </button>
@@ -339,7 +342,7 @@ export default function IndicatorEditor({
               }}
               style={{ background: 'var(--accent-blue)', color: '#fff', border: 'none', padding: '6px 16px', borderRadius: '6px', fontWeight: 600, cursor: 'pointer', fontSize: '13px', boxShadow: '0 2px 8px rgba(59, 130, 246, 0.3)', transition: 'all 0.2s ease', marginLeft: '8px' }}
             >
-              复制为自定义
+              {t("indicator.editor.fork")}
             </button>
           ) : (
             <>
@@ -349,7 +352,7 @@ export default function IndicatorEditor({
                 onClick={handlePreview}
                 style={{ background: 'var(--bg-tertiary)', color: 'var(--accent-blue)', border: '1px solid var(--accent-blue)', padding: '6px 16px', borderRadius: '6px', fontWeight: 600, cursor: 'pointer', fontSize: '13px', transition: 'all 0.2s ease', display: 'flex', alignItems: 'center', gap: '6px' }}
               >
-                {previewState?.isComputing ? "⏳ 计算中..." : "▶ 运行到图表"}
+                {previewState?.isComputing ? t("indicator.editor.computing") : t("indicator.editor.run")}
               </button>
               <button
                 className="indicator-editor-save"
@@ -357,7 +360,7 @@ export default function IndicatorEditor({
                 onClick={handleSave}
                 style={{ background: 'var(--accent-blue)', color: '#fff', border: 'none', padding: '6px 16px', borderRadius: '6px', fontWeight: 600, cursor: 'pointer', fontSize: '13px', boxShadow: '0 2px 8px rgba(59, 130, 246, 0.3)', transition: 'all 0.2s ease', marginLeft: '8px' }}
               >
-                💾 保存并关闭
+                {t("indicator.editor.save")}
               </button>
             </>
           )}
@@ -366,7 +369,7 @@ export default function IndicatorEditor({
             className="indicator-editor-back"
             onClick={onBack}
             style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '20px', display: 'flex', alignItems: 'center', justifyContent: 'center', width: '28px', height: '28px', borderRadius: '4px', lineHeight: 1 }}
-            title="关闭编辑器"
+            title={t("indicator.editor.close")}
           >
             ×
           </button>
@@ -376,7 +379,7 @@ export default function IndicatorEditor({
       <div style={{ padding: '24px', flex: 1, display: 'flex', flexDirection: 'column', overflowY: 'auto' }}>
         {/* Name input */}
         <div className="indicator-editor-field" style={{ marginBottom: '24px' }}>
-          <label style={{ display: 'block', fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '8px', fontWeight: 500 }}>指标名称</label>
+          <label style={{ display: 'block', fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '8px', fontWeight: 500 }}>{t("indicator.editor.name")}</label>
           <input
             type="text"
             value={name}
@@ -393,11 +396,11 @@ export default function IndicatorEditor({
         <div className="indicator-editor-code-label" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: '8px', marginTop: '-8px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
             <span style={{ fontSize: '13px', color: 'var(--text-secondary)', fontWeight: 500 }}>
-              {displayedLanguage?.name || requestedLanguageId || "脚本运行时"} 脚本
+              {t("indicator.editor.script", { language: displayedLanguage?.name || requestedLanguageId || t("indicator.editor.fallbackLanguage") })}
             </span>
             {!readOnly && (
               <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: 'var(--text-muted)' }}>
-                语言
+                {t("indicator.editor.language")}
                 <select
                   value={selectedLanguage?.id || requestedLanguageId}
                   onChange={handleLanguageChange}
@@ -406,7 +409,7 @@ export default function IndicatorEditor({
                 >
                   {missingRequestedLanguage && (
                     <option value={requestedLanguageId} disabled>
-                      {requestedLanguageId}（当前不可用）
+                      {t("indicator.editor.languageUnavailable", { language: requestedLanguageId })}
                     </option>
                   )}
                   {allowedRuntimeCatalog?.languages.map((descriptor) => (
@@ -422,7 +425,7 @@ export default function IndicatorEditor({
               </label>
             )}
             {!readOnly && editorProfile?.pyneEnhancements && <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: 'var(--text-muted)' }}>
-              模式
+              {t("indicator.editor.mode")}
               <select
                 value={securityMode}
                 onChange={handleSecurityModeChange}
@@ -435,7 +438,7 @@ export default function IndicatorEditor({
             </label>}
             {editorProfile?.pyneEnhancements && securityPolicy && (
               <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
-                默认 {securityPolicy.mode} · 超时 {securityPolicy.timeoutSeconds}s
+                {t("indicator.editor.policy", { mode: securityPolicy.mode, timeout: securityPolicy.timeoutSeconds })}
               </span>
             )}
             {selectedRuntime && (
@@ -446,21 +449,21 @@ export default function IndicatorEditor({
           </div>
           <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
             {editorProfile?.pyneEnhancements
-              ? <>输入 <code>ta.</code> <code>input.</code> <code>color.</code> 触发自动补全 · </>
+              ? <>{t("indicator.editor.hintPyne")} <code>ta.</code> <code>input.</code> <code>color.</code> {t("indicator.editor.hintComplete")} </>
               : editorProfile?.pineEnhancements
-                ? <>Pine v5/v6 · closed bars only · 输入 <code>ta.</code> <code>timeframe.</code> 触发补全 · </>
-              : "使用插件描述符声明的语言模式 · "}
-            <kbd style={{ background: 'var(--bg-tertiary)', padding: '1px 5px', borderRadius: '3px', fontSize: '10px', border: '1px solid var(--border-color)' }}>Ctrl+Enter</kbd> 运行
+                ? <>{t("indicator.editor.hintPine")} <code>ta.</code> <code>timeframe.</code> {t("indicator.editor.hintComplete")} </>
+              : <>{t("indicator.editor.hintPlugin")} </>}
+            <kbd style={{ background: 'var(--bg-tertiary)', padding: '1px 5px', borderRadius: '3px', fontSize: '10px', border: '1px solid var(--border-color)' }}>Ctrl+Enter</kbd> {t("indicator.editor.runKbd")}
           </span>
         </div>
         {runtimeCatalogError && (
           <div style={{ marginBottom: '8px', color: 'var(--candle-down)', fontSize: '12px' }}>
-            运行时目录不可用：{runtimeCatalogError}
+            {t("indicator.editor.runtimeMissing", { error: runtimeCatalogError })}
           </div>
         )}
         {editorProfile?.pyneEnhancements && securityMode === "unsafe" && (
           <div style={{ marginBottom: '8px', padding: '8px 10px', border: '1px solid rgba(239, 68, 68, 0.35)', borderRadius: '6px', color: 'var(--candle-down)', background: 'rgba(239, 68, 68, 0.08)', fontSize: '12px' }}>
-            unsafe mode 会允许脚本访问完整 Python 能力，包括文件、网络和交易 API。只运行完全信任的本机脚本。
+            {t("indicator.editor.unsafeHint")}
           </div>
         )}
         <div className="indicator-editor-monaco" style={{ flex: 1, minHeight: 0, border: "1px solid rgba(255, 255, 255, 0.1)", borderRadius: "10px", overflow: "hidden", boxShadow: "0 8px 32px rgba(0, 0, 0, 0.2), inset 0 2px 4px rgba(0, 0, 0, 0.2)" }}>
@@ -496,30 +499,30 @@ export default function IndicatorEditor({
       {/* Error Console */}
       <div className="indicator-editor-console" style={{ padding: '8px 24px', background: 'var(--bg-primary)', borderTop: '1px solid var(--border-color)', minHeight: '40px', flexShrink: 0, display: 'flex', alignItems: 'center', fontFamily: "'JetBrains Mono', monospace", fontSize: '12px', overflowY: 'auto' }}>
         {readOnly ? (
-          <span style={{ color: 'var(--text-muted)' }}>内置指标由 IndicatorEngine 计算；这里仅展示参考实现，修改代码不会影响图表。需要改代码时请先复制为自定义指标。</span>
+          <span style={{ color: 'var(--text-muted)' }}>{t("indicator.editor.builtinHint")}</span>
         ) : !languageReady ? (
           <span style={{ color: 'var(--candle-down)' }}>
             {runtimeCatalogError
-              ? "❌ 无法发现可用脚本运行时"
+              ? t("indicator.editor.noRuntime")
               : allowedRuntimeCatalog && requestedLanguageId
-                ? `❌ 保存的脚本语言 ${requestedLanguageId} 当前不可用；请选择可用语言后才能运行或保存`
+                ? t("indicator.editor.savedLangUnavailable", { language: requestedLanguageId })
                 : allowedRuntimeCatalog
-                  ? "❌ 当前没有可用脚本运行时"
-                  : "⏳ 正在发现脚本运行时..."}
+                  ? t("indicator.editor.noRuntimeAvailable")
+                  : t("indicator.editor.discovering")}
           </span>
         ) : previewState?.error ? (
           <span style={{ color: 'var(--candle-down)', whiteSpace: 'pre-wrap' }}>❌ {previewState.error}</span>
         ) : previewState?.isComputing ? (
-          <span style={{ color: 'var(--accent-blue)' }}>⏳ 正在计算指标数据...</span>
+          <span style={{ color: 'var(--accent-blue)' }}>{t("indicator.editor.computingData")}</span>
         ) : previewState?.id ? (
-          <span style={{ color: 'var(--candle-up)' }}>✅ 运行成功，已应用至图表</span>
+          <span style={{ color: 'var(--candle-up)' }}>{t("indicator.editor.runOk")}</span>
         ) : (
           <span style={{ color: 'var(--text-muted)' }}>
             {editorProfile?.pyneEnhancements
               ? <>💡 Pyne API: <code>ta.sma()</code> <code>ta.ema()</code> <code>ta.rsi()</code> <code>plot()</code> <code>input.int()</code></>
               : editorProfile?.pineEnhancements
                 ? <>💡 Pine v5/v6 closed-bar API: <code>ta.sma()</code> <code>plot()</code> <code>plotshape()</code> <code>input.int()</code></>
-              : `💡 ${selectedLanguage?.name || "社区语言"} 由 ${selectedRuntime?.name || "已路由插件"} 执行`}
+              : t("indicator.editor.communityRuntime", { language: selectedLanguage?.name || t("indicator.editor.fallbackLanguage"), runtime: selectedRuntime?.name || "plugin" })}
           </span>
         )}
       </div>

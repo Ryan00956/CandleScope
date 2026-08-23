@@ -84,6 +84,8 @@ import {
   buildFillRenderEntries,
   canUseTrailingSeriesUpdate,
 } from "../chart-adapter/chartSeriesData";
+import { t, type LocaleId, type MessageKey } from "../i18n/index.js";
+import { useLocale } from "../i18n/useLocale.js";
 import { normalizeMainChartType } from "../shared/mainChartTypes";
 import { parseIntervalSeconds } from "../utils/intervals";
 import {
@@ -485,11 +487,15 @@ const PRICE_SCALE_CONTEXT_MENU_HEIGHT = 236;
 const PRICE_SCALE_CONTEXT_MENU_MARGIN = 8;
 const EMPTY_DERIVED_AUXILIARY_INDEX = buildDisplaySourceTimeIndex([]);
 const EMPTY_INDICATOR_BAR_COLOR_MAP = buildIndicatorBarColorMap([]);
-const PRICE_SCALE_MODES = [
-  { value: 0, label: "常规", labelEn: "Regular" },
-  { value: 1, label: "对数", labelEn: "Logarithmic" },
-  { value: 2, label: "百分比", labelEn: "Percentage" },
-  { value: 3, label: "基准 100", labelEn: "Indexed to 100" },
+const PRICE_SCALE_MODES: readonly {
+  value: number;
+  labelKey: MessageKey;
+  labelEn: string;
+}[] = [
+  { value: 0, labelKey: "scale.regular", labelEn: "Regular" },
+  { value: 1, labelKey: "scale.log", labelEn: "Logarithmic" },
+  { value: 2, labelKey: "scale.percent", labelEn: "Percentage" },
+  { value: 3, labelKey: "scale.indexed", labelEn: "Indexed to 100" },
 ];
 
 function resolvePaneHeightLayout(
@@ -884,34 +890,40 @@ function resolveProjectionRuntime(
 function buildSyntheticChartNotice(
   chartType: MainChartType,
   settings: ProjectionSettings = {},
+  locale: LocaleId,
 ): { title: string; detail: string } {
   if (chartType === "point-and-figure") {
     const size = settings.mode === "traditional"
-      ? `固定箱格 ${settings.boxSize}`
-      : `ATR ${settings.atrLength}`;
+      ? t("chart.fixedBox", { size: String(settings.boxSize ?? "") }, locale)
+      : t("chart.atrSize", { length: String(settings.atrLength ?? "") }, locale);
     return {
       title: "Point & Figure · Close",
-      detail: `${size} · ${settings.reversalAmount} 格反转`,
+      detail: t("chart.pnfDetail", {
+        size,
+        amount: String(settings.reversalAmount ?? ""),
+      }, locale),
     };
   }
   if (chartType === "kagi") {
     const size = settings.mode === "traditional"
-      ? `固定反转距离 ${settings.reversalAmount}`
-      : `ATR ${settings.atrLength}`;
+      ? t("chart.fixedReversal", { amount: String(settings.reversalAmount ?? "") }, locale)
+      : t("chart.atrSize", { length: String(settings.atrLength ?? "") }, locale);
     return {
       title: "Kagi · Close",
-      detail: `${size} · 经典 Yang/Yin 粗细`,
+      detail: t("chart.kagiDetail", { size }, locale),
     };
   }
   if (chartType === "line-break") {
     return {
       title: "Line Break · Close",
-      detail: `${settings.numberOfLines} 线突破`,
+      detail: t("chart.lineBreakDetail", {
+        count: String(settings.numberOfLines ?? ""),
+      }, locale),
     };
   }
   const size = settings.mode === "traditional"
-    ? `固定砖高 ${settings.boxSize}`
-    : `ATR ${settings.atrLength}`;
+    ? t("chart.fixedBrick", { size: String(settings.boxSize ?? "") }, locale)
+    : t("chart.atrSize", { length: String(settings.atrLength ?? "") }, locale);
   return { title: "Renko · Close", detail: size };
 }
 
@@ -1305,6 +1317,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   priceScaleMode = 0,
   onPriceScaleModeChange,
 }: SingleChartPanesProps, ref) {
+  const locale = useLocale();
   const drawingFontMetricRevision = useDrawingFontMetricRevision();
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -1745,7 +1758,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     renkoBoxSizeMode,
     resolvedChartType,
   ]);
-  const syntheticChartNotice = buildSyntheticChartNotice(resolvedChartType, projectionSettings);
+  const syntheticChartNotice = buildSyntheticChartNotice(resolvedChartType, projectionSettings, locale);
   const projectionSettingsKey = JSON.stringify(projectionSettings);
   const surfaceConfigKey = resolvedAxisMode === "derived-ordinal"
     ? `${resolvedAxisMode}:${resolvedChartType}:${projectionSettingsKey}`
@@ -5293,7 +5306,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
           <PaneControlBar
             key={`controls-${paneId}`}
             paneId={paneId}
-            paneLabel={pane?.label || `${symbol} 主图`}
+            paneLabel={pane?.label || t("legend.mainPane", { symbol })}
             canMoveUp={panePosition > 0}
             canMoveDown={panePosition >= 0 && panePosition < activePaneIds.length - 1}
             canCollapse={collapsed || activePaneIds.length - collapsedPaneIds.length > 1}
@@ -5323,7 +5336,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         <div className="synthetic-chart-notice" role="status">
           <strong>{syntheticChartNotice.title}</strong>
           <span>
-            {`${syntheticChartNotice.detail} · 指标按原始 K 线映射 · 成交量仅落末个合成点 · 绘图支持绝对时间未来锚点（含自由笔与荧光笔）`}
+            {`${syntheticChartNotice.detail} · ${t("workspace.chartNotice")}`}
           </span>
         </div>
       )}
@@ -5343,8 +5356,8 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
             }}
           >
             <span className="price-scale-menu-check">{contextMenu.autoScale ? "✓" : ""}</span>
-            <span>自动缩放</span>
-            <span className="price-scale-menu-label-en">Auto Scale</span>
+            <span>{t("scale.auto", {}, locale)}</span>
+            {locale === "en" ? null : <span className="price-scale-menu-label-en">{t("scale.auto", {}, "en")}</span>}
           </button>
           {(contextMenu.paneId !== "main" || onInvertScaleChange) && (
             <button
@@ -5361,8 +5374,8 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
               }}
             >
               <span className="price-scale-menu-check">{contextMenu.invertScale ? "✓" : ""}</span>
-              <span>反转坐标轴</span>
-              <span className="price-scale-menu-label-en">Invert Scale</span>
+              <span>{t("scale.invert", {}, locale)}</span>
+              {locale === "en" ? null : <span className="price-scale-menu-label-en">{t("scale.invert", {}, "en")}</span>}
             </button>
           )}
           <div className="price-scale-menu-divider" />
@@ -5381,8 +5394,8 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
               }}
             >
               <span className="price-scale-menu-check">{contextMenu.mode === mode.value ? "✓" : ""}</span>
-              <span>{mode.label}</span>
-              <span className="price-scale-menu-label-en">{mode.labelEn}</span>
+              <span>{t(mode.labelKey, {}, locale)}</span>
+              {locale === "en" ? null : <span className="price-scale-menu-label-en">{mode.labelEn}</span>}
             </button>
           ))}
         </div>
@@ -5445,7 +5458,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       {loading && (
         <div className="loading-overlay">
           <div className="loading-spinner" />
-          <span className="loading-text">Loading {symbol} {interval} klines...</span>
+          <span className="loading-text">{t("chart.loadingKlines", { symbol, interval }, locale)}</span>
         </div>
       )}
     </div>

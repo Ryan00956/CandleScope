@@ -77,6 +77,39 @@ def test_manifest_schema_and_python_model_accept_the_same_positive_example() -> 
     assert parsed.canonical_sha256 == FROZEN_MANIFEST_CANONICAL_SHA256
 
 
+def test_manifest_localizations_round_trip_without_replacing_default_text() -> None:
+    schema = manifest_schema()
+    value = _read(EXAMPLES / "hello-command.manifest.json")
+    value["contributions"][0]["configuration"]["localizations"] = {
+        "zh-CN": {
+            "title": "问候",
+            "schema": {"properties": {"name": {"title": "名称"}}},
+        }
+    }
+
+    jsonschema.validate(value, schema)
+    parsed = PluginManifest.from_wire(value)
+    assert parsed.contributions[0].title == "Say hello"
+    assert parsed.contributions[0].localizations["zh-CN"]["title"] == "问候"
+    assert "localizations" not in parsed.contributions[0].configuration
+    assert parsed.to_wire() == value
+
+    constructed = copy.deepcopy(parsed)
+    assert "localizations" not in constructed.contributions[0].to_wire(
+        schema_version=2,
+    )
+    jsonschema.validate(constructed.to_wire(), schema)
+
+    invalid = copy.deepcopy(value)
+    invalid["contributions"][0]["localizations"] = invalid["contributions"][0][
+        "configuration"
+    ].pop("localizations")
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(invalid, schema)
+    with pytest.raises(PlatformContractError, match="manifest v2"):
+        PluginManifest.from_wire(invalid)
+
+
 @pytest.mark.parametrize(
     "name",
     [
@@ -205,9 +238,23 @@ def test_host_request_models_have_strict_round_trip_wire_encoders() -> None:
             user_action=True,
             generation=1,
             trace_id="trace-round-trip",
+            locale="zh-CN",
         ),
     )
 
     assert HandshakeRequest.from_wire(handshake.to_wire()) == handshake
     assert ActivationRequest.from_wire(activation.to_wire()) == activation
     assert InvokeRequest.from_wire(invocation.to_wire()) == invocation
+    assert invocation.to_wire()["requestContext"]["locale"] == "zh-CN"
+
+
+@pytest.mark.parametrize("locale", ["", "zh_CN", "x" * 65, "-en", "en-"])
+def test_request_context_rejects_invalid_locale_identifiers(locale: str) -> None:
+    with pytest.raises(PlatformContractError, match="locale"):
+        RequestContext(
+            contribution_id="hello",
+            user_action=True,
+            generation=1,
+            trace_id="trace-invalid-locale",
+            locale=locale,
+        ).to_wire()

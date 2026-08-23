@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import { exportDrawingDocument, importSavedDrawings } from "../drawings/core/drawingCodec.js";
 import { drawingDocumentRepository } from "../drawings/persistence/drawingDocumentRepository.js";
 import { loadActiveIndicators, saveActiveIndicators } from "../indicators/activeIndicatorStore.js";
@@ -29,10 +30,10 @@ export async function captureLocalProjectState(
 ): Promise<Record<string, unknown>> {
   const loaded = await drawingDocumentRepository.load(drawingScope(manifest));
   if (loaded.status === "invalid" || loaded.status === "unavailable") {
-    throw new Error("绘图存储当前不可读，项目包已停止导出以避免静默丢图");
+    throw new Error(t("local.err.drawUnread"));
   }
   const drawings = loaded.status === "found" ? exportDrawingDocument(loaded.document) : [];
-  if (drawings === null) throw new Error("绘图无法序列化，项目包未导出");
+  if (drawings === null) throw new Error(t("local.err.drawSerialize"));
   return {
     schema_version: 1,
     dataset_id: manifest.dataset_id,
@@ -51,11 +52,11 @@ export async function restoreLocalProjectState(
   const state = asRecord(value);
   if (state === null || state.schema_version !== 1 || !Array.isArray(state.events)
     || !Array.isArray(state.indicators) || !Array.isArray(state.drawings)) {
-    throw new Error("项目包中的界面状态无效");
+    throw new Error(t("local.err.projectUi"));
   }
   const events = state.events.map((event) => {
     const record = asRecord(event);
-    if (record === null) throw new Error("项目包包含无效事件");
+    if (record === null) throw new Error(t("local.err.projectEvent"));
     return { ...record, dataset_id: manifest.dataset_id, data_epoch: manifest.data_epoch };
   });
   localStorage.setItem(buildLocalAnalysisStorageKey({
@@ -72,7 +73,7 @@ export async function restoreLocalProjectState(
     indicatorKey(manifest),
   );
   const document = importSavedDrawings(drawingScope(manifest), state.drawings);
-  if (document === null) throw new Error("项目包中的绘图状态无效");
+  if (document === null) throw new Error(t("local.err.projectDraw"));
   await drawingDocumentRepository.putDocument(document);
   return state.settings === undefined ? null : normalizeSettings(state.settings);
 }

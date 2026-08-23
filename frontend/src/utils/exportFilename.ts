@@ -1,3 +1,5 @@
+import { t } from "../i18n/index.js";
+
 const EXPORT_EXTENSION_BY_FORMAT = {
   png: "png",
   jpeg: "jpg",
@@ -131,7 +133,7 @@ export function assertExportPixelBudget(
   if (pixels > maxPixels) {
     const megapixels = (pixels / 1_000_000).toFixed(1);
     const limit = (maxPixels / 1_000_000).toFixed(0);
-    throw new Error(`导出尺寸过大（约 ${megapixels}MP，限制 ${limit}MP）。请降低缩放倍率或缩小窗口后重试。`);
+    throw new Error(t("export.sizeTooLarge", { mp: megapixels, limit }));
   }
   return pixels;
 }

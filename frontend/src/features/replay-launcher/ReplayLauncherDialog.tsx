@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { t } from "../../i18n/index.js";
+import { useLocale } from "../../i18n/useLocale.js";
 import TrainingHubDialog from "../replay/components/TrainingHubDialog.js";
 import type { ReplayLaunchContext } from "../replay/replayV2Types.js";
 import {
@@ -19,6 +21,7 @@ export default function ReplayLauncherDialog({
   launchContext,
   onRequestClose,
 }: ReplayLauncherDialogProps) {
+  useLocale();
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const pendingReplayWindowRef = useRef<Window | null>(null);
   const [blockedUrl, setBlockedUrl] = useState<string | null>(null);
@@ -30,7 +33,7 @@ export default function ReplayLauncherDialog({
     const child = window.open("about:blank", "_blank");
     if (child === null) return;
     child.opener = null;
-    child.document.title = "CandleScope · 正在准备训练";
+    child.document.title = t("replay.launcher.preparing");
     pendingReplayWindowRef.current = child;
   }, []);
   const closeUnusedReplayWindow = useCallback(() => {
@@ -85,12 +88,11 @@ export default function ReplayLauncherDialog({
     };
   }, []);
 
-  const launchLabel = [
-    "已从实时行情带入自选快照；创建 Run 后仍由你选择首个商品。当前查看的是",
-    `${launchContext.exchange} · ${launchContext.market_type} · ${launchContext.symbol}`,
-    `· ${launchContext.display_interval}`,
-    `以及 ${launchContext.watchlist_snapshot.groups.length} 个结构化自选分组。`,
-  ].join(" ");
+  const launchLabel = t("replay.launcher.context", {
+    identity: `${launchContext.exchange} · ${launchContext.market_type} · ${launchContext.symbol}`,
+    interval: launchContext.display_interval,
+    count: launchContext.watchlist_snapshot.groups.length,
+  });
 
   return (
     <div
@@ -132,9 +134,9 @@ export default function ReplayLauncherDialog({
     >
       {blockedUrl !== null && (
         <div className="replay-launcher-popup-blocked" role="alert">
-          <span>浏览器阻止了新标签页。</span>
+          <span>{t("replay.launcher.blocked")}</span>
           <a href={blockedUrl} target="_blank" rel="noopener noreferrer">
-            点击进入已选择的训练
+            {t("replay.launcher.open")}
           </a>
         </div>
       )}

@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
-  PYTHON_HOST_OWNS_COPY,
   isPythonStrategyEntryEnabled,
   isPythonTrustedLocalEnabled,
+  pythonHostOwnsCopy,
 } from "../backtestFlags.js";
 
 describe("python strategy studio flag", () => {
@@ -24,8 +24,9 @@ describe("python strategy studio flag", () => {
   });
 
   it("states Host owns orders fills and reports", () => {
-    assert.match(PYTHON_HOST_OWNS_COPY, /Host/);
-    assert.match(PYTHON_HOST_OWNS_COPY, /成交/);
+    assert.match(pythonHostOwnsCopy("zh-CN"), /Host/);
+    assert.match(pythonHostOwnsCopy("zh-CN"), /成交/);
+    assert.doesNotMatch(pythonHostOwnsCopy("en"), /成交/);
   });
 
   it("keeps TRUSTED_LOCAL off unless the frontend flag is explicit", () => {

@@ -35,6 +35,8 @@ import { useReplayEntryCapability } from "../features/replay/useReplayEntryCapab
 import { useDrawingToolSelectionState } from "../features/drawings/drawingToolState.js";
 import { buildLiveReplayLaunchContext } from "../features/replay-launcher/replayLaunchContext.js";
 import AlertNotificationCenter from "../components/alerts/AlertNotificationCenter.js";
+import { t } from "../i18n/index.js";
+import { useLocale } from "../i18n/useLocale.js";
 import { requestAlertPanelOpen } from "../features/alerts/alertDeliveryClient.js";
 import AppProviders from "./AppProviders.js";
 import LiveChartCell from "./LiveChartCell.js";
@@ -107,6 +109,7 @@ function LiveWorkspaceApp() {
     longTaskKeys: new Set<string>(),
   });
   const settings = useChartSettingsRuntime();
+  const locale = useLocale();
   // The toolbar is window-global, so every chart interaction controller must
   // consume the same active tool instead of retaining a per-cell copy.
   const drawingToolSelection = useDrawingToolSelectionState();
@@ -127,12 +130,12 @@ function LiveWorkspaceApp() {
     void desktopWindowManager.getBootstrap().then((bootstrap) => {
       if (!cancelled) setDesktopBootstrap(bootstrap);
     }).catch((error: unknown) => {
-      if (!cancelled) setDesktopError(error instanceof Error ? error.message : "桌面壳握手失败");
+      if (!cancelled) setDesktopError(error instanceof Error ? error.message : t("shell.desktopHandshake", {}, locale));
     });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [locale]);
   useEffect(() => {
     if (!workspace.view.ready
       || desktopBootstrap.mode !== "native"
@@ -145,9 +148,9 @@ function LiveWorkspaceApp() {
     ).then((result) => {
       if (cancelled) return;
       setDesktopBootstrap(desktopWindowManager.cachedBootstrap);
-      setDesktopError(result.ok ? null : `${result.code}: ${result.message || "窗口拓扑被拒绝"}`);
+      setDesktopError(result.ok ? null : `${result.code}: ${result.message || t("shell.topologyRejected", {}, locale)}`);
     }).catch((error: unknown) => {
-      if (!cancelled) setDesktopError(error instanceof Error ? error.message : "窗口拓扑同步失败");
+      if (!cancelled) setDesktopError(error instanceof Error ? error.message : t("shell.topologySync", {}, locale));
     });
     return () => {
       cancelled = true;
@@ -156,6 +159,7 @@ function LiveWorkspaceApp() {
     desktopBootstrap.mode,
     desktopBootstrap.multiWindowEnabled,
     workspace.view.activeWorkspaceId,
+    locale,
     workspace.view.document,
     workspace.view.ready,
   ]);
@@ -343,13 +347,13 @@ function LiveWorkspaceApp() {
     if (!workspaceBus || !workspace.view.ready || !desktopWindowVisible) return undefined;
     let active = true;
     void workspaceBus.requestPreview(workspace.view.activeCellId).then((result) => {
-      if (active && !result.ok) setDesktopError(`${result.code}: ${result.message || "预览 lane 已满"}`);
+      if (active && !result.ok) setDesktopError(`${result.code}: ${result.message || t("shell.previewLaneFull", {}, locale)}`);
     });
     return () => {
       active = false;
       workspaceBus.releasePreview(workspace.view.activeCellId);
     };
-  }, [desktopWindowVisible, workspace.view.activeCellId, workspace.view.ready, workspaceBus]);
+  }, [desktopWindowVisible, locale, workspace.view.activeCellId, workspace.view.ready, workspaceBus]);
   useEffect(
     () => linkCoordinator.subscribeViewportIssue(setViewportLinkIssue),
     [linkCoordinator],
@@ -562,9 +566,9 @@ function LiveWorkspaceApp() {
       onMouseEnter={loadWorkspacePanel}
       onFocus={loadWorkspacePanel}
       onClick={() => setWorkspacePanelOpen((open) => !open)}
-      aria-label={`图表工作区：${workspace.view.activeWorkspaceName}，${workspace.view.layoutCellIds.length} 个图表`}
+      aria-label={t("workspace.toggleAria", { name: workspace.view.activeWorkspaceName, count: workspace.view.layoutCellIds.length }, locale)}
       aria-expanded={workspacePanelOpen}
-      title={`图表工作区 · ${workspace.view.activeWorkspaceName} · ${workspace.view.layoutCellIds.length} 图`}
+      title={t("workspace.toggleTitle", { name: workspace.view.activeWorkspaceName, count: workspace.view.layoutCellIds.length }, locale)}
     >
       <span className="workspace-toggle-icon" aria-hidden="true">
         <i />
@@ -577,6 +581,7 @@ function LiveWorkspaceApp() {
       </span>
     </button>
   ), [
+    locale,
     workspace.status.saveState,
     workspace.view.activeWorkspaceName,
     workspace.view.layoutCellIds.length,
@@ -670,7 +675,7 @@ function LiveWorkspaceApp() {
       {featureSurfacesHost && workspacePanelOpen && createPortal(
         <Suspense fallback={(
           <div className="workspace-panel-overlay">
-            <aside className="workspace-panel workspace-panel-loading" aria-label="正在加载图表工作区" />
+            <aside className="workspace-panel workspace-panel-loading" aria-label={t("shell.loadingWorkspace")} />
           </div>
         )}>
           <WorkspacePanel

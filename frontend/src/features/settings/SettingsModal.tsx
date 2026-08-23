@@ -1,5 +1,7 @@
 import { useState } from 'react';
 import DataWorkbenchModal from '../data-workbench/DataWorkbenchModal.js';
+import { t } from '../../i18n/index.js';
+import { useLocale } from '../../i18n/useLocale.js';
 import SettingsPanelHost from './SettingsPanelHost.js';
 import SettingsModalStyles from './SettingsModalStyles.js';
 import { buildSettingsPanelViewModel } from './settingsPanelViewModel.js';
@@ -36,6 +38,7 @@ export default function SettingsModal({
 }: SettingsModalProps) {
     const [activeCategory, setActiveCategory] = useState<SettingsCategory>('appearance');
     const [dataWorkbenchOpen, setDataWorkbenchOpen] = useState(false);
+    useLocale();
   const settingsRuntime = useSettingsRuntime({
         isOpen,
     settings,
@@ -67,7 +70,7 @@ export default function SettingsModal({
             <div className="st-panel" onClick={(event: MouseEvent<HTMLDivElement>) => event.stopPropagation()}>
                 {/* Sidebar */}
                 <nav className="st-sidebar">
-                    <div className="st-sidebar-title">设置</div>
+                    <div className="st-sidebar-title">{t("settings.title")}</div>
                     <div className="st-sidebar-nav">
                         {visibleCategories.map(cat => (
                             <button
@@ -76,13 +79,13 @@ export default function SettingsModal({
                                 onClick={() => setActiveCategory(cat.key)}
                             >
                                 <span className="st-nav-icon" aria-hidden="true">{cat.icon}</span>
-                                <span className="st-nav-label">{cat.label}</span>
+                                <span className="st-nav-label">{t(cat.labelKey)}</span>
                             </button>
                         ))}
                     </div>
                     <div className="st-sidebar-footer">
                         <button className="st-btn st-btn-primary st-btn-close" onClick={onClose}>
-                            保存并关闭
+                            {t("settings.saveAndClose")}
                         </button>
                     </div>
                 </nav>
@@ -92,9 +95,9 @@ export default function SettingsModal({
                     <div className="st-content-header">
                         <h2 className="st-content-title">
                             {activeCatObj.icon && <span>{activeCatObj.icon}</span>}
-                            {activeCatObj.label}
+                            {t(activeCatObj.labelKey)}
                         </h2>
-                        <button className="st-close-x" aria-label="关闭设置" onClick={onClose}>✕</button>
+                        <button className="st-close-x" aria-label={t("settings.close")} onClick={onClose}>✕</button>
                     </div>
                     <div className="st-content-body">
                         <SettingsPanelHost

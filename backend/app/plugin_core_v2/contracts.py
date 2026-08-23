@@ -5,7 +5,7 @@ from __future__ import annotations
 import ipaddress
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -77,6 +77,7 @@ _VIEW_FORMATS = frozenset(
     {"text", "number", "percent", "price", "boolean", "timestamp"}
 )
 _VIEW_FIELD = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
+_LOCALE_ID = re.compile(r"^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$")
 _DOMAIN = re.compile(
     r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$"
 )
@@ -503,6 +504,299 @@ def validate_settings_value(
     return value
 
 
+def _localized_text(
+    value: Any,
+    *,
+    maximum: int,
+    label: str,
+    plugin_id: str,
+    contribution_id: str,
+) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or len(value) > maximum
+    ):
+        _fail(
+            f"{label} must be bounded non-blank text",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    return value
+
+
+def _validate_schema_localization(
+    value: Any,
+    schema: dict[str, Any],
+    *,
+    plugin_id: str,
+    contribution_id: str,
+    depth: int = 0,
+) -> dict[str, Any]:
+    if not isinstance(value, dict) or not value or depth > 8:
+        _fail(
+            "schema localization is invalid",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    _exact_keys(
+        value,
+        allowed={"title", "description", "enumLabels", "properties", "items"},
+        label="schema localization",
+        plugin_id=plugin_id,
+        contribution_id=contribution_id,
+    )
+    result: dict[str, Any] = {}
+    if "title" in value:
+        result["title"] = _localized_text(
+            value["title"],
+            maximum=256,
+            label="localized schema title",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    if "description" in value:
+        result["description"] = _localized_text(
+            value["description"],
+            maximum=2_048,
+            label="localized schema description",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    if "enumLabels" in value:
+        labels = value["enumLabels"]
+        enum_values = schema.get("enum")
+        if (
+            not isinstance(labels, list)
+            or not isinstance(enum_values, list)
+            or not labels
+            or len(labels) != len(enum_values)
+            or len(labels) > 64
+        ):
+            _fail(
+                "localized schema enum labels do not match the declared enum",
+                plugin_id=plugin_id,
+                contribution_id=contribution_id,
+            )
+        result["enumLabels"] = [
+            _localized_text(
+                label,
+                maximum=256,
+                label="localized schema enum label",
+                plugin_id=plugin_id,
+                contribution_id=contribution_id,
+            )
+            for label in labels
+        ]
+    if "properties" in value:
+        properties = value["properties"]
+        schema_properties = schema.get("properties")
+        if (
+            not isinstance(properties, dict)
+            or not properties
+            or len(properties) > 128
+            or not isinstance(schema_properties, dict)
+            or not set(properties) <= set(schema_properties)
+        ):
+            _fail(
+                "localized schema properties do not match the declared schema",
+                plugin_id=plugin_id,
+                contribution_id=contribution_id,
+            )
+        result["properties"] = {
+            name: _validate_schema_localization(
+                localized,
+                schema_properties[name],
+                plugin_id=plugin_id,
+                contribution_id=contribution_id,
+                depth=depth + 1,
+            )
+            for name, localized in properties.items()
+        }
+    if "items" in value:
+        schema_items = schema.get("items")
+        if not isinstance(schema_items, dict):
+            _fail(
+                "localized schema items require declared array items",
+                plugin_id=plugin_id,
+                contribution_id=contribution_id,
+            )
+        result["items"] = _validate_schema_localization(
+            value["items"],
+            schema_items,
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+            depth=depth + 1,
+        )
+    if not result:
+        _fail(
+            "schema localization must contain display text",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    return result
+
+
+def _localized_labels(
+    value: Any,
+    known_ids: set[str],
+    *,
+    label: str,
+    plugin_id: str,
+    contribution_id: str,
+) -> dict[str, str]:
+    if (
+        not isinstance(value, dict)
+        or not value
+        or len(value) > 64
+        or not set(value) <= known_ids
+    ):
+        _fail(
+            f"{label} localization does not match declared ids",
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+    return {
+        key: _localized_text(
+            text,
+            maximum=256,
+            label=label,
+            plugin_id=plugin_id,
+            contribution_id=contribution_id,
+        )
+        for key, text in value.items()
+    }
+
+
+def _validate_contribution_localizations(
+    plugin_id: str,
+    item: Contribution,
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    embedded_declared = "localizations" in item.configuration
+    embedded = item.configuration.get("localizations")
+    if item.localizations and embedded_declared:
+        _fail(
+            "contribution localizations must use exactly one manifest location",
+            plugin_id=plugin_id,
+            contribution_id=item.id,
+        )
+    raw = item.localizations if item.localizations else embedded
+    if not raw:
+        return {}
+    if not isinstance(raw, dict) or len(raw) > 16 or any(
+        not isinstance(locale, str) or _LOCALE_ID.fullmatch(locale) is None
+        for locale in raw
+    ) or len({locale.lower() for locale in raw}) != len(raw):
+        _fail(
+            "contribution localization locales are invalid",
+            plugin_id=plugin_id,
+            contribution_id=item.id,
+        )
+    result: dict[str, Any] = {}
+    for locale, candidate in raw.items():
+        if not isinstance(candidate, dict) or not candidate:
+            _fail(
+                "contribution localization must be a non-empty object",
+                plugin_id=plugin_id,
+                contribution_id=item.id,
+            )
+        allowed = {"title"}
+        schema: dict[str, Any] | None = None
+        if item.kind == "command/1" and isinstance(config.get("inputSchema"), dict):
+            allowed.add("schema")
+            schema = config["inputSchema"]
+        elif item.kind == "settings/1":
+            allowed.add("schema")
+            schema = config["schema"]
+        elif item.kind == "view/1" and config.get("renderer") != "sandbox":
+            allowed.update({"fields", "emptyState"})
+        elif item.kind == "symbol-provider/1":
+            allowed.update({"displayName", "marketTypes"})
+        elif item.kind == "account-provider/1":
+            allowed.add("accounts")
+        _exact_keys(
+            candidate,
+            allowed=allowed,
+            label="contribution localization",
+            plugin_id=plugin_id,
+            contribution_id=item.id,
+        )
+        localized: dict[str, Any] = {}
+        if "title" in candidate:
+            localized["title"] = _localized_text(
+                candidate["title"],
+                maximum=256,
+                label="localized contribution title",
+                plugin_id=plugin_id,
+                contribution_id=item.id,
+            )
+        if "schema" in candidate:
+            if schema is None:
+                _fail(
+                    "schema localization requires a declared UI schema",
+                    plugin_id=plugin_id,
+                    contribution_id=item.id,
+                )
+            localized["schema"] = _validate_schema_localization(
+                candidate["schema"],
+                schema,
+                plugin_id=plugin_id,
+                contribution_id=item.id,
+            )
+        if "fields" in candidate:
+            localized["fields"] = _localized_labels(
+                candidate["fields"],
+                {field["field"] for field in config["fields"]},
+                label="view field",
+                plugin_id=plugin_id,
+                contribution_id=item.id,
+            )
+        if "emptyState" in candidate:
+            localized["emptyState"] = _localized_text(
+                candidate["emptyState"],
+                maximum=256,
+                label="localized empty state",
+                plugin_id=plugin_id,
+                contribution_id=item.id,
+            )
+        if "displayName" in candidate:
+            localized["displayName"] = _localized_text(
+                candidate["displayName"],
+                maximum=128,
+                label="localized provider display name",
+                plugin_id=plugin_id,
+                contribution_id=item.id,
+            )
+        if "marketTypes" in candidate:
+            localized["marketTypes"] = _localized_labels(
+                candidate["marketTypes"],
+                {market["id"] for market in config["marketTypes"]},
+                label="market type",
+                plugin_id=plugin_id,
+                contribution_id=item.id,
+            )
+        if "accounts" in candidate:
+            localized["accounts"] = _localized_labels(
+                candidate["accounts"],
+                {account["id"] for account in config["accounts"]},
+                label="paper account",
+                plugin_id=plugin_id,
+                contribution_id=item.id,
+            )
+        if not localized:
+            _fail(
+                "contribution localization must contain display text",
+                plugin_id=plugin_id,
+                contribution_id=item.id,
+            )
+        result[locale] = localized
+    normalized = normalize_json(result, path="contribution.localizations")
+    assert isinstance(normalized, dict)
+    return normalized
+
+
 @dataclass(frozen=True, slots=True)
 class CoreContribution:
     plugin_id: str
@@ -512,6 +806,7 @@ class CoreContribution:
     title: str
     entrypoint_id: str
     configuration: dict[str, Any]
+    localizations: dict[str, Any] = field(default_factory=dict)
 
     def to_catalog(self) -> dict[str, Any]:
         return {
@@ -521,6 +816,7 @@ class CoreContribution:
             "title": self.title,
             "entrypointId": self.entrypoint_id,
             "configuration": dict(self.configuration),
+            **({"localizations": dict(self.localizations)} if self.localizations else {}),
         }
 
 
@@ -1472,6 +1768,7 @@ def _validate_paper_executor_configuration(
 
 def _validate_core_configuration(plugin_id: str, item: Contribution) -> dict[str, Any]:
     config = dict(item.configuration)
+    config.pop("localizations", None)
     if item.kind == "symbol-provider/1":
         config = _validate_symbol_provider_configuration(
             config,
@@ -2579,6 +2876,7 @@ def core_contributions(manifest: PluginManifest) -> tuple[CoreContribution, ...]
     for item in manifest.contributions:
         if item.kind not in CORE_CONTRIBUTION_KINDS:
             continue
+        configuration = _validate_core_configuration(manifest.plugin.id, item)
         result.append(
             CoreContribution(
                 plugin_id=manifest.plugin.id,
@@ -2587,7 +2885,10 @@ def core_contributions(manifest: PluginManifest) -> tuple[CoreContribution, ...]
                 kind=item.kind,
                 title=item.title,
                 entrypoint_id=item.entrypoint,
-                configuration=_validate_core_configuration(manifest.plugin.id, item),
+                configuration=configuration,
+                localizations=_validate_contribution_localizations(
+                    manifest.plugin.id, item, configuration
+                ),
             )
         )
     command_ids = {item.id for item in result if item.kind == "command/1"}

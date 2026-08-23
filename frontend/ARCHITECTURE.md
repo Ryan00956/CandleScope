@@ -42,7 +42,9 @@ been folded into their owning features.
 | `export/` | Export options, preview, export service, and drawing commit coordination before export |
 
 `src/runtime` only keeps app-wide performance marks; see
-[src/runtime/README.md](src/runtime/README.md). Feature boundary rules live in
+[src/runtime/README.md](src/runtime/README.md). `src/i18n` owns host locale,
+message catalogs, and `t()`; settings persist `locale` and write
+`document.documentElement.lang`. Feature boundary rules live in
 [src/features/README.md](src/features/README.md).
 
 ## Backend Connection

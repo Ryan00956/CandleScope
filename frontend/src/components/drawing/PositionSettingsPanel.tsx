@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { RefObject } from "react";
+import { t } from "../../i18n/index.js";
+import { useLocale } from "../../i18n/useLocale.js";
 
 export interface PositionSettingsPanelProps {
   positionSize: number;
@@ -16,6 +18,7 @@ export default function PositionSettingsPanel({
   onClose,
   anchorRef,
 }: PositionSettingsPanelProps) {
+  useLocale();
   const panelRef = useRef<HTMLDivElement | null>(null);
   const [localSize, setLocalSize] = useState(String(positionSize || 1000));
 
@@ -46,12 +49,12 @@ export default function PositionSettingsPanel({
   return (
     <div className="position-settings-panel" ref={panelRef}>
       <div className="fib-levels-header">
-        <span>Position settings</span>
+        <span>{t("drawing.settings.position")}</span>
         <button className="fib-levels-close" onClick={onClose}>x</button>
       </div>
       <div className="fib-levels-divider" />
       <div className="position-size-section">
-        <label className="position-size-label">Position size ($)</label>
+        <label className="position-size-label">{t("drawing.settings.positionSize")}</label>
         <input
           type="number"
           className="position-size-input"

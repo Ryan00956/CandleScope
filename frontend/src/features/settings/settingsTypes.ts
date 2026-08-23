@@ -1,5 +1,6 @@
 export type SettingsActionType = "local_only" | "backend_endpoint";
 
+import type { MessageKey } from "../../i18n/index.js";
 import type { AboutSettingsPanelProps } from "../../components/settings/AboutSettingsPanel.js";
 import type { CacheDiagnosticsPanelProps } from "../../components/settings/CacheDiagnosticsPanel.js";
 import type { CacheLimitsPanelProps } from "../../components/settings/CacheLimitsPanel.js";
@@ -24,7 +25,7 @@ export interface SettingsActionDescriptor {
 
 export interface SettingsCategoryDescriptor {
   key: SettingsCategory;
-  label: string;
+  labelKey: MessageKey;
   icon: string;
 }
 

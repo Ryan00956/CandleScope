@@ -12,6 +12,7 @@ import {
   intervalTiles,
 } from "../../utils/intervals.js";
 import type { IntervalString } from "../../utils/intervals.js";
+import { t } from "../../i18n/index.js";
 
 
 export interface ReplayIntervalCatalog {
@@ -62,5 +63,5 @@ export function replayIntervalUnavailableMessage(
 ): string {
   const base = canonicalizeIntervalValue(baseInterval) || String(baseInterval || "--");
   const display = canonicalizeIntervalValue(displayInterval) || String(displayInterval || "--");
-  return `当前回放只持有 ${base} 基准 K 线，无法无损拼接 ${display}`;
+  return t("replay.interval.unsupportedExact", { base, display });
 }

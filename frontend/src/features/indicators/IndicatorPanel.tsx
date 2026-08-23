@@ -7,6 +7,8 @@
  * - Open code editor for custom indicators
  */
 import { useCallback, useEffect, useState } from "react";
+import { t, type MessageKey } from "../../i18n/index.js";
+import { useLocale } from "../../i18n/useLocale.js";
 import {
   shouldShowIndicatorCatalogLoading,
   useIndicatorCatalogRuntime,
@@ -78,6 +80,21 @@ const CATEGORY_GROUP_KEYS: Record<string, string> = {
 function categoryGroupKey(category: string | null | undefined, fallback: string): string {
   const raw = category || fallback;
   return CATEGORY_GROUP_KEYS[CATEGORY_LABELS[raw] || raw] || raw;
+}
+
+const CATEGORY_MESSAGE_KEYS: Record<string, MessageKey> = {
+  trend: "indicator.category.trend",
+  momentum: "indicator.category.momentum",
+  oscillator: "indicator.category.oscillator",
+  volatility: "indicator.category.volatility",
+  volume: "indicator.category.volume",
+  "contract-data": "indicator.category.contract",
+  custom: "indicator.category.custom",
+};
+
+function categoryDisplayLabel(cat: string): string {
+  const key = CATEGORY_MESSAGE_KEYS[cat];
+  return key ? t(key) : (CATEGORY_LABELS[cat] || cat);
 }
 
 const SOURCE_OPTIONS = ["open", "high", "low", "close", "hl2", "hlc3", "ohlc4", "hlcc4"];
@@ -255,14 +272,14 @@ function renderHintPaneTarget(renderHints: Record<string, unknown> | undefined):
 }
 
 function marketStudyStatusLabel(study: IndicatorPanelMarketStudy): string | null {
-  if (!study.supported || study.status === "dormant") return "休眠";
-  if (study.error || study.status === "error") return "错误";
-  if (study.status === "loading") return "加载中";
+  if (!study.supported || study.status === "dormant") return t("indicator.status.dormant");
+  if (study.error || study.status === "error") return t("indicator.status.error");
+  if (study.status === "loading") return t("indicator.status.loading");
   return null;
 }
 
 function marketStudyStatusMessage(study: IndicatorPanelMarketStudy): string | null {
-  if (!study.supported) return study.unsupportedReason || "当前品种不支持";
+  if (!study.supported) return study.unsupportedReason || t("indicator.unsupported");
   if (study.error) return study.error;
   return study.statusText || null;
 }
@@ -309,6 +326,7 @@ export default function IndicatorPanel({
   modeNotice = null,
   resolveIndicatorSupport,
 }: IndicatorPanelProps) {
+  useLocale();
   const [tab, setTab] = useState<IndicatorPanelTab>("presets");
   const {
     customIndicators,
@@ -445,7 +463,7 @@ export default function IndicatorPanel({
 
   const handleDeleteCustomPreset = useCallback(async (preset: CatalogIndicator) => {
     if (isBuiltinIndicator(preset)) return;
-    const confirmed = window.confirm(`删除自定义指标 "${preset.name}"？如果它已添加到图表，也会一并移除。`);
+    const confirmed = window.confirm(t("indicator.deleteConfirm", { name: preset.name ?? preset.id }));
     if (!confirmed) return;
 
     try {
@@ -455,7 +473,7 @@ export default function IndicatorPanel({
       }
     } catch (err: unknown) {
       console.error("Failed to delete custom indicator:", err);
-      window.alert(`删除自定义指标失败：${err instanceof Error ? err.message : String(err)}`);
+      window.alert(t("indicator.deleteFailed", { error: err instanceof Error ? err.message : String(err) }));
     }
   }, [activeIndicators, deleteCustomIndicator, onRemoveIndicator]);
 
@@ -702,22 +720,22 @@ plot(ma, "MA", color=line_color)
             {/* Header */}
             <div className="indicator-panel-header">
               <h3 className="indicator-panel-title">
-                📊 指标
-                {computing && <span className="indicator-computing-badge">计算中...</span>}
+                📊 {t("indicator.title")}
+                {computing && <span className="indicator-computing-badge">{t("indicator.computing")}</span>}
                 {realtimeMode === "historical-only" && (
                   <span
                     className="indicator-computing-badge"
-                    title="指标实时订阅已停用；当前通过 HTTP 补齐已收盘 K 线的指标值。"
+                    title={t("indicator.historicalOnlyTitle")}
                   >
-                    仅已收盘值
+                    {t("indicator.historicalOnly")}
                   </span>
                 )}
                 {realtimeMode === "degraded" && (
                   <span
                     className="indicator-computing-badge"
-                    title="至少一个指标的实时订阅不可用；受影响指标通过 HTTP 补齐已收盘值。"
+                    title={t("indicator.degradedTitle")}
                   >
-                    部分仅已收盘值
+                    {t("indicator.degraded")}
                   </span>
                 )}
                 {modeNotice && (
@@ -738,28 +756,28 @@ plot(ma, "MA", color=line_color)
                 className={`indicator-tab ${tab === "presets" ? "active" : ""}`}
                 onClick={() => setTab("presets")}
               >
-                指标库
+                {t("indicator.library")}
               </button>
               <button
                 className={`indicator-tab ${tab === "active" ? "active" : ""}`}
                 onClick={() => setTab("active")}
               >
-                已添加 {activeItemCount > 0 && `(${activeItemCount})`}
+                {activeItemCount > 0 ? t("indicator.addedCount", { count: activeItemCount }) : t("indicator.added")}
               </button>
               {allowCustomIndicators ? (
                 <button
                   className="indicator-tab indicator-tab-create"
                   onClick={handleCreateCustom}
-                  title="创建自定义指标"
+                  title={t("indicator.createCustom")}
                 >
-                  + 自定义
+                  {t("indicator.custom")}
                 </button>
               ) : (
                 <span
                   className="indicator-tab indicator-tab-create"
                   title={customIndicatorsUnavailableReason}
                 >
-                  仅内置
+                  {t("indicator.builtinOnly")}
                 </span>
               )}
             </div>
@@ -773,14 +791,14 @@ plot(ma, "MA", color=line_color)
                     <input
                       className="indicator-search"
                       type="text"
-                      placeholder="搜索指标..."
+                      placeholder={t("indicator.search")}
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
                     />
                   </div>
 
                   {catalogLoading && (
-                    <div className="indicator-loading">加载中...</div>
+                    <div className="indicator-loading">{t("indicator.loading")}</div>
                   )}
 
                   {groupedCategoryOrder.map((cat) => {
@@ -790,7 +808,7 @@ plot(ma, "MA", color=line_color)
                       <div key={cat} className="indicator-category-group">
                         <div className="indicator-category-label">
                           <span>{CATEGORY_ICONS[cat] || "📌"}</span>
-                          <span>{CATEGORY_LABELS[cat] || cat}</span>
+                          <span>{categoryDisplayLabel(cat)}</span>
                         </div>
                         {items.map((preset) => {
                           const support = resolveIndicatorSupport?.(preset) ?? {
@@ -808,16 +826,16 @@ plot(ma, "MA", color=line_color)
                               <span className="indicator-preset-name">
                                 {preset.name}
                                 <IndicatorBadge tone={isBuiltinIndicator(preset) ? "builtin" : "custom"}>
-                                  {isBuiltinIndicator(preset) ? "内置" : "自定义"}
+                                  {isBuiltinIndicator(preset) ? t("indicator.builtin") : t("indicator.customBadge")}
                                 </IndicatorBadge>
                                 {("defaultEnabled" in preset && preset.defaultEnabled) && (
-                                  <IndicatorBadge tone="neutral">默认</IndicatorBadge>
+                                  <IndicatorBadge tone="neutral">{t("indicator.default")}</IndicatorBadge>
                                 )}
                                 <IndicatorBadge tone={preset.paneTarget === "main" ? "main" : "sub"}>
-                                  {preset.paneTarget === "main" ? "主图" : "副图"}
+                                  {preset.paneTarget === "main" ? t("indicator.mainPane") : t("indicator.subPane")}
                                 </IndicatorBadge>
                                 {!support.supported && (
-                                  <IndicatorBadge tone="neutral">回放不可用</IndicatorBadge>
+                                  <IndicatorBadge tone="neutral">{t("indicator.replayUnavailable")}</IndicatorBadge>
                                 )}
                               </span>
                               <span className="indicator-preset-desc">
@@ -835,8 +853,8 @@ plot(ma, "MA", color=line_color)
                                 onClick={() => isActive(preset.id) ? onRemoveIndicator(preset.id) : handleAddPreset(preset)}
                                 disabled={addDisabled}
                                 title={isActive(preset.id)
-                                  ? "从图表移除"
-                                  : support.reason || "添加到图表"}
+                                  ? t("indicator.removeFromChart")
+                                  : support.reason || t("indicator.addToChart")}
                               >
                                 {isActive(preset.id) ? "✓" : "+"}
                               </button>
@@ -844,7 +862,7 @@ plot(ma, "MA", color=line_color)
                                 <button
                                   className="indicator-preset-delete-btn"
                                   onClick={() => handleDeleteCustomPreset(preset)}
-                                  title="永久删除自定义指标"
+                                  title={t("indicator.deleteCustom")}
                                 >
                                   🗑
                                 </button>
@@ -857,8 +875,8 @@ plot(ma, "MA", color=line_color)
                           const callback = study.added ? onRemoveMarketStudy : onAddMarketStudy;
                           const disabled = !study.supported || !callback;
                           const disabledReason = study.supported
-                            ? "操作暂不可用"
-                            : study.unsupportedReason || "当前品种不支持";
+                            ? t("indicator.actionUnavailable")
+                            : study.unsupportedReason || t("indicator.unsupported");
                           return (
                             <div
                               key={study.id}
@@ -869,9 +887,9 @@ plot(ma, "MA", color=line_color)
                                 <span className="indicator-preset-name">
                                   {study.name}
                                   <IndicatorBadge tone="neutral">market-data</IndicatorBadge>
-                                  <IndicatorBadge tone="sub">副图</IndicatorBadge>
+                                  <IndicatorBadge tone="sub">{t("indicator.subPane")}</IndicatorBadge>
                                   {!study.supported && (
-                                    <IndicatorBadge tone="neutral">不可用</IndicatorBadge>
+                                    <IndicatorBadge tone="neutral">{t("indicator.unavailable")}</IndicatorBadge>
                                   )}
                                 </span>
                                 <span className="indicator-preset-desc">
@@ -890,7 +908,7 @@ plot(ma, "MA", color=line_color)
                                   disabled={disabled}
                                   title={disabled
                                     ? disabledReason
-                                    : study.added ? "从图表移除" : "添加到图表"}
+                                    : study.added ? t("indicator.removeFromChart") : t("indicator.addToChart")}
                                   style={disabled ? { cursor: "not-allowed", opacity: 0.45 } : undefined}
                                 >
                                   {study.added ? "✓" : "+"}
@@ -906,7 +924,7 @@ plot(ma, "MA", color=line_color)
                   {!catalogLoading
                     && filteredPresets.length === 0
                     && filteredMarketStudies.length === 0 && (
-                    <div className="indicator-empty">未找到匹配的指标</div>
+                    <div className="indicator-empty">{t("indicator.noMatch")}</div>
                   )}
                 </div>
               )}
@@ -917,9 +935,9 @@ plot(ma, "MA", color=line_color)
                   {activeItemCount === 0 ? (
                     <div className="indicator-empty">
                       <div style={{ fontSize: 32, marginBottom: 8 }}>📭</div>
-                      <div>暂未添加指标</div>
+                      <div>{t("indicator.emptyActive")}</div>
                       <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 4 }}>
-                        从指标库选择或创建自定义指标
+                        {t("indicator.emptyActiveHint")}
                       </div>
                     </div>
                   ) : (
@@ -930,17 +948,17 @@ plot(ma, "MA", color=line_color)
                           <button
                             className={`indicator-visibility-btn ${ind.visible ? "" : "hidden"}`}
                             onClick={() => onToggleVisibility(ind.id)}
-                            title={ind.visible ? "隐藏" : "显示"}
+                            title={ind.visible ? t("indicator.hide") : t("indicator.show")}
                           >
                             {ind.visible ? "👁" : "👁‍🗨"}
                           </button>
                           <span className="indicator-active-name">
                             {ind.name}
                             <IndicatorBadge tone={isBuiltinIndicator(ind) ? "builtin" : "custom"}>
-                              {isBuiltinIndicator(ind) ? "内置" : "自定义"}
+                              {isBuiltinIndicator(ind) ? t("indicator.builtin") : t("indicator.customBadge")}
                             </IndicatorBadge>
                             <IndicatorBadge tone={ind.paneTarget === "main" ? "main" : "sub"}>
-                              {ind.paneTarget === "main" ? "主图" : "副图"}
+                              {ind.paneTarget === "main" ? t("indicator.mainPane") : t("indicator.subPane")}
                             </IndicatorBadge>
                           </span>
                           {ind.error && (
@@ -950,14 +968,14 @@ plot(ma, "MA", color=line_color)
                             <button
                               className="indicator-action-btn"
                               onClick={() => handleEditIndicator(ind)}
-                              title={isBuiltinIndicator(ind) ? "查看参考实现" : "编辑代码"}
+                              title={isBuiltinIndicator(ind) ? t("indicator.viewReference") : t("indicator.editCode")}
                             >
                               {isBuiltinIndicator(ind) ? "📖" : "✏️"}
                             </button>
                             <button
                               className="indicator-action-btn indicator-remove-btn"
                               onClick={() => onRemoveIndicator(ind.id)}
-                              title="移除"
+                              title={t("indicator.remove")}
                             >
                               🗑
                             </button>
@@ -1041,20 +1059,20 @@ plot(ma, "MA", color=line_color)
                                 className={`indicator-visibility-btn ${study.visible ? "" : "hidden"}`}
                                 onClick={() => onToggleMarketStudyVisibility?.(study.id)}
                                 disabled={!onToggleMarketStudyVisibility}
-                                title={study.visible ? "隐藏" : "显示"}
+                                title={study.visible ? t("indicator.hide") : t("indicator.show")}
                               >
                                 {study.visible ? "👁" : "👁‍🗨"}
                               </button>
                               <span className="indicator-active-name">
                                 {study.name}
                                 <IndicatorBadge tone="neutral">market-data</IndicatorBadge>
-                                <IndicatorBadge tone="sub">副图</IndicatorBadge>
+                                <IndicatorBadge tone="sub">{t("indicator.subPane")}</IndicatorBadge>
                                 {statusLabel && (
                                   <IndicatorBadge tone="neutral">{statusLabel}</IndicatorBadge>
                                 )}
                               </span>
                               {hasError && (
-                                <span className="indicator-error-badge" title={statusMessage || "市场指标错误"}>
+                                <span className="indicator-error-badge" title={statusMessage || t("indicator.marketError")}>
                                   ⚠️
                                 </span>
                               )}
@@ -1063,7 +1081,7 @@ plot(ma, "MA", color=line_color)
                                   className="indicator-action-btn indicator-remove-btn"
                                   onClick={() => onRemoveMarketStudy?.(study.id)}
                                   disabled={!onRemoveMarketStudy}
-                                  title="移除"
+                                  title={t("indicator.remove")}
                                 >
                                   🗑
                                 </button>
@@ -1094,7 +1112,7 @@ plot(ma, "MA", color=line_color)
                       onClick={() => onRecompute?.(true)}
                       disabled={computing}
                     >
-                      {computing ? "计算中..." : "🔄 重新计算全部"}
+                      {computing ? t("indicator.computing") : t("indicator.recalculate")}
                     </button>
                   )}
                 </div>

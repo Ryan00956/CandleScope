@@ -1,4 +1,6 @@
 import { useEffect, useState } from "react";
+import { t, type MessageKey } from "../../../i18n/index.js";
+import { useLocale } from "../../../i18n/useLocale.js";
 import type { TrainingRunDraft } from "../trainingHubModel.js";
 import {
   formatUtcReplayStartInput,
@@ -24,11 +26,11 @@ import {
 } from "../trainingHubLabels.js";
 import ReplayStorageGovernancePanel from "./ReplayStorageGovernancePanel.js";
 
-const CREATE_SECTIONS = [
-  ["training-hub-create-start", "1", "起点与历史源"],
-  ["training-hub-create-rules", "2", "规则与账户"],
-  ["training-hub-create-advanced", "3", "高级设置"],
-] as const;
+const CREATE_SECTIONS: Array<readonly [string, string, MessageKey]> = [
+  ["training-hub-create-start", "1", "replay.hub.sectionStart"],
+  ["training-hub-create-rules", "2", "replay.hub.sectionRules"],
+  ["training-hub-create-advanced", "3", "replay.hub.sectionAdvanced"],
+];
 
 export interface TrainingHubDialogProps {
   readonly runtime: TrainingHubRuntime;
@@ -48,13 +50,13 @@ function patchDraft(
 function trainingRunStatusMessage(card: TrainingRunCard): string {
   if (card.state !== "ENDED") return card.status.message;
   return card.resume_action === "UNAVAILABLE"
-    ? "训练已结束；当前存档无法打开复盘。"
-    : "训练已结束，可打开复盘。";
+    ? t("replay.hub.endedUnavailable")
+    : t("replay.hub.endedReviewable");
 }
 
 function trainingRunPrimaryActionLabel(card: TrainingRunCard): string {
-  if (card.state === "AWAITING_MARKET") return "选择商品";
-  return card.state === "ENDED" ? "打开复盘" : "继续训练";
+  if (card.state === "AWAITING_MARKET") return t("replay.hub.selectMarket");
+  return card.state === "ENDED" ? t("replay.hub.openReview") : t("replay.hub.continue");
 }
 
 export interface TrainingRunDeleteConfirmationProps {
@@ -70,6 +72,7 @@ export function TrainingRunDeleteConfirmation({
   onCancel,
   onConfirm,
 }: TrainingRunDeleteConfirmationProps) {
+  useLocale();
   return (
     <div className="replay-modal-backdrop" role="presentation">
       <section
@@ -79,15 +82,15 @@ export function TrainingRunDeleteConfirmation({
         aria-labelledby="training-hub-delete-title"
         aria-describedby="training-hub-delete-description"
       >
-        <h2 id="training-hub-delete-title">永久删除训练存档</h2>
+        <h2 id="training-hub-delete-title">{t("replay.hub.deleteTitle")}</h2>
         <p id="training-hub-delete-description">
-          将删除服务端存档、关联训练会话和本机工作区偏好，删除后无法恢复。
+          {t("replay.hub.deleteDesc")}
         </p>
         <strong>{card.name}</strong>
         <div className="replay-dialog-actions">
-          <button type="button" autoFocus onClick={onCancel}>取消</button>
+          <button type="button" autoFocus onClick={onCancel}>{t("replay.hub.cancel")}</button>
           <button type="button" disabled={busy} onClick={onConfirm}>
-            确认永久删除
+            {t("replay.hub.deleteConfirm")}
           </button>
         </div>
       </section>
@@ -96,6 +99,7 @@ export function TrainingRunDeleteConfirmation({
 }
 
 function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
+  useLocale();
   const { draft, evaluation } = runtime;
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [activeSection, setActiveSection] = useState<string>("training-hub-create-start");
@@ -121,11 +125,11 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
           className="training-hub-create training-hub-create-loading"
           role="dialog"
           aria-modal="true"
-          aria-label="新建训练配置"
+          aria-label={t("replay.hub.createAria")}
         >
           <div className="replay-loading-spinner" />
-          <p>正在读取创建 Run 所需的服务端能力…</p>
-          <button type="button" onClick={runtime.actions.closeCreate}>取消</button>
+          <p>{t("replay.hub.createLoading")}</p>
+          <button type="button" onClick={runtime.actions.closeCreate}>{t("replay.hub.cancel")}</button>
         </section>
       </div>
     );
@@ -134,10 +138,10 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
     || runtime.operation === "plan"
     || runtime.operation === "create-context";
   const busyLabel = runtime.operation === "create"
-    ? "正在原子创建…"
+    ? t("replay.hub.creating")
     : runtime.operation === "create-context"
-      ? "正在校验时间目录…"
-      : "正在校验数据…";
+      ? t("replay.hub.validatingCatalog")
+      : t("replay.hub.validatingData");
   const toggleMutation = (mutation: ReplayPolicyMutation, checked: boolean) => {
     const next = checked
       ? [...draft.allowedMutations, mutation]
@@ -167,10 +171,10 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
       >
         <header className="training-hub-create-top">
           <div>
-            <span className="training-hub-kicker">先冻结时间 · 再选商品</span>
-            <h2 id="training-hub-create-title">新建训练</h2>
-            <p>先创建模拟账户并永久冻结开局时间；进入 Run 后再选择支持该时间的商品。</p>
-            <nav className="training-hub-create-steps" aria-label="配置分区">
+            <span className="training-hub-kicker">{t("replay.hub.createKicker")}</span>
+            <h2 id="training-hub-create-title">{t("replay.hub.createTitle")}</h2>
+            <p>{t("replay.hub.createIntro")}</p>
+            <nav className="training-hub-create-steps" aria-label={t("replay.hub.createSteps")}>
               {CREATE_SECTIONS.map(([id, number, label]) => (
                 <button
                   key={id}
@@ -178,24 +182,24 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
                   aria-current={activeSection === id}
                   onClick={() => scrollToSection(id)}
                 >
-                  <em>{number}</em>{label}
+                  <em>{number}</em>{t(label)}
                 </button>
               ))}
             </nav>
           </div>
-          <button type="button" autoFocus onClick={runtime.actions.closeCreate} disabled={busy}>关闭</button>
+          <button type="button" autoFocus onClick={runtime.actions.closeCreate} disabled={busy}>{t("replay.hub.close")}</button>
         </header>
 
         <div className="training-hub-create-body">
           <div className="training-hub-create-main">
             <section className="training-hub-form-section" id="training-hub-create-start">
               <header>
-                <div><h3>起点与历史源</h3><p>创建时只冻结账户、规则和 T0；商品仍在 Run 内选择。</p></div>
+                <div><h3>{t("replay.hub.sectionStart")}</h3><p>{t("replay.hub.startHint")}</p></div>
                 <span>01</span>
               </header>
               <div className="training-hub-section-body">
                 <label className="training-hub-field training-hub-field-wide">
-                  <span>存档名称</span>
+                  <span>{t("replay.hub.archiveName")}</span>
                   <input
                     value={draft.name}
                     maxLength={80}
@@ -203,8 +207,8 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
                   />
                 </label>
                 <div className="training-hub-field">
-                  <span>历史源</span>
-                  <div className="training-hub-choice-grid" role="group" aria-label="历史源">
+                  <span>{t("replay.hub.sourceKind")}</span>
+                  <div className="training-hub-choice-grid" role="group" aria-label={t("replay.hub.sourceKind")}>
                     <button
                       type="button"
                       aria-pressed={draft.sourceKind === "BAR"}
@@ -216,7 +220,7 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
                         randomRangeEndMs: null,
                       })}
                     >
-                      <small>BAR</small><strong>K 线</strong><span>精确 OHLCV，适合大多数节奏训练。</span>
+                      <small>BAR</small><strong>{t("replay.source.bar")}</strong><span>{t("replay.hub.barHint")}</span>
                     </button>
                     <button
                       type="button"
@@ -229,13 +233,13 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
                         randomRangeEndMs: null,
                       })}
                     >
-                      <small>AGG_TRADE</small><strong>成交</strong><span>选择时下载并校验官方成交归档。</span>
+                      <small>AGG_TRADE</small><strong>{t("replay.source.agg")}</strong><span>{t("replay.hub.aggHint")}</span>
                     </button>
                   </div>
                 </div>
                 <div className="training-hub-field">
-                  <span>开始方式</span>
-                  <div className="training-hub-choice-grid" role="group" aria-label="开始方式">
+                  <span>{t("replay.hub.startMode")}</span>
+                  <div className="training-hub-choice-grid" role="group" aria-label={t("replay.hub.startMode")}>
                     <button
                       type="button"
                       aria-pressed={draft.startMode === "RANDOM"}
@@ -245,7 +249,7 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
                         requestedStartMs: null,
                       })}
                     >
-                      <small>RANDOM</small><strong>随机合格窗口</strong><span>盲化抽取，严格挑战模式的推荐默认。</span>
+                      <small>RANDOM</small><strong>{t("replay.hub.randomWindow")}</strong><span>{t("replay.hub.randomHint")}</span>
                     </button>
                     <button
                       type="button"
@@ -257,7 +261,7 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
                         randomRangeEndMs: null,
                       })}
                     >
-                      <small>MANUAL</small><strong>手动 UTC 时间</strong><span>已知起点，不获得严格挑战标签。</span>
+                      <small>MANUAL</small><strong>{t("replay.hub.manualUtc")}</strong><span>{t("replay.hub.manualHint")}</span>
                     </button>
                   </div>
                 </div>
@@ -265,7 +269,7 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
                   {draft.startMode === "MANUAL" ? (
                     <>
                       <label className="training-hub-field">
-                        <span>开始时间（UTC）</span>
+                        <span>{t("replay.hub.startUtc")}</span>
                         <input
                           data-training-field="requested-start-utc"
                           type="datetime-local"
@@ -277,13 +281,13 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
                         />
                       </label>
                       <p className="training-hub-field-warning" role="note">
-                        手动起点属于已知时间；即使隐藏显示，也不会获得严格 Challenge 结果标签。
+                        {t("replay.hub.manualWarning")}
                       </p>
                     </>
                   ) : (
                     <>
                       <label className="training-hub-field">
-                        <span>随机区间开始（UTC）</span>
+                        <span>{t("replay.hub.randomStart")}</span>
                         <input
                           type="datetime-local"
                           step={60}
@@ -294,7 +298,7 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
                         />
                       </label>
                       <label className="training-hub-field">
-                        <span>随机区间结束（UTC）</span>
+                        <span>{t("replay.hub.randomEnd")}</span>
                         <input
                           type="datetime-local"
                           step={60}
@@ -308,11 +312,11 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
                   )}
                 </div>
                 <p className="training-hub-field-note" role="note">
-                  创建确认后 T0 永久不变。商品只做兼容性判断；不支持时需另开一局，系统不会改时间或重抽。
+                  {t("replay.hub.t0Note")}
                 </p>
                 {runtime.catalog !== null && (
                   <p className="training-hub-field-note training-hub-field-note-ok" role="status">
-                    当前历史源可选商品 {runtime.catalog.entries.length} 个；时间输入已按其覆盖范围校验。
+                    {t("replay.hub.catalogReady", { count: runtime.catalog.entries.length })}
                   </p>
                 )}
               </div>
@@ -320,18 +324,18 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
 
             <section className="training-hub-form-section" id="training-hub-create-rules">
               <header>
-                <div><h3>规则与账户</h3><p>完整性模式决定可变范围；资金和持仓模式创建后不可改。</p></div>
+                <div><h3>{t("replay.hub.sectionRules")}</h3><p>{t("replay.hub.rulesHint")}</p></div>
                 <span>02</span>
               </header>
               <div className="training-hub-section-body">
                 <div className="training-hub-field">
-                  <span>完整性模式</span>
-                  <div className="training-hub-choice-grid training-hub-choice-grid-three" role="group" aria-label="完整性模式">
+                  <span>{t("replay.hub.integrityMode")}</span>
+                  <div className="training-hub-choice-grid training-hub-choice-grid-three" role="group" aria-label={t("replay.hub.integrityMode")}>
                     {([
-                      ["CHALLENGE", "挑战", "全部规则锁定，最严格训练标签。"],
-                      ["PRACTICE", "练习", "显式白名单内的变更可审计。"],
-                      ["SANDBOX", "沙盒", "全部变更可审计，适合实验。"],
-                    ] as const).map(([integrityMode, label, description]) => (
+                      ["CHALLENGE", "replay.hub.challenge", "replay.hub.challengeHint"],
+                      ["PRACTICE", "replay.hub.practice", "replay.hub.practiceHint"],
+                      ["SANDBOX", "replay.hub.sandbox", "replay.hub.sandboxHint"],
+                    ] as const).map(([integrityMode, labelKey, descriptionKey]) => (
                       <button
                         key={integrityMode}
                         type="button"
@@ -349,13 +353,13 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
                               : ["deposit", "withdraw"],
                         })}
                       >
-                        <small>{integrityMode}</small><strong>{label}</strong><span>{description}</span>
+                        <small>{integrityMode}</small><strong>{t(labelKey)}</strong><span>{t(descriptionKey)}</span>
                       </button>
                     ))}
                   </div>
                 </div>
                 <label className="training-hub-field training-hub-field-half">
-                  <span>时间披露</span>
+                  <span>{t("replay.hub.timeDisclosure")}</span>
                   <select
                     data-training-field="time-disclosure-policy"
                     value={draft.timeDisclosurePolicy}
@@ -363,17 +367,17 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
                       timeDisclosurePolicy: event.target.value as TrainingRunDraft["timeDisclosurePolicy"],
                     })}
                   >
-                    <option value="NONE">显示历史时间（NONE）</option>
-                    <option value="HIDE_YEAR">隐藏年份（HIDE_YEAR）</option>
-                    <option value="HIDE_MONTH">隐藏年月（HIDE_MONTH）</option>
-                    <option value="HIDE_DAY">相对日期（HIDE_DAY）</option>
-                    <option value="HIDE_HOUR">相对小时（HIDE_HOUR）</option>
-                    <option value="HIDE_MINUTE">相对分钟（HIDE_MINUTE）</option>
-                    <option value="HIDE_ALL">完全相对时间（HIDE_ALL）</option>
+                    <option value="NONE">{t("replay.hub.disclosureNone")}</option>
+                    <option value="HIDE_YEAR">{t("replay.hub.disclosureYear")}</option>
+                    <option value="HIDE_MONTH">{t("replay.hub.disclosureMonth")}</option>
+                    <option value="HIDE_DAY">{t("replay.hub.disclosureDay")}</option>
+                    <option value="HIDE_HOUR">{t("replay.hub.disclosureHour")}</option>
+                    <option value="HIDE_MINUTE">{t("replay.hub.disclosureMinute")}</option>
+                    <option value="HIDE_ALL">{t("replay.hub.disclosureAll")}</option>
                   </select>
                 </label>
                 <fieldset className="training-hub-mutation-policy" disabled={draft.integrityMode !== "PRACTICE" || busy}>
-                  <legend>Practice 可审计变更白名单</legend>
+                  <legend>{t("replay.hub.practiceWhitelist")}</legend>
                   <div>
                     {REPLAY_POLICY_MUTATIONS.map((mutation) => (
                       <label key={mutation}>
@@ -386,27 +390,27 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
                       </label>
                     ))}
                   </div>
-                  <p>入金、出金、费率、杠杆上限、Sandbox 固定资金费与不可逆时间揭示均写入审计事件；Challenge 仍全部锁定。</p>
+                  <p>{t("replay.hub.practiceNote")}</p>
                 </fieldset>
                 <div className="training-hub-field-grid training-hub-field-grid-three">
                   <label className="training-hub-field">
-                    <span>初始权益</span>
+                    <span>{t("replay.hub.initialEquity")}</span>
                     <input inputMode="decimal" value={draft.initialEquity} onChange={(event) => patchDraft(runtime, { initialEquity: event.target.value })} />
                   </label>
                   <label className="training-hub-field">
-                    <span>最大杠杆</span>
+                    <span>{t("replay.hub.maxLeverage")}</span>
                     <input inputMode="decimal" value={draft.maxLeverage} onChange={(event) => patchDraft(runtime, { maxLeverage: event.target.value })} />
                   </label>
                   <label className="training-hub-field">
-                    <span>保证金模式</span>
+                    <span>{t("replay.hub.marginMode")}</span>
                     <select value={draft.marginMode} onChange={(event) => patchDraft(runtime, { marginMode: event.target.value as TrainingRunDraft["marginMode"] })}>
-                      <option value="CROSS">全仓 · 共享结算权益</option>
-                      <option value="ISOLATED">逐仓 · 按腿显式分配</option>
+                      <option value="CROSS">{t("replay.hub.cross")}</option>
+                      <option value="ISOLATED">{t("replay.hub.isolated")}</option>
                     </select>
                   </label>
                 </div>
                 <label className="training-hub-field">
-                  <span>持仓模式</span>
+                  <span>{t("replay.hub.positionMode")}</span>
                   <select
                     value={draft.positionMode}
                     onChange={(event) => {
@@ -423,15 +427,15 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
                       });
                     }}
                   >
-                    <option value="ONE_WAY">单向净持仓（ONE_WAY）</option>
-                    <option value="HEDGE">多空双向持仓（HEDGE）</option>
+                    <option value="ONE_WAY">{t("replay.hub.oneWay")}</option>
+                    <option value="HEDGE">{t("replay.hub.hedge")}</option>
                   </select>
-                  <small>显式选择双向模式后，多空腿独立计算保证金、强平与保护单。完整历史输入优先；缺少可近似项时自动使用清楚标记的 HEDGE_HYBRID，不会改成单向。</small>
+                  <small>{t("replay.hub.hedgeNote")}</small>
                 </label>
-                <div className="training-hub-capability-boundary" aria-label="选品与数据边界">
-                  <h3>商品在 Run 内选择</h3>
-                  <p>创建时不固定商品、交易所、市场类型、基础周期或数据集，但会提交不可变 T0。进入空 Run 后搜索商品，服务端只校验它是否支持这个时间，再原子创建首条 MarketTrack。</p>
-                  <p>HEDGE 会优先绑定完整历史输入；缺失 mark/rule/fee/funding 时可生成版本化混合输入并逐项降级披露。只有明确选择盘口辅助模式时，连续历史 L2 仍是硬门槛。</p>
+                <div className="training-hub-capability-boundary" aria-label={t("replay.hub.marketInRun")}>
+                  <h3>{t("replay.hub.marketInRun")}</h3>
+                  <p>{t("replay.hub.marketInRunDesc")}</p>
+                  <p>{t("replay.hub.hedgeBind")}</p>
                 </div>
               </div>
             </section>
@@ -442,16 +446,16 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
               open={advancedOpen}
               onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}
             >
-              <summary>高级设置 · 历史窗口、账户数据与执行细节</summary>
+              <summary>{t("replay.hub.advancedSummary")}</summary>
             <section className="training-hub-form-section" id="training-hub-create-history">
               <header>
-                <div><h3>历史窗口</h3><p>控制指标预热、左侧可见历史和前向缓存，不扩大执行快照。</p></div>
+                <div><h3>{t("replay.hub.historyWindow")}</h3><p>{t("replay.hub.historyHint")}</p></div>
                 <span>03</span>
               </header>
               <div className="training-hub-section-body">
                 <div className="training-hub-field-grid training-hub-field-grid-three">
                   <label className="training-hub-field">
-                    <span>指标预热 BAR</span>
+                    <span>{t("replay.hub.warmupBars")}</span>
                     <input
                       type="number"
                       min={1}
@@ -460,10 +464,10 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
                         indicatorWarmupBars: Number(event.target.value),
                       })}
                     />
-                    <small>只保证指标计算所需数据，不决定图表可向前滚动多远。</small>
+                    <small>{t("replay.hub.warmupHint")}</small>
                   </label>
                   <label className="training-hub-field">
-                    <span>前向缓存（ms）</span>
+                    <span>{t("replay.hub.forwardCache")}</span>
                     <input
                       data-training-field="forward-cache-ms"
                       type="number"
@@ -473,7 +477,7 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
                     />
                   </label>
                   <label className="training-hub-field">
-                    <span>可见历史</span>
+                    <span>{t("replay.hub.visibleHistory")}</span>
                     <select
                       value={draft.visibleHistoryMode}
                       onChange={(event) => {
@@ -486,18 +490,18 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
                         });
                       }}
                     >
-                      <option value="ALL_AVAILABLE">全部可用（默认，按需加载）</option>
-                      <option value="DURATION">固定时长（兼容旧 Run）</option>
+                      <option value="ALL_AVAILABLE">{t("replay.hub.allAvailable")}</option>
+                      <option value="DURATION">{t("replay.hub.fixedDuration")}</option>
                     </select>
                   </label>
                 </div>
                 {draft.visibleHistoryMode === "ALL_AVAILABLE" ? (
                   <p className="training-hub-field-note">
-                    像实时行情一样向左按需分页，直到所选连续数据段的最早一根；不会把全部历史塞进执行快照。
+                    {t("replay.hub.pageLikeLive")}
                   </p>
                 ) : (
                   <label className="training-hub-field training-hub-field-half">
-                    <span>可见历史时长（ms）</span>
+                    <span>{t("replay.hub.visibleMs")}</span>
                     <input
                       type="number"
                       min={60_000}
@@ -507,7 +511,7 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
                         visibleHistoryLookbackMs: Number(event.target.value),
                       })}
                     />
-                    <small>必须是基础周期的整数倍；该模式会把左侧边界固定在 Run 中。</small>
+                    <small>{t("replay.hub.visibleMsHint")}</small>
                   </label>
                 )}
               </div>
@@ -515,13 +519,13 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
 
             <section className="training-hub-form-section" id="training-hub-create-account">
               <header>
-                <div><h3>账户数据与执行</h3><p>费率和 fidelity 边界；Exact 能力继续 fail-closed。</p></div>
+                <div><h3>{t("replay.hub.accountExec")}</h3><p>{t("replay.hub.accountExecHint")}</p></div>
                 <span>04</span>
               </header>
               <div className="training-hub-section-body">
                 <div className="training-hub-field-grid">
                   <label className="training-hub-field">
-                    <span>账户数据</span>
+                    <span>{t("replay.hub.accountData")}</span>
                     <select
                       value={draft.accountDataMode}
                       onChange={(event) => {
@@ -535,55 +539,55 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
                       }}
                     >
                       {draft.positionMode === "HEDGE" ? (
-                        <option value="DETERMINISTIC_SIMULATION">DETERMINISTIC_SIMULATION · 精确或混合公开输入 + 模拟私有状态</option>
+                        <option value="DETERMINISTIC_SIMULATION">{t("replay.hub.accountData.deterministicSimulation")}</option>
                       ) : (
                         <>
-                          <option value="APPROX_PROXY">APPROX_PROXY · 已揭示价格代理模拟账户</option>
-                          <option value="HISTORICAL_EXACT">HISTORICAL_EXACT · 固定历史 mark/index/规则</option>
+                          <option value="APPROX_PROXY">{t("replay.hub.accountData.approxProxy")}</option>
+                          <option value="HISTORICAL_EXACT">{t("replay.hub.accountData.historicalExact")}</option>
                         </>
                       )}
                     </select>
-                    <small>HEDGE 唯一账户模型是交易所规则级确定性模拟；不会把不可观测的历史 insurance/ADL 宣称为 exact。</small>
+                    <small>{t("replay.hub.hedgeAccountHint")}</small>
                   </label>
                   <label className="training-hub-field">
-                    <span>资金费模式</span>
+                    <span>{t("replay.hub.fundingMode")}</span>
                     <select value={draft.fundingMode} onChange={(event) => patchDraft(runtime, { fundingMode: event.target.value as TrainingRunDraft["fundingMode"] })}>
-                      <option value="OFF">OFF</option>
-                      {draft.integrityMode === "SANDBOX" && <option value="SANDBOX_FIXED">SANDBOX_FIXED · 近似练习</option>}
+                      <option value="OFF">{t("replay.hub.modeOff")}</option>
+                      {draft.integrityMode === "SANDBOX" && <option value="SANDBOX_FIXED">{t("replay.hub.fundingMode.sandboxFixed")}</option>}
                       {(draft.accountDataMode === "HISTORICAL_EXACT" || draft.accountDataMode === "DETERMINISTIC_SIMULATION") && (
-                        <option value="HISTORICAL_EXACT">HISTORICAL_EXACT · pinned 归档结算</option>
+                        <option value="HISTORICAL_EXACT">{t("replay.hub.fundingMode.historicalExact")}</option>
                       )}
                     </select>
                   </label>
                   <label className="training-hub-field">
-                    <span>历史盘口</span>
+                    <span>{t("replay.hub.bookMode")}</span>
                     <select value={draft.bookMode} onChange={(event) => patchDraft(runtime, { bookMode: event.target.value as TrainingRunDraft["bookMode"] })}>
-                      <option value="OFF">OFF · Touch/Tape</option>
-                      <option value="BOOK_ASSISTED_REQUIRED">BOOK_ASSISTED_REQUIRED · 连续历史 L2</option>
+                      <option value="OFF">{t("replay.hub.bookMode.off")}</option>
+                      <option value="BOOK_ASSISTED_REQUIRED">{t("replay.hub.bookMode.assistedRequired")}</option>
                     </select>
-                    <small>盘口 OFF 时使用 Touch/Tape；资金费是否结算由上方资金费模式决定。mark/index 可使用已揭示 BAR/AGG_TRADE 价格代理。L2 只有连续性可证明时可选，且始终不声明 queue-exact。</small>
+                    <small>{t("replay.hub.bookHint")}</small>
                   </label>
                   {draft.fundingMode === "SANDBOX_FIXED" && (
                     <>
                       <label className="training-hub-field">
-                        <span>固定资金费率</span>
+                        <span>{t("replay.hub.fixedFunding")}</span>
                         <input inputMode="decimal" value={draft.fixedFundingRate} onChange={(event) => patchDraft(runtime, { fixedFundingRate: event.target.value })} />
                       </label>
                       <label className="training-hub-field">
-                        <span>结算间隔（ms）</span>
+                        <span>{t("replay.hub.fundingInterval")}</span>
                         <input type="number" min={60_000} max={30 * 86_400_000} value={draft.fundingIntervalMs} onChange={(event) => patchDraft(runtime, { fundingIntervalMs: Number(event.target.value) })} />
                       </label>
                     </>
                   )}
                   <label className="training-hub-field">
-                    <span>Maker / Taker bps</span>
+                    <span>{t("replay.hub.makerTakerBps")}</span>
                     <span className="training-hub-inline-inputs">
-                      <input inputMode="decimal" value={draft.makerFeeBps} aria-label="Maker bps" onChange={(event) => patchDraft(runtime, { makerFeeBps: event.target.value })} />
-                      <input inputMode="decimal" value={draft.takerFeeBps} aria-label="Taker bps" onChange={(event) => patchDraft(runtime, { takerFeeBps: event.target.value })} />
+                      <input inputMode="decimal" value={draft.makerFeeBps} aria-label={t("replay.integrity.makerBps")} onChange={(event) => patchDraft(runtime, { makerFeeBps: event.target.value })} />
+                      <input inputMode="decimal" value={draft.takerFeeBps} aria-label={t("replay.integrity.takerBps")} onChange={(event) => patchDraft(runtime, { takerFeeBps: event.target.value })} />
                     </span>
                   </label>
                   <label className="training-hub-field">
-                    <span>市价滑点 bps</span>
+                    <span>{t("replay.hub.slippage")}</span>
                     <input inputMode="decimal" value={draft.marketSlippageBps} onChange={(event) => patchDraft(runtime, { marketSlippageBps: event.target.value })} />
                   </label>
                 </div>
@@ -595,26 +599,26 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
           <aside className="training-hub-create-side">
             <div className="training-hub-create-side-scroll">
               <section className="training-hub-summary-card">
-                <h3>配置摘要</h3>
-                <strong>{draft.name || "未命名训练"}</strong>
+                <h3>{t("replay.hub.summary")}</h3>
+                <strong>{draft.name || t("replay.hub.unnamed")}</strong>
                 <dl>
-                  <div><dt>历史源</dt><dd>{trainingSourceKindLabel(draft.sourceKind)}</dd></div>
-                  <div><dt>开始</dt><dd>{draft.startMode === "RANDOM" ? "随机窗口" : "手动时间"}</dd></div>
-                  <div><dt>完整性</dt><dd>{trainingIntegrityLabel(draft.integrityMode)}</dd></div>
-                  <div><dt>时间披露</dt><dd>{trainingTimeDisclosureLabel(draft.timeDisclosurePolicy)}</dd></div>
-                  <div><dt>权益 / 杠杆</dt><dd>{draft.initialEquity} · {draft.maxLeverage}×</dd></div>
-                  <div><dt>持仓 / 保证金</dt><dd>{draft.positionMode === "HEDGE" ? "双向" : "单向"} · {draft.marginMode === "ISOLATED" ? "逐仓" : "全仓"}</dd></div>
-                  <div><dt>商品</dt><dd>进入 Run 后选择</dd></div>
+                  <div><dt>{t("replay.hub.sourceKind")}</dt><dd>{trainingSourceKindLabel(draft.sourceKind)}</dd></div>
+                  <div><dt>{t("replay.hub.start")}</dt><dd>{draft.startMode === "RANDOM" ? t("replay.hub.randomStartMode") : t("replay.hub.manualStartMode")}</dd></div>
+                  <div><dt>{t("replay.hub.integrity")}</dt><dd>{trainingIntegrityLabel(draft.integrityMode)}</dd></div>
+                  <div><dt>{t("replay.hub.timeDisclosure")}</dt><dd>{trainingTimeDisclosureLabel(draft.timeDisclosurePolicy)}</dd></div>
+                  <div><dt>{t("replay.hub.equityLeverage")}</dt><dd>{draft.initialEquity} · {draft.maxLeverage}×</dd></div>
+                  <div><dt>{t("replay.hub.posMargin")}</dt><dd>{draft.positionMode === "HEDGE" ? t("replay.hub.hedgeShort") : t("replay.hub.oneWayShort")} · {draft.marginMode === "ISOLATED" ? t("replay.hub.isolatedShort") : t("replay.hub.crossShort")}</dd></div>
+                  <div><dt>{t("replay.hub.symbol")}</dt><dd>{t("replay.hub.pickAfterRun")}</dd></div>
                 </dl>
               </section>
               <section className="training-hub-summary-card">
-                <h3>能力与 fidelity 边界</h3>
+                <h3>{t("replay.hub.boundary")}</h3>
                 <dl>
-                  <div><dt>账户历史</dt><dd>{evaluation.unsupported.account_history}</dd></div>
-                  <div><dt>资金费</dt><dd>{evaluation.unsupported.funding}</dd></div>
-                  <div><dt>历史盘口</dt><dd>{evaluation.unsupported.historical_l2}</dd></div>
-                  <div><dt>动态规则</dt><dd>{evaluation.unsupported.rule_changes}</dd></div>
-                  <div><dt>逐仓保证金</dt><dd>{evaluation.unsupported.isolated_margin}</dd></div>
+                  <div><dt>{t("replay.hub.accountHistory")}</dt><dd>{evaluation.unsupported.account_history}</dd></div>
+                  <div><dt>{t("replay.hub.funding")}</dt><dd>{evaluation.unsupported.funding}</dd></div>
+                  <div><dt>{t("replay.hub.book")}</dt><dd>{evaluation.unsupported.historical_l2}</dd></div>
+                  <div><dt>{t("replay.hub.ruleChanges")}</dt><dd>{evaluation.unsupported.rule_changes}</dd></div>
+                  <div><dt>{t("replay.hub.isolatedMargin")}</dt><dd>{evaluation.unsupported.isolated_margin}</dd></div>
                 </dl>
               </section>
               {evaluation.errors.length > 0 && (
@@ -630,10 +634,10 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
                 disabled={!evaluation.canSubmit || busy}
                 onClick={() => void runtime.actions.createRun(draft)}
               >
-                {busy ? busyLabel : "确认时间并创建 Run"}
+                {busy ? busyLabel : t("replay.hub.submit")}
               </button>
-              <button type="button" onClick={runtime.actions.closeCreate} disabled={busy}>取消</button>
-              <p>提交后服务端原子创建；历史数据仅在进入具体训练时按需加载。</p>
+              <button type="button" onClick={runtime.actions.closeCreate} disabled={busy}>{t("replay.hub.cancel")}</button>
+              <p>{t("replay.hub.submitNote")}</p>
             </div>
           </aside>
         </div>
@@ -648,6 +652,7 @@ export default function TrainingHubDialog({
   onRequestClose,
   launchLabel,
 }: TrainingHubDialogProps) {
+  useLocale();
   const busy = runtime.operation !== null;
   const modal = presentation === "modal";
   const [deleteCandidate, setDeleteCandidate] = useState<TrainingRunCard | null>(
@@ -675,58 +680,58 @@ export default function TrainingHubDialog({
           <div className="training-hub-brand">
             <div className="training-hub-brand-mark" aria-hidden="true">R2</div>
             <div>
-              <span className="training-hub-kicker">K 线回放 · 存档大厅</span>
-              <h1 id="training-hub-title">训练存档大厅</h1>
+              <span className="training-hub-kicker">{t("replay.hub.kicker")}</span>
+              <h1 id="training-hub-title">{t("replay.hub.title")}</h1>
               <p>
-                {launchLabel ?? "这里只读取轻量存档摘要；历史数据集在进入具体训练前不会加载。"}
+                {launchLabel ?? t("replay.hub.subtitle")}
               </p>
             </div>
           </div>
           <div className="training-hub-heading-actions">
             <button type="button" onClick={() => void runtime.actions.openStorage()} disabled={busy}>
-              存储管理
+              {t("replay.hub.storage")}
             </button>
             {modal ? (
-              <button type="button" onClick={onRequestClose}>关闭</button>
+              <button type="button" onClick={onRequestClose}>{t("replay.hub.close")}</button>
             ) : (
-              <a href="/" target="_blank" rel="noopener noreferrer">实时行情 ↗</a>
+              <a href="/" target="_blank" rel="noopener noreferrer">{t("replay.hub.live")}</a>
             )}
-            <button type="button" onClick={runtime.actions.refresh} disabled={busy}>刷新</button>
+            <button type="button" onClick={runtime.actions.refresh} disabled={busy}>{t("replay.hub.refresh")}</button>
             <button className="training-hub-primary-button" type="button" onClick={() => void runtime.actions.openCreate()} disabled={busy}>
-              新建训练
+              {t("replay.hub.new")}
             </button>
           </div>
         </header>
 
-        <section className="training-hub-stats" aria-label="存档概览">
-          <article data-tone="violet"><span>全部</span><strong>{loadedRunCount}</strong><small>当前列表</small></article>
-          <article data-tone="amber"><span>可继续</span><strong>{resumableRunCount}</strong><small>可进入的存档</small></article>
-          <article data-tone="green"><span>进行中</span><strong>{activeRunCount}</strong><small>正在播放</small></article>
-          <article data-tone="cyan"><span>已结束</span><strong>{completedRunCount}</strong><small>可打开复盘</small></article>
+        <section className="training-hub-stats" aria-label={t("replay.hub.overview")}>
+          <article data-tone="violet"><span>{t("replay.hub.statsAll")}</span><strong>{loadedRunCount}</strong><small>{t("replay.hub.statsAllHint")}</small></article>
+          <article data-tone="amber"><span>{t("replay.hub.statsResume")}</span><strong>{resumableRunCount}</strong><small>{t("replay.hub.statsResumeHint")}</small></article>
+          <article data-tone="green"><span>{t("replay.hub.statsActive")}</span><strong>{activeRunCount}</strong><small>{t("replay.hub.statsActiveHint")}</small></article>
+          <article data-tone="cyan"><span>{t("replay.hub.statsEnded")}</span><strong>{completedRunCount}</strong><small>{t("replay.hub.statsEndedHint")}</small></article>
         </section>
 
         <div className="training-hub-toolbar">
-          <div className="training-hub-filters" aria-label="存档筛选">
-            <div className="training-hub-filter-chips" role="group" aria-label="快捷状态">
+          <div className="training-hub-filters" aria-label={t("replay.hub.filterStatus")}>
+            <div className="training-hub-filter-chips" role="group" aria-label={t("replay.hub.filterStatus")}>
               {([
-                [null, "全部"],
-                ["AWAITING_MARKET", "待选商品"],
-                ["PAUSED", "暂停中"],
-                ["PLAYING", "进行中"],
-                ["ENDED", "已结束"],
-              ] as const).map(([state, label]) => (
+                [null, "replay.hub.all"],
+                ["AWAITING_MARKET", "replay.state.awaiting"],
+                ["PAUSED", "replay.hub.pausedChip"],
+                ["PLAYING", "replay.state.playing"],
+                ["ENDED", "replay.state.ended"],
+              ] as const).map(([state, labelKey]) => (
                 <button
-                  key={label}
+                  key={labelKey}
                   type="button"
                   aria-pressed={runtime.filters.state === state}
                   onClick={() => runtime.actions.setFilters({ ...runtime.filters, state })}
                 >
-                  {label}
+                  {t(labelKey)}
                 </button>
               ))}
             </div>
             <label>
-              历史源
+              {t("replay.hub.filterSource")}
               <select
                 value={runtime.filters.sourceKind ?? ""}
                 onChange={(event) => runtime.actions.setFilters({
@@ -734,13 +739,13 @@ export default function TrainingHubDialog({
                   sourceKind: event.target.value === "" ? null : event.target.value as ReplayV2SourceKind,
                 })}
               >
-                <option value="">全部</option>
-                <option value="BAR">K 线</option>
-                <option value="AGG_TRADE">成交</option>
+                <option value="">{t("replay.hub.all")}</option>
+                <option value="BAR">{t("replay.source.bar")}</option>
+                <option value="AGG_TRADE">{t("replay.source.agg")}</option>
               </select>
             </label>
             <label>
-              可用性
+              {t("replay.hub.filterCompat")}
               <select
                 value={runtime.filters.compatibility ?? ""}
                 onChange={(event) => runtime.actions.setFilters({
@@ -750,14 +755,14 @@ export default function TrainingHubDialog({
                     : event.target.value as TrainingRunCompatibility,
                 })}
               >
-                <option value="">全部</option>
-                <option value="READY">可用</option>
-                <option value="UNAVAILABLE">不可用</option>
+                <option value="">{t("replay.hub.all")}</option>
+                <option value="READY">{t("replay.compat.ready")}</option>
+                <option value="UNAVAILABLE">{t("replay.compat.blocked")}</option>
               </select>
             </label>
           </div>
           <span className="training-hub-toolbar-meta">
-            已加载 {loadedRunCount} 条{runtime.nextCursor !== null ? " · 还有下一页" : " · 已到当前列表末尾"}
+            {t("replay.hub.loaded", { count: loadedRunCount })}{runtime.nextCursor !== null ? t("replay.hub.hasNext") : t("replay.hub.endOfList")}
           </span>
         </div>
 
@@ -767,28 +772,28 @@ export default function TrainingHubDialog({
             <span>{runtime.error.message}</span>
             {runtime.error.code === "CATALOG_EPOCH_MISMATCH" && (
               <button type="button" onClick={() => void runtime.actions.openCreate()}>
-                重新校验能力目录
+                {t("replay.hub.revalidate")}
               </button>
             )}
           </div>
         )}
 
         {runtime.phase === "LOADING" && runtime.items.length === 0 ? (
-          <div className="training-hub-empty"><div className="replay-loading-spinner" />正在读取存档摘要…</div>
+          <div className="training-hub-empty"><div className="replay-loading-spinner" />{t("replay.hub.loading")}</div>
         ) : runtime.items.length === 0 ? (
           <div className="training-hub-empty">
             <div className="training-hub-empty-mark" aria-hidden="true">R2</div>
-            <strong>还没有训练存档</strong>
-            <span>创建第一条服务端权威训练；默认使用盲化随机窗口。</span>
-            <button type="button" onClick={() => void runtime.actions.openCreate()} disabled={busy}>新建第一条训练</button>
+            <strong>{t("replay.hub.emptyTitle")}</strong>
+            <span>{t("replay.hub.emptyHint")}</span>
+            <button type="button" onClick={() => void runtime.actions.openCreate()} disabled={busy}>{t("replay.hub.emptyCreate")}</button>
           </div>
         ) : (
-          <div className="training-hub-card-grid" aria-label="训练存档列表">
+          <div className="training-hub-card-grid" aria-label={t("replay.hub.list")}>
             {runtime.items.map((card) => (
               <article className="training-hub-card" data-state={card.state} key={card.run_id}>
                 <header className="training-hub-card-head">
                   <div>
-                    <span>训练 · {trainingIntegrityLabel(card.integrity_mode)}</span>
+                    <span>{t("replay.hub.cardKicker", { mode: trainingIntegrityLabel(card.integrity_mode) })}</span>
                     <h2>{card.name}</h2>
                   </div>
                   <strong className="training-hub-state-badge" data-run-state={card.state}>{trainingRunStateLabel(card.state)}</strong>
@@ -796,12 +801,12 @@ export default function TrainingHubDialog({
                 <div className="training-hub-card-hero">
                   {card.state === "AWAITING_MARKET" || card.last_symbol === null ? (
                     <>
-                      <span>当前商品</span>
-                      <strong>未选择商品</strong>
+                      <span>{t("replay.hub.currentSymbol")}</span>
+                      <strong>{t("replay.hub.noSymbol")}</strong>
                     </>
                   ) : (
                     <>
-                      <span>账户权益</span>
+                      <span>{t("replay.hub.equity")}</span>
                       <strong>
                         {card.equity_status === "CURRENT" && card.equity !== null
                           ? formatTrainingEquity(card.equity)
@@ -812,12 +817,12 @@ export default function TrainingHubDialog({
                   )}
                 </div>
                 <dl className="training-hub-card-meta">
-                  <div><dt>账户商品</dt><dd>{card.last_symbol ?? "未选择"}{card.subscribed_track_count > 0 ? ` · ${card.subscribed_track_count} 个活动轨道` : ""}</dd></div>
-                  <div><dt>历史源</dt><dd>{trainingSourceKindLabel(card.source_kind)}</dd></div>
-                  <div><dt>进度</dt><dd>#{card.progress.source_sequence}</dd></div>
-                  <div><dt>时间披露</dt><dd>{trainingTimeDisclosureLabel(card.time_disclosure_policy)}</dd></div>
-                  <div><dt>兼容性</dt><dd>{trainingCompatibilityLabel(card.compatibility)}</dd></div>
-                  <div><dt>完整性</dt><dd>{trainingIntegrityLabel(card.integrity_mode)}</dd></div>
+                  <div><dt>{t("replay.hub.accountSymbol")}</dt><dd>{card.last_symbol ?? t("replay.hub.unselected")}{card.subscribed_track_count > 0 ? t("replay.hub.activeTracks", { count: card.subscribed_track_count }) : ""}</dd></div>
+                  <div><dt>{t("replay.hub.sourceKind")}</dt><dd>{trainingSourceKindLabel(card.source_kind)}</dd></div>
+                  <div><dt>{t("replay.hub.progress")}</dt><dd>#{card.progress.source_sequence}</dd></div>
+                  <div><dt>{t("replay.hub.timeDisclosure")}</dt><dd>{trainingTimeDisclosureLabel(card.time_disclosure_policy)}</dd></div>
+                  <div><dt>{t("replay.hub.compat")}</dt><dd>{trainingCompatibilityLabel(card.compatibility)}</dd></div>
+                  <div><dt>{t("replay.hub.integrity")}</dt><dd>{trainingIntegrityLabel(card.integrity_mode)}</dd></div>
                 </dl>
                 <p className="training-hub-card-message">{trainingRunStatusMessage(card)}</p>
                 <footer className="training-hub-card-actions">
@@ -835,7 +840,7 @@ export default function TrainingHubDialog({
                     disabled={busy}
                     onClick={() => setDeleteCandidate(card)}
                   >
-                    删除
+                    {t("replay.hub.delete")}
                   </button>
                 </footer>
               </article>
@@ -850,7 +855,7 @@ export default function TrainingHubDialog({
               disabled={busy}
               onClick={runtime.actions.loadNext}
             >
-              加载下一页
+              {t("replay.hub.loadMore")}
             </button>
           </div>
         )}

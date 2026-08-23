@@ -23,6 +23,8 @@ import {
   TapeRailIcon,
   WatchlistRailIcon,
 } from "./marketRailIcons.js";
+import { t, type LocaleId } from "../i18n/index.js";
+import { useLocale } from "../i18n/useLocale.js";
 import type { MarketRailViewDescriptor } from "./marketRailTypes.js";
 import MarketRightRailFrame from "./MarketRightRailFrame.js";
 
@@ -42,51 +44,53 @@ export interface RightMarketRailProps {
   renderExtraView?: (viewId: string, height: number) => React.ReactNode;
 }
 
-const BUILT_IN_VIEWS: MarketRailViewDescriptor[] = [
-  {
-    id: LIVE_RAIL_VIEW_IDS.watchlist,
-    title: "自选",
-    icon: <WatchlistRailIcon />,
-    order: 10,
-    sizing: "flex",
-    defaultHeight: 260,
-    minHeight: MARKET_RAIL_MIN_SIDEBAR_HEIGHT,
-    collapsedSummary: "列表与行情",
-  },
-  {
-    id: LIVE_RAIL_VIEW_IDS.orderBook,
-    title: "盘口",
-    icon: <OrderBookRailIcon />,
-    order: 20,
-    sizing: "fixed",
-    defaultHeight: MARKET_DOCK_MIN_HEIGHT,
-    minHeight: MARKET_DOCK_MIN_HEIGHT,
-    maxHeight: MARKET_DOCK_MAX_HEIGHT,
-    collapsedSummary: "市场深度",
-  },
-  {
-    id: LIVE_RAIL_VIEW_IDS.tape,
-    title: "成交",
-    icon: <TapeRailIcon />,
-    order: 30,
-    sizing: "fixed",
-    defaultHeight: MARKET_DOCK_MIN_HEIGHT,
-    minHeight: MARKET_DOCK_MIN_HEIGHT,
-    maxHeight: MARKET_DOCK_MAX_HEIGHT,
-    collapsedSummary: "实时逐笔",
-  },
-  {
-    id: LIVE_RAIL_VIEW_IDS.profile,
-    title: "分布",
-    icon: <ProfileRailIcon />,
-    order: 40,
-    sizing: "fixed",
-    defaultHeight: 300,
-    minHeight: MARKET_DOCK_MIN_HEIGHT,
-    maxHeight: MARKET_DOCK_MAX_HEIGHT,
-    collapsedSummary: "成交分布",
-  },
-];
+function builtInViews(locale: LocaleId): MarketRailViewDescriptor[] {
+  return [
+    {
+      id: LIVE_RAIL_VIEW_IDS.watchlist,
+      title: t("rail.watchlist", {}, locale),
+      icon: <WatchlistRailIcon />,
+      order: 10,
+      sizing: "flex",
+      defaultHeight: 260,
+      minHeight: MARKET_RAIL_MIN_SIDEBAR_HEIGHT,
+      collapsedSummary: t("rail.watchlistSummary", {}, locale),
+    },
+    {
+      id: LIVE_RAIL_VIEW_IDS.orderBook,
+      title: t("rail.orderBook", {}, locale),
+      icon: <OrderBookRailIcon />,
+      order: 20,
+      sizing: "fixed",
+      defaultHeight: MARKET_DOCK_MIN_HEIGHT,
+      minHeight: MARKET_DOCK_MIN_HEIGHT,
+      maxHeight: MARKET_DOCK_MAX_HEIGHT,
+      collapsedSummary: t("rail.orderBookSummary", {}, locale),
+    },
+    {
+      id: LIVE_RAIL_VIEW_IDS.tape,
+      title: t("rail.tape", {}, locale),
+      icon: <TapeRailIcon />,
+      order: 30,
+      sizing: "fixed",
+      defaultHeight: MARKET_DOCK_MIN_HEIGHT,
+      minHeight: MARKET_DOCK_MIN_HEIGHT,
+      maxHeight: MARKET_DOCK_MAX_HEIGHT,
+      collapsedSummary: t("rail.tapeSummary", {}, locale),
+    },
+    {
+      id: LIVE_RAIL_VIEW_IDS.profile,
+      title: t("rail.profile", {}, locale),
+      icon: <ProfileRailIcon />,
+      order: 40,
+      sizing: "fixed",
+      defaultHeight: 300,
+      minHeight: MARKET_DOCK_MIN_HEIGHT,
+      maxHeight: MARKET_DOCK_MAX_HEIGHT,
+      collapsedSummary: t("rail.profileSummary", {}, locale),
+    },
+  ];
+}
 
 function RightMarketRail({
   watchlist,
@@ -101,14 +105,15 @@ function RightMarketRail({
   onViewHeightChange,
   renderExtraView,
 }: RightMarketRailProps) {
+  const locale = useLocale();
   const contributed = useSyncExternalStore(
     subscribeMarketRailRegistry,
     listContributedMarketRailViews,
     listContributedMarketRailViews,
   );
   const views = useMemo(
-    () => mergeMarketRailViews(BUILT_IN_VIEWS, contributed),
-    [contributed],
+    () => mergeMarketRailViews(builtInViews(locale), contributed),
+    [contributed, locale],
   );
 
   const closeView = useCallback((viewId: string) => {

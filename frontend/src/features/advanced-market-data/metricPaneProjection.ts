@@ -1,3 +1,4 @@
+import { getLocale, t } from "../../i18n/index.js";
 import type {
   IndicatorPaneLegendItem,
   IndicatorPanePointMetadata,
@@ -69,32 +70,34 @@ type OpenInterestMetricsInput = Pick<
 
 const FUNDING_REALTIME_STALE_AFTER_MS = 15_000;
 
-const FUNDING_RATE_LEGEND: readonly IndicatorPaneLegendItem[] = Object.freeze([
-  {
-    id: "exchange-settlement",
-    label: "交易所结算",
-    appearance: "solid",
-    description: "交易所公布的最终结算资金费率",
-  },
-  {
-    id: "derived-history",
-    label: "历史估算",
-    appearance: "estimated",
-    description: "仅使用当时已有数据计算的无前视历史估算",
-  },
-  {
-    id: "exchange-realtime",
-    label: "交易所实时",
-    appearance: "realtime",
-    description: "交易所实时推送的下一周期资金费率",
-  },
-  {
-    id: "realtime-carried",
-    label: "实时沿用",
-    appearance: "carried",
-    description: "同一资金周期内沿用最近一次交易所实时值",
-  },
-]);
+function fundingRateLegend(): readonly IndicatorPaneLegendItem[] {
+  return [
+    {
+      id: "exchange-settlement",
+      label: t("pane.funding.legend.settlement"),
+      appearance: "solid",
+      description: t("pane.funding.legend.settlementDesc"),
+    },
+    {
+      id: "derived-history",
+      label: t("pane.funding.legend.histEst"),
+      appearance: "estimated",
+      description: t("pane.funding.legend.histEstDesc"),
+    },
+    {
+      id: "exchange-realtime",
+      label: t("pane.funding.legend.realtime"),
+      appearance: "realtime",
+      description: t("pane.funding.legend.realtimeDesc"),
+    },
+    {
+      id: "realtime-carried",
+      label: t("pane.funding.legend.carried"),
+      appearance: "carried",
+      description: t("pane.funding.legend.carriedDesc"),
+    },
+  ];
+}
 
 function finiteNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -225,43 +228,49 @@ function fundingPointMetadata(
     ? "carried"
     : baseQuality;
   const sourceLabel = {
-    exchange_settlement: "交易所历史结算",
-    derived_history: "模型历史估算",
-    exchange_realtime: "交易所实时预估",
+    exchange_settlement: t("pane.src.settlementHist"),
+    derived_history: t("pane.src.modelHist"),
+    exchange_realtime: t("pane.src.realtimeEst"),
   }[provenance];
   const qualityLabel = {
-    final: "最终值",
-    estimated: "估算值",
-    live: "实时",
-    carried: "同周期沿用",
-    stale: "实时已过期",
+    final: t("pane.q.final"),
+    estimated: t("pane.q.estimated"),
+    live: t("pane.q.live"),
+    carried: t("pane.q.carried"),
+    stale: t("pane.q.stale"),
   }[effectiveQuality];
-  const details = [`来源：${sourceLabel}`, `状态：${qualityLabel}`];
+  const details = [
+    t("pane.detail.source", { label: sourceLabel }),
+    t("pane.detail.status", { label: qualityLabel }),
+  ];
   if (provenance === "exchange_settlement") {
     const fundingTime = formatFundingTime(record.data.funding_time_ms);
-    if (fundingTime) details.push(`结算时间：${fundingTime}`);
+    if (fundingTime) details.push(t("pane.detail.settleTime", { time: fundingTime }));
   } else if (provenance === "derived_history") {
     const cutoff = formatFundingTime(record.data.sample_time_ms);
     const target = formatFundingTime(fundingRateTargetTimeMs(record));
-    if (cutoff) details.push(`观测截止：${cutoff}`);
-    if (target) details.push(`目标结算：${target}`);
+    if (cutoff) details.push(t("pane.detail.cutoff", { time: cutoff }));
+    if (target) details.push(t("pane.detail.target", { time: target }));
     if (typeof record.data.formula_version === "string") {
-      details.push(`公式：${record.data.formula_version}`);
+      details.push(t("pane.detail.formula", { version: record.data.formula_version }));
     }
     if (typeof record.data.input_resolution === "string") {
-      details.push(`输入粒度：${record.data.input_resolution}`);
+      details.push(t("pane.detail.resolution", { resolution: record.data.input_resolution }));
     }
     const inputCoverage = finiteNumber(record.data.input_coverage);
-    if (inputCoverage !== null) details.push(`输入覆盖：${Math.round(inputCoverage * 100)}%`);
+    if (inputCoverage !== null) {
+      details.push(t("pane.detail.coverage", { pct: Math.round(inputCoverage * 100) }));
+    }
   } else {
     const observedAt = formatFundingTime(
       finiteNumber(record.data.observed_at_ms) ?? record.received_at_ms,
     );
     const target = formatFundingTime(fundingRateTargetTimeMs(record));
-    if (observedAt) details.push(`观测时间：${observedAt}`);
-    if (target) details.push(`目标结算：${target}`);
+    if (observedAt) details.push(t("pane.detail.observed", { time: observedAt }));
+    if (target) details.push(t("pane.detail.target", { time: target }));
   }
   const valueLabel = formatFundingValue(value);
+  const sep = getLocale() === "en" ? ", " : "，";
   return {
     time,
     value,
@@ -269,7 +278,7 @@ function fundingPointMetadata(
     sourceLabel,
     qualityLabel,
     appearance: fundingAppearance(record, carried, stale),
-    accessibilityLabel: `资金费率 ${valueLabel}，${details.join("，")}`,
+    accessibilityLabel: t("pane.funding.a11y", { value: valueLabel, details: details.join(sep) }),
   };
 }
 
@@ -278,8 +287,10 @@ function openInterestPointMetadata(
   point: IndicatorValuePoint,
 ): IndicatorPanePointMetadata {
   const provisional = record.data.is_final === false || record.data.sample_kind === "provisional";
-  const sourceLabel = provisional ? "交易所实时" : "交易所历史";
-  const qualityLabel = provisional ? "临时值" : isFinal(record) ? "最终值" : "历史观测";
+  const sourceLabel = provisional ? t("pane.src.exchangeRealtime") : t("pane.src.exchangeHistory");
+  const qualityLabel = provisional
+    ? t("pane.q.provisional")
+    : isFinal(record) ? t("pane.q.final") : t("pane.q.historical");
   const valueLabel = formatMarketMetricValue(point.value);
   return {
     time: point.time,
@@ -288,7 +299,11 @@ function openInterestPointMetadata(
     sourceLabel,
     qualityLabel,
     appearance: provisional ? "realtime" : "solid",
-    accessibilityLabel: `Open Interest ${valueLabel}，来源：${sourceLabel}，状态：${qualityLabel}`,
+    accessibilityLabel: t("pane.oi.a11y", {
+      value: valueLabel,
+      source: sourceLabel,
+      quality: qualityLabel,
+    }),
   };
 }
 
@@ -617,7 +632,7 @@ export function buildFundingRatePaneFromHistoryProjection(
   const fundingLine: IndicatorLine = {
     id: "advanced-funding-rate-line",
     indicatorId: "advanced-market-data",
-    name: "资金费率 (%)",
+    name: t("pane.funding.percent"),
     pane: "advanced-funding",
     type: "histogram",
     color: "#22c55e",
@@ -626,15 +641,15 @@ export function buildFundingRatePaneFromHistoryProjection(
   };
   return {
     id: "advanced-funding",
-    label: "资金费率 (%)",
+    label: t("pane.funding.percent"),
     lines: [fundingLine],
     owner: { kind: "market-study", id: "market:funding-rate" },
     dataMarketPane: "funding-rate",
-    legendItems: FUNDING_RATE_LEGEND,
+    legendItems: fundingRateLegend(),
     pointMetadata: fundingProjection.metadata,
     ...(nextSettlementTimeMs === null ? {} : {
       liveCountdown: {
-        label: "下次结算",
+        label: t("pane.funding.next"),
         targetTimeMs: nextSettlementTimeMs,
       },
     }),
@@ -695,7 +710,7 @@ export function buildOpenInterestPane(
     dataMarketPane: "open-interest",
     pointMetadata: [...pointMetadataByTime.values()].sort((left, right) => left.time - right.time),
     pointMetadataFallback: "none",
-    missingPointText: "当前 K 线没有未平仓量观测",
+    missingPointText: t("pane.oi.missing"),
   };
 }
 

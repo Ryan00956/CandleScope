@@ -1,3 +1,5 @@
+import { t, type MessageKey } from "../i18n/index.js";
+
 // Shared interval parsing and display helpers.
 export const CUSTOM_INTERVAL_RE = /^(\d+)([smhdwM])$/;
 export const MAX_CALENDAR_MONTH_INTERVAL = 12_000;
@@ -30,7 +32,7 @@ export interface IntervalSemanticSpec extends IntervalParts {
 
 export interface IntervalUnitOption {
   value: IntervalUnit;
-  label: string;
+  labelKey: MessageKey;
   shortLabel: IntervalUnit;
 }
 
@@ -46,12 +48,12 @@ export interface IntervalDurationGroup<T extends IntervalDurationItem> {
 }
 
 export const INTERVAL_UNITS = [
-  { value: "s", label: "秒", shortLabel: "s" },
-  { value: "m", label: "分钟", shortLabel: "m" },
-  { value: "h", label: "小时", shortLabel: "h" },
-  { value: "d", label: "天", shortLabel: "d" },
-  { value: "w", label: "周", shortLabel: "w" },
-  { value: "M", label: "月", shortLabel: "M" },
+  { value: "s", labelKey: "interval.unit.s", shortLabel: "s" },
+  { value: "m", labelKey: "interval.unit.m", shortLabel: "m" },
+  { value: "h", labelKey: "interval.unit.h", shortLabel: "h" },
+  { value: "d", labelKey: "interval.unit.d", shortLabel: "d" },
+  { value: "w", labelKey: "interval.unit.w", shortLabel: "w" },
+  { value: "M", labelKey: "interval.unit.M", shortLabel: "M" },
 ] as const satisfies readonly IntervalUnitOption[];
 
 function isIntervalUnit(value: string): value is IntervalUnit {
@@ -205,24 +207,32 @@ export function canResolveIntervalFromNativeValues(
 }
 
 export function getIntervalGroupLabel(seconds: number): string {
-  if (seconds < 60) return "Seconds";
-  if (seconds < 3600) return "Minutes";
-  if (seconds < 86400) return "Hours";
-  return "Days";
+  if (seconds < 60) return t("interval.group.seconds");
+  if (seconds < 3600) return t("interval.group.minutes");
+  if (seconds < 86400) return t("interval.group.hours");
+  return t("interval.group.days");
 }
 
 export function getIntervalGroupLabelZh(seconds: number): string {
-  if (seconds < 60) return "秒级";
-  if (seconds < 3600) return "分钟级";
-  if (seconds < 86400) return "小时级";
-  return "日线+";
+  return getIntervalGroupLabel(seconds);
 }
+
+export const INTERVAL_UNIT_MESSAGE_KEYS = {
+  s: "interval.unit.s",
+  m: "interval.unit.m",
+  h: "interval.unit.h",
+  d: "interval.unit.d",
+  w: "interval.unit.w",
+  M: "interval.unit.M",
+} as const;
 
 export function formatIntervalDescription(interval: unknown): string {
   const parts = parseIntervalParts(interval);
-  if (!parts) return "格式无效";
-  const unit = INTERVAL_UNITS.find((item) => item.value === parts.unit);
-  return `${parts.amount} ${unit?.label || parts.unit}`;
+  if (!parts) return t("interval.invalidFormat");
+  return t("interval.description", {
+    amount: parts.amount,
+    unit: t(INTERVAL_UNIT_MESSAGE_KEYS[parts.unit]),
+  });
 }
 
 export function formatSecondsCompact(seconds: unknown): string {
@@ -248,9 +258,9 @@ export function groupIntervalsByDuration<T extends IntervalDurationItem>(
   const days = sorted.filter((item) => item.seconds >= 86400);
 
   return [
-    { label: "Seconds", labelZh: "秒级", items: seconds },
-    { label: "Minutes", labelZh: "分钟级", items: minutes },
-    { label: "Hours", labelZh: "小时级", items: hours },
-    { label: "Days", labelZh: "日线+", items: days },
+    { label: t("interval.group.seconds"), labelZh: t("interval.group.seconds"), items: seconds },
+    { label: t("interval.group.minutes"), labelZh: t("interval.group.minutes"), items: minutes },
+    { label: t("interval.group.hours"), labelZh: t("interval.group.hours"), items: hours },
+    { label: t("interval.group.days"), labelZh: t("interval.group.days"), items: days },
   ].filter((group) => group.items.length > 0);
 }

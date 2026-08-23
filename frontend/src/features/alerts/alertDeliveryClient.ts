@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import type { AlertNotificationMessage } from "./alertTypes.js";
 
 export const ALERT_RULE_STATE_CHANGED_EVENT = "candlescope:alert-rule-state-changed";
@@ -63,7 +64,7 @@ export async function deliverAlertNotification(
       return { status: "denied", detail: `permission_${window.Notification.permission}` };
     }
     const symbol = notification.target.symbol || "CandleScope";
-    const browserNotification = new window.Notification(`警报 · ${symbol}`, {
+    const browserNotification = new window.Notification(t("alert.toastHit", { symbol }), {
       body: notification.message,
       tag: notification.ruleId,
     });

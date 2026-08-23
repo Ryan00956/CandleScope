@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import type { AggregateTrade, TradeFlowSide } from "./tradeFlowTypes.js";
 
 const PROTOCOL = "tradeflow.v1";
@@ -159,7 +160,9 @@ export function parseTradeFlowSocketMessage(value: unknown): ParsedTradeFlowSock
     return {
       kind: "resync",
       protocol: parsedProtocol,
-      message: dropped ? `后端检测到成交投递缺口（丢失至少 ${dropped} 条）` : "后端要求重新同步成交序列",
+      message: dropped
+        ? t("trade.rt.resyncDropped", { count: dropped })
+        : t("trade.rt.resyncRequired"),
     };
   }
   throw new TradeFlowPayloadError("message.type", `unsupported message type ${type}`);

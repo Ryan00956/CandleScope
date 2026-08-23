@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import type { ReplayCatalogEntry } from "./replayTypes.js";
 import type {
   ReplayV2IntegrityMode,
@@ -10,33 +11,33 @@ import type {
 export function trainingRunStateLabel(state: ReplayV2RunState): string {
   switch (state) {
     case "AWAITING_MARKET":
-      return "待选商品";
+      return t("replay.state.awaiting");
     case "PAUSED":
-      return "已暂停";
+      return t("replay.state.paused");
     case "PLAYING":
-      return "进行中";
+      return t("replay.state.playing");
     case "ADVANCING":
-      return "推进中";
+      return t("replay.state.advancing");
     case "ENDED":
-      return "已结束";
+      return t("replay.state.ended");
     case "ERROR":
-      return "异常";
+      return t("replay.state.error");
   }
 }
 
 export function trainingIntegrityLabel(mode: ReplayV2IntegrityMode): string {
   switch (mode) {
     case "CHALLENGE":
-      return "挑战";
+      return t("replay.hub.challenge");
     case "PRACTICE":
-      return "练习";
+      return t("replay.hub.practice");
     case "SANDBOX":
-      return "沙盒";
+      return t("replay.hub.sandbox");
   }
 }
 
 export function trainingSourceKindLabel(kind: ReplayV2SourceKind): string {
-  return kind === "AGG_TRADE" ? "成交" : "K 线";
+  return kind === "AGG_TRADE" ? t("replay.source.agg") : t("replay.source.bar");
 }
 
 export function trainingTimeDisclosureLabel(
@@ -44,36 +45,36 @@ export function trainingTimeDisclosureLabel(
 ): string {
   switch (policy) {
     case "NONE":
-      return "显示历史时间";
+      return t("replay.time.none");
     case "HIDE_YEAR":
-      return "隐藏年份";
+      return t("replay.time.hideYear");
     case "HIDE_MONTH":
-      return "隐藏年月";
+      return t("replay.time.hideMonth");
     case "HIDE_DAY":
-      return "相对日期";
+      return t("replay.time.hideDay");
     case "HIDE_HOUR":
-      return "相对小时";
+      return t("replay.time.hideHour");
     case "HIDE_MINUTE":
-      return "相对分钟";
+      return t("replay.time.hideMinute");
     case "HIDE_ALL":
-      return "完全相对时间";
+      return t("replay.time.hideAll");
   }
 }
 
 export function trainingCompatibilityLabel(
   value: TrainingRunCompatibility,
 ): string {
-  return value === "READY" ? "可用" : "不可用";
+  return value === "READY" ? t("replay.compat.ready") : t("replay.compat.blocked");
 }
 
 export function trainingMarketTypeLabel(marketType: string): string {
   switch (marketType) {
     case "futures":
-      return "永续";
+      return t("replay.market.futures");
     case "spot":
-      return "现货";
+      return t("replay.market.spot");
     case "margin":
-      return "杠杆";
+      return t("replay.market.margin");
     default:
       return marketType;
   }
@@ -128,8 +129,8 @@ export function formatReplayMarketCoverage(
   entry: ReplayCatalogEntry,
   blind: boolean,
 ): string {
-  if (blind) return "覆盖已按披露策略隐藏";
+  if (blind) return t("replay.coverage.hidden");
   const bounds = entry.bounds;
-  if (bounds === null) return "覆盖范围待确认";
+  if (bounds === null) return t("replay.coverage.pending");
   return `${formatReplayUtcDate(bounds.earliest_open_ms)} – ${formatReplayUtcDate(bounds.latest_closed_open_ms)}`;
 }

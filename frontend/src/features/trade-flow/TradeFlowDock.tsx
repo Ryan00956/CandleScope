@@ -1,4 +1,6 @@
 import React, { useCallback, useMemo, useSyncExternalStore } from "react";
+import { getLocale, t } from "../../i18n/index.js";
+import { useLocale } from "../../i18n/useLocale.js";
 import { buildTradeFlowProfile } from "./tradeFlowProfile.js";
 import {
   TRADE_FLOW_BUBBLE_OPTIONS,
@@ -11,15 +13,19 @@ import type {
   TradeFlowRuntime,
 } from "./tradeFlowTypes.js";
 
-const STATUS_LABELS: Record<TradeFlowConnectionStatus, string> = {
-  idle: "未启用",
-  unsupported: "不可用",
-  connecting: "连接中",
-  reconnecting: "重连中",
-  live: "实时连续",
-  gap: "存在缺口",
-  error: "错误",
-};
+const TRADE_STATUS_KEYS = {
+  idle: "trade.status.idle",
+  unsupported: "trade.status.unsupported",
+  connecting: "trade.status.connecting",
+  reconnecting: "trade.status.reconnecting",
+  live: "trade.status.live",
+  gap: "trade.status.gap",
+  error: "trade.status.error",
+} as const satisfies Record<TradeFlowConnectionStatus, string>;
+
+function tradeStatusLabel(status: TradeFlowConnectionStatus): string {
+  return t(TRADE_STATUS_KEYS[status]);
+}
 
 export interface TradeFlowDockProps {
   runtime: TradeFlowRuntime;
@@ -57,7 +63,7 @@ function formatNotional(value: number): string {
 
 function formatTime(value: number): string {
   const date = new Date(value);
-  const base = date.toLocaleTimeString("zh-CN", {
+  const base = date.toLocaleTimeString(getLocale() === "zh-CN" ? "zh-CN" : "en-GB", {
     hour12: false,
     hour: "2-digit",
     minute: "2-digit",
@@ -67,15 +73,16 @@ function formatTime(value: number): string {
 }
 
 function TradeFlowStatus({ store }: { store: TradeFlowExternalStore }) {
+  useLocale();
   const status = useSyncExternalStore(
     store.subscribe,
     () => store.getSnapshot().status,
     () => store.getServerSnapshot().status,
   );
   return (
-    <span className={`tf-status tf-status-${status}`} title={STATUS_LABELS[status]}>
+    <span className={`tf-status tf-status-${status}`} title={tradeStatusLabel(status)}>
       <span className="tf-status-dot" aria-hidden="true" />
-      {STATUS_LABELS[status]}
+      {tradeStatusLabel(status)}
     </span>
   );
 }
@@ -87,10 +94,11 @@ const TapeRow = React.memo(function TapeRow({
   trade: AggregateTrade;
   largeThreshold: number;
 }) {
+  useLocale();
   const large = largeThreshold > 0 && trade.quoteQuantity >= largeThreshold;
   return (
     <div className={`tf-tape-row tf-${trade.aggressorSide} ${large ? "tf-large" : ""}`}>
-      <span className="tf-tape-side" aria-label={trade.aggressorSide === "buy" ? "主动买" : "主动卖"}>
+      <span className="tf-tape-side" aria-label={trade.aggressorSide === "buy" ? t("trade.buy") : t("trade.sell")}>
         {trade.aggressorSide === "buy" ? "B" : "S"}
       </span>
       <span>{formatPrice(trade.price)}</span>
@@ -110,10 +118,10 @@ function TradeFlowSummary({ snapshot }: {
   const buyIntensity = total > 0 ? snapshot.stats.buyQuote / total * 100 : 0;
   return (
     <div className="tf-summary">
-      <span className="tf-summary-buy">买 {formatNotional(snapshot.stats.buyQuote)} · {snapshot.stats.buyCount} 笔</span>
-      <span className="tf-summary-sell">卖 {formatNotional(snapshot.stats.sellQuote)} · {snapshot.stats.sellCount} 笔</span>
-      <span>强度 {buyIntensity.toFixed(1)}%</span>
-      <span>最大 {formatNotional(snapshot.stats.maxTradeNotional)}</span>
+      <span className="tf-summary-buy">{t("trade.buySummary", { notional: formatNotional(snapshot.stats.buyQuote), count: snapshot.stats.buyCount })}</span>
+      <span className="tf-summary-sell">{t("trade.sellSummary", { notional: formatNotional(snapshot.stats.sellQuote), count: snapshot.stats.sellCount })}</span>
+      <span>{t("trade.intensity", { value: buyIntensity.toFixed(1) })}</span>
+      <span>{t("trade.max", { value: formatNotional(snapshot.stats.maxTradeNotional) })}</span>
     </div>
   );
 }
@@ -130,9 +138,9 @@ function TradeFlowEmpty({
   const retryable = status === "gap" || status === "error" || status === "reconnecting";
   return (
     <div className={`tf-empty tf-empty-${status}`}>
-      <strong>{STATUS_LABELS[status]}</strong>
-      <span>{runtime.view.supportMessage || message || "等待第一笔聚合成交"}</span>
-      {retryable && <button type="button" onClick={runtime.actions.retry}>重新同步</button>}
+      <strong>{tradeStatusLabel(status)}</strong>
+      <span>{runtime.view.supportMessage || message || t("trade.waitFirst")}</span>
+      {retryable && <button type="button" onClick={runtime.actions.retry}>{t("trade.resync")}</button>}
     </div>
   );
 }
@@ -159,7 +167,7 @@ function TradeFlowTape({ runtime }: { runtime: TradeFlowRuntime }) {
     <div className="tf-body">
       <TradeFlowSummary snapshot={snapshot} />
       <div className="tf-tape-header" aria-hidden="true">
-        <span>方向</span><span>价格</span><span>数量</span><span>成交额</span><span>时间</span>
+        <span>{t("trade.side")}</span><span>{t("trade.price")}</span><span>{t("trade.qty")}</span><span>{t("trade.notional")}</span><span>{t("trade.time")}</span>
       </div>
       {rows.length > 0 ? (
         <div className="tf-tape-list" role="log" aria-live="off">
@@ -171,7 +179,7 @@ function TradeFlowTape({ runtime }: { runtime: TradeFlowRuntime }) {
         <TradeFlowEmpty
           runtime={runtime}
           status={snapshot.status}
-          message={snapshot.records.length > 0 ? "当前筛选条件下无成交" : snapshot.message}
+          message={snapshot.records.length > 0 ? t("trade.noMatch") : snapshot.message}
         />
       )}
     </div>
@@ -238,11 +246,11 @@ function TradeFlowProfileBody({ runtime }: { runtime: TradeFlowRuntime }) {
     <div className="tf-body tf-profile-body">
       <TradeFlowSummary snapshot={snapshot} />
       <div className="tf-profile-caption">
-        <span>实时 Footprint / Volume Profile</span>
-        <span>{profile.trades} 笔 · 步长 {profile.priceStep ? formatPrice(profile.priceStep) : "—"}</span>
+        <span>{t("trade.footprint")}</span>
+        <span>{t("trade.profileMeta", { trades: profile.trades, step: profile.priceStep ? formatPrice(profile.priceStep) : "—" })}</span>
       </div>
       <div className="tf-profile-header" aria-hidden="true">
-        <span>价格</span><span>主动买</span><span>主动卖</span><span>Delta</span><span>买×卖</span>
+        <span>{t("trade.price")}</span><span>{t("trade.buyVol")}</span><span>{t("trade.sellVol")}</span><span>{t("trade.delta")}</span><span>{t("trade.buySell")}</span>
       </div>
       {profile.rows.length > 0 ? (
         <div className="tf-profile-list">
@@ -252,7 +260,7 @@ function TradeFlowProfileBody({ runtime }: { runtime: TradeFlowRuntime }) {
         <TradeFlowEmpty
           runtime={runtime}
           status={snapshot.status}
-          message={snapshot.records.length > 0 ? "当前筛选条件下无成交" : snapshot.message}
+          message={snapshot.records.length > 0 ? t("trade.noMatch") : snapshot.message}
         />
       )}
     </div>
@@ -265,12 +273,13 @@ function TradeFlowDock({
   mode,
   onRequestClose,
 }: TradeFlowDockProps) {
+  useLocale();
   const preferences = runtime.view.preferences;
   return (
     <section
       className="order-book-dock trade-flow-dock"
       style={{ height }}
-      aria-label={mode === "profile" ? "成交分布" : "成交订单流"}
+      aria-label={mode === "profile" ? t("trade.profileAria") : t("trade.tapeAria")}
     >
       <header className="ob-header tf-header">
         {onRequestClose && (
@@ -278,42 +287,42 @@ function TradeFlowDock({
             type="button"
             className="ob-collapse-button"
             onClick={onRequestClose}
-            title={mode === "profile" ? "折叠分布" : "折叠成交"}
-            aria-label={mode === "profile" ? "折叠分布" : "折叠成交"}
+            title={mode === "profile" ? t("trade.collapseProfile") : t("trade.collapseTape")}
+            aria-label={mode === "profile" ? t("trade.collapseProfile") : t("trade.collapseTape")}
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
               <polyline points="9 18 15 12 9 6" />
             </svg>
           </button>
         )}
-        <span className="ob-title">{mode === "profile" ? "分布" : "成交"}</span>
+        <span className="ob-title">{mode === "profile" ? t("trade.profile") : t("trade.tape")}</span>
         <TradeFlowStatus store={runtime.view.store} />
       </header>
 
       <>
         <div className="tf-controls">
-          <div className="tf-side-switch" role="group" aria-label="成交方向过滤">
+          <div className="tf-side-switch" role="group" aria-label={t("trade.sideFilter")}>
             {(["all", "buy", "sell"] as const).map((side) => (
               <button
                 key={side}
                 type="button"
                 className={preferences.sideFilter === side ? "active" : ""}
                 onClick={() => runtime.actions.setSideFilter(side)}
-              >{side === "all" ? "全部" : side === "buy" ? "主动买" : "主动卖"}</button>
+              >{side === "all" ? t("trade.all") : side === "buy" ? t("trade.buy") : t("trade.sell")}</button>
             ))}
           </div>
-          <label title="成交带与分布的最小成交额">
-            <span>过滤</span>
+          <label title={t("trade.filterTitle")}>
+            <span>{t("trade.filter")}</span>
             <select value={preferences.minNotional} onChange={(event) => runtime.actions.setMinNotional(Number(event.target.value))}>
-              {TRADE_FLOW_NOTIONAL_OPTIONS.map((value) => <option key={value} value={value}>{value ? `≥ ${formatNotional(value)}` : "全部"}</option>)}
+              {TRADE_FLOW_NOTIONAL_OPTIONS.map((value) => <option key={value} value={value}>{value ? `≥ ${formatNotional(value)}` : t("trade.all")}</option>)}
             </select>
           </label>
-          <label title="主图大额成交气泡阈值">
-            <span>气泡</span>
+          <label title={t("trade.bubbleTitle")}>
+            <span>{t("trade.bubbles")}</span>
             <select value={preferences.largeTradeNotional} onChange={(event) => runtime.actions.setLargeTradeNotional(Number(event.target.value))}>
               {TRADE_FLOW_BUBBLE_OPTIONS.map((value) => (
                 <option key={value} value={value}>
-                  {value ? `≥ ${formatNotional(value)}` : "关闭"}
+                  {value ? `≥ ${formatNotional(value)}` : t("trade.off")}
                 </option>
               ))}
             </select>

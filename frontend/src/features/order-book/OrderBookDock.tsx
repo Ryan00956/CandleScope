@@ -6,6 +6,8 @@ import React, {
   useState,
   useSyncExternalStore,
 } from "react";
+import { t } from "../../i18n/index.js";
+import { useLocale } from "../../i18n/useLocale.js";
 import type {
   FullOutputLimit,
   OrderBookConnectionStatus,
@@ -35,15 +37,32 @@ export interface OrderBookDockProps {
   onRequestClose?(): void;
 }
 
-const STATUS_LABELS: Record<OrderBookConnectionStatus, string> = {
-  idle: "已暂停",
-  unsupported: "不可用",
-  connecting: "连接中",
-  reconnecting: "重连中",
-  live: "实时",
-  stale: "重同步",
-  error: "错误",
-};
+const ORDER_BOOK_STATUS_KEYS = {
+  idle: "orderBook.status.idle",
+  unsupported: "orderBook.status.unsupported",
+  connecting: "orderBook.status.connecting",
+  reconnecting: "orderBook.status.reconnecting",
+  live: "orderBook.status.live",
+  stale: "orderBook.status.stale",
+  error: "orderBook.status.error",
+} as const satisfies Record<OrderBookConnectionStatus, string>;
+
+function orderBookStatusLabel(status: OrderBookConnectionStatus): string {
+  return t(ORDER_BOOK_STATUS_KEYS[status]);
+}
+
+function orderBookStatusDetail(
+  status: OrderBookConnectionStatus,
+  hostMessage: string | null = null,
+): string {
+  if (status === "unsupported" || status === "idle") {
+    return hostMessage || t("orderBook.waitingBook");
+  }
+  if (status === "stale") return t("orderBook.rt.staleSnapshot");
+  if (status === "reconnecting") return t("orderBook.rt.disconnected");
+  if (status === "error") return t("orderBook.rt.unavailable");
+  return t("orderBook.waitingBook");
+}
 
 function trimZeros(value: string): string {
   return value.includes(".") ? value.replace(/\.?0+$/, "") : value;
@@ -63,7 +82,7 @@ function formatQuantity(value: number): string {
 }
 
 function formatSpread(value: number | null, bps: number | null): string {
-  if (value === null) return "等待双边报价";
+  if (value === null) return t("orderBook.waitingSpread");
   return `${formatPrice(value)}${bps === null ? "" : `  ·  ${trimZeros(bps.toFixed(2))} bps`}`;
 }
 
@@ -73,8 +92,12 @@ function groupingLabel(
   book: Parameters<typeof groupingPriceStep>[0],
 ): string {
   const step = groupingPriceStep(book, runtimeMode, grouping);
-  if (grouping === "auto") return step === null ? "自动" : `自动 ${formatPrice(step)}`;
-  if (grouping === "raw") return step === null ? "原始" : `原始 ${formatPrice(step)}`;
+  if (grouping === "auto") {
+    return step === null ? t("orderBook.grouping.auto") : t("orderBook.grouping.autoStep", { step: formatPrice(step) });
+  }
+  if (grouping === "raw") {
+    return step === null ? t("orderBook.grouping.raw") : t("orderBook.grouping.rawStep", { step: formatPrice(step) });
+  }
   return step === null ? `${grouping}×` : formatPrice(step);
 }
 
@@ -210,12 +233,10 @@ function BookLevels({
 function EmptyState({
   status,
   message,
-  error,
   onRetry,
 }: {
   status: OrderBookConnectionStatus;
   message: string | null;
-  error: string | null;
   onRetry(): void;
 }) {
   const canRetry = status === "error" || status === "reconnecting" || status === "stale";
@@ -224,14 +245,15 @@ function EmptyState({
       <span className="ob-empty-glyph" aria-hidden="true">
         {status === "stale" ? "↻" : status === "unsupported" ? "—" : "⋯"}
       </span>
-      <strong>{STATUS_LABELS[status]}</strong>
-      <span>{message || error || "正在等待第一份有效盘口"}</span>
-      {canRetry && <button type="button" onClick={onRetry}>立即重试</button>}
+      <strong>{orderBookStatusLabel(status)}</strong>
+      <span>{orderBookStatusDetail(status, message)}</span>
+      {canRetry && <button type="button" onClick={onRetry}>{t("orderBook.retry")}</button>}
     </div>
   );
 }
 
 function OrderBookDock({ runtime, height, onRequestClose }: OrderBookDockProps) {
+  useLocale();
   const { view, actions } = runtime;
   const snapshot = useSyncExternalStore(
     view.store.subscribe,
@@ -256,7 +278,7 @@ function OrderBookDock({ runtime, height, onRequestClose }: OrderBookDockProps) 
     <section
       className="order-book-dock"
       style={{ height }}
-      aria-label="订单簿"
+      aria-label={t("orderBook.aria")}
     >
       <header className="ob-header">
         {onRequestClose && (
@@ -264,69 +286,72 @@ function OrderBookDock({ runtime, height, onRequestClose }: OrderBookDockProps) 
             type="button"
             className="ob-collapse-button"
             onClick={onRequestClose}
-            title="折叠盘口"
-            aria-label="折叠盘口"
+            title={t("orderBook.collapse")}
+            aria-label={t("orderBook.collapse")}
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
               <polyline points="9 18 15 12 9 6" />
             </svg>
           </button>
         )}
-        <span className="ob-title">盘口</span>
+        <span className="ob-title">{t("orderBook.title")}</span>
         <span className="ob-symbol">{symbol || view.identity.symbol}</span>
-        <span className={`ob-status ob-status-${snapshot.status}`} title={snapshot.message || snapshot.error || STATUS_LABELS[snapshot.status]}>
+        <span
+          className={`ob-status ob-status-${snapshot.status}`}
+          title={orderBookStatusDetail(snapshot.status, view.supportMessage)}
+        >
           <span className="ob-status-dot" aria-hidden="true" />
-          {STATUS_LABELS[snapshot.status]}
+          {orderBookStatusLabel(snapshot.status)}
         </span>
       </header>
 
       <>
           <div className="ob-controls">
-            <div className="ob-mode-switch" role="group" aria-label="订单簿模式">
+            <div className="ob-mode-switch" role="group" aria-label={t("orderBook.mode")}>
               <button
                 type="button"
                 className={view.preferences.mode === "partial" ? "active" : ""}
                 onClick={() => actions.setMode("partial")}
-                title="交易所推送的 Top-N 可替换快照"
+                title={t("orderBook.snapshotTitle")}
               >
-                快照
+                {t("orderBook.snapshot")}
               </button>
               <button
                 type="button"
                 className={view.preferences.mode === "full" ? "active" : ""}
                 onClick={() => actions.setMode("full")}
-                title="后端校验序列并重建的连续本地订单簿"
+                title={t("orderBook.continuousTitle")}
               >
-                连续
+                {t("orderBook.continuous")}
               </button>
             </div>
             <label>
-              <span className="sr-only">显示档位</span>
+              <span className="sr-only">{t("orderBook.levels")}</span>
               {view.preferences.mode === "partial" ? (
                 <select
-                  aria-label="快照档位"
+                  aria-label={t("orderBook.snapshotLevels")}
                   value={view.preferences.partialDepth}
                   onChange={(event) => actions.setPartialDepth(Number(event.target.value) as PartialDepthLevel)}
                 >
-                  {PARTIAL_DEPTH_LEVELS.map((depth) => <option key={depth} value={depth}>{depth} 档</option>)}
+                  {PARTIAL_DEPTH_LEVELS.map((depth) => <option key={depth} value={depth}>{t("orderBook.levelsOption", { n: depth })}</option>)}
                 </select>
               ) : (
                 <select
-                  aria-label="连续订单簿显示档位"
+                  aria-label={t("orderBook.fullLevels")}
                   value={view.preferences.fullOutputLimit}
                   onChange={(event) => actions.setFullOutputLimit(Number(event.target.value) as FullOutputLimit)}
                 >
-                  {FULL_OUTPUT_LIMITS.map((limit) => <option key={limit} value={limit}>{limit} 档</option>)}
+                  {FULL_OUTPUT_LIMITS.map((limit) => <option key={limit} value={limit}>{t("orderBook.levelsOption", { n: limit })}</option>)}
                 </select>
               )}
             </label>
             <label title={view.preferences.mode === "partial"
-              ? "价格聚合单位；快照模式仅支持小范围聚合"
-              : "价格聚合单位；连续模式先在完整本地盘口聚合，再截取显示档位"}
+              ? t("orderBook.groupingPartial")
+              : t("orderBook.groupingFull")}
             >
-              <span className="sr-only">价格聚合单位</span>
+              <span className="sr-only">{t("orderBook.grouping")}</span>
               <select
-                aria-label="订单簿价格聚合单位"
+                aria-label={t("orderBook.groupingAria")}
                 value={activeGrouping}
                 onChange={(event) => actions.setPriceGrouping(
                   view.preferences.mode,
@@ -345,9 +370,9 @@ function OrderBookDock({ runtime, height, onRequestClose }: OrderBookDockProps) 
               </select>
             </label>
             <label>
-              <span className="sr-only">更新频率</span>
+              <span className="sr-only">{t("orderBook.frequency")}</span>
               <select
-                aria-label="订单簿更新频率"
+                aria-label={t("orderBook.frequency")}
                 value={view.updateIntervalMs}
                 onChange={(event) => actions.setUpdateIntervalMs(Number(event.target.value) as OrderBookUpdateIntervalMs)}
               >
@@ -358,10 +383,10 @@ function OrderBookDock({ runtime, height, onRequestClose }: OrderBookDockProps) 
 
           <div className="ob-column-header" aria-hidden="true">
             <span>
-              价格{presentation?.priceStep ? ` · ${formatPrice(presentation.priceStep)}` : ""}
+              {t("orderBook.price")}{presentation?.priceStep ? ` · ${formatPrice(presentation.priceStep)}` : ""}
             </span>
-            <span>数量</span>
-            <span>累计</span>
+            <span>{t("orderBook.qty")}</span>
+            <span>{t("orderBook.cumulative")}</span>
           </div>
 
           {snapshot.book && presentation && rows ? (
@@ -371,13 +396,13 @@ function OrderBookDock({ runtime, height, onRequestClose }: OrderBookDockProps) 
                 <span className="ob-mid-price">{formatPrice(snapshot.book.midPrice)}</span>
                 <span>{formatSpread(snapshot.book.spread, snapshot.book.spreadBps)}</span>
                 {snapshot.book.mode === "partial" && snapshot.book.notionalImbalance !== null && (
-                  <span title="前 N 档名义价值不平衡">
-                    偏斜 {snapshot.book.notionalImbalance >= 0 ? "+" : ""}
+                  <span title={t("orderBook.imbalance")}>
+                    {t("orderBook.skew")} {snapshot.book.notionalImbalance >= 0 ? "+" : ""}
                     {trimZeros((snapshot.book.notionalImbalance * 100).toFixed(1))}%
                   </span>
                 )}
                 {snapshot.book.mode === "full" && presentation.aggregationApplied && (
-                  <span>聚合 {formatPrice(presentation.priceStep)}</span>
+                  <span>{t("orderBook.aggregated", { step: formatPrice(presentation.priceStep) })}</span>
                 )}
               </div>
               <BookLevels rows={rows.bids} side="bid" maxCumulative={rows.maxCumulative} />
@@ -385,8 +410,7 @@ function OrderBookDock({ runtime, height, onRequestClose }: OrderBookDockProps) 
           ) : (
             <EmptyState
               status={snapshot.status}
-              message={view.supportMessage || snapshot.message}
-              error={snapshot.error}
+              message={view.supportMessage}
               onRetry={actions.retry}
             />
           )}

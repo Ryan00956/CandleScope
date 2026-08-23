@@ -133,6 +133,37 @@ extensible manifest objects. They still contain bounded JSON, but their keys
 are interpreted by the negotiated contribution/capability version. All other
 manifest objects reject unknown fields.
 
+### Contribution localization
+
+Plugin-authored display text stays in the plugin. The Host owns locale choice,
+formatting, and platform chrome; it validates and resolves plugin resources
+without copying them into the CandleScope catalogs. Manifest v2 carries the
+resource map as `configuration.localizations` so the frozen v2 schema remains
+unchanged. Manifest v3 may use the explicit top-level `localizations` field on
+the contribution. Do not declare both locations.
+
+The locale key is a bounded BCP-47-style tag. The Host tries the exact tag,
+then its base language, then the contribution's default text. A localization
+may contain `title` plus only the payload supported by that contribution:
+
+- `schema` for command input and settings schemas, recursively containing
+  `title`, `description`, `enumLabels`, `properties`, and `items`; localized
+  enum labels must have exactly the same length and order as the declared
+  schema `enum`;
+- `fields` and `emptyState` for native declarative views;
+- `displayName` and `marketTypes` for symbol providers;
+- `accounts` for Paper account providers.
+
+All localized property, field, market-type, and account IDs must already exist
+in the default configuration. Unknown locations, keys, IDs, or unbounded text
+fail closed. Sandboxed views receive the current locale over the UI bridge and
+own the content rendered inside their frame.
+
+User-triggered command invocations also receive the selected locale as the
+optional `requestContext.locale`; plugins may use it for dynamic result and
+error text. Background jobs and market/event deliveries omit locale because
+they are not tied to a user-facing request.
+
 The Python model additionally enforces constraints JSON Schema cannot express
 concisely:
 

@@ -8,6 +8,7 @@ import {
   fetchPluginUiSnapshot,
   downloadPluginUserFile,
   invokePluginCommand,
+  PluginPlatformApiError,
   installPluginBundle,
   prepareLocalPluginInstall,
   reviewLocalPluginInstall,
@@ -63,9 +64,36 @@ import type {
   PluginPlatformRuntime,
   PluginUiSnapshot,
 } from "./pluginPlatformTypes.js";
+import { useLocale } from "../../i18n/useLocale.js";
+import { t, type MessageKey } from "../../i18n/index.js";
+
+interface PluginNoticeMessage {
+  readonly kind: "message";
+  readonly key: MessageKey;
+  readonly vars?: Readonly<Record<string, string | number>>;
+}
+
+interface PluginNoticeError {
+  readonly kind: "error";
+  readonly cause: unknown;
+}
+
+type PluginNoticeState = PluginNoticeMessage | PluginNoticeError;
+
+function noticeMessage(notice: PluginNoticeState | null): string | null {
+  if (notice === null) return null;
+  return notice.kind === "error"
+    ? errorMessage(notice.cause)
+    : t(notice.key, notice.vars);
+}
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "Plugin Platform operation failed";
+  if (error instanceof PluginPlatformApiError) {
+    return error.code === null
+      ? t("plugin.host.requestFailedStatus", { status: error.status })
+      : error.message;
+  }
+  return error instanceof Error ? error.message : t("plugin.host.operationFailed");
 }
 
 function isAbortError(error: unknown, signal?: AbortSignal): boolean {
@@ -133,17 +161,18 @@ const UNAVAILABLE_LIVE_CONTROL: PluginLiveControlStatus = {
 };
 
 export function usePluginPlatformRuntime(identity: PluginMarketIdentity): PluginPlatformRuntime {
+  const locale = useLocale();
   const { exchange, interval, marketType, symbol } = identity;
   const [catalog, setCatalog] = useState<PluginCatalog | null>(null);
   const [marketplaceCatalog, setMarketplaceCatalog] = useState<PluginMarketplaceCatalog | null>(null);
   const [snapshot, setSnapshot] = useState<PluginUiSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [errorCause, setErrorCause] = useState<unknown>(null);
   const [managerOpen, setManagerOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [openViewId, setOpenViewId] = useState<string | null>(null);
   const [openSettingsId, setOpenSettingsId] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [noticeState, setNoticeState] = useState<PluginNoticeState | null>(null);
   const [liveControl, setLiveControl] = useState<PluginLiveControlStatus>(DISABLED_LIVE_CONTROL);
   const [liveControlOpen, setLiveControlOpen] = useState(false);
   const [pageVisible, setPageVisible] = useState(
@@ -219,7 +248,7 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
         snapshotRef.current = null;
         setSnapshot(null);
       }
-      setError(null);
+      setErrorCause(null);
     } catch (caught) {
       if (
         isAbortError(caught, signal)
@@ -230,7 +259,7 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
       snapshotRefreshSequenceRef.current += 1;
       setCatalog(null);
       setSnapshot(null);
-      setError(errorMessage(caught));
+      setErrorCause(caught);
       throw caught;
     } finally {
       if (
@@ -265,7 +294,7 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
       }
       snapshotRef.current = nextSnapshot;
       setSnapshot(nextSnapshot);
-      setError(null);
+      setErrorCause(null);
     } catch (caught) {
       if (
         isAbortError(caught, signal)
@@ -273,7 +302,7 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
       ) return;
       snapshotRef.current = null;
       setSnapshot(null);
-      setError(errorMessage(caught));
+      setErrorCause(caught);
       throw caught;
     }
   }, [refreshCatalogState]);
@@ -286,14 +315,14 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
       const nextMarketplaceCatalog = await fetchPluginMarketplaceCatalog(signal);
       if (signal?.aborted || sequence !== marketplaceRefreshSequenceRef.current) return;
       setMarketplaceCatalog(nextMarketplaceCatalog);
-      setError(null);
+      setErrorCause(null);
     } catch (caught) {
       if (
         isAbortError(caught, signal)
         || sequence !== marketplaceRefreshSequenceRef.current
       ) return;
       setMarketplaceCatalog(null);
-      setError(errorMessage(caught));
+      setErrorCause(caught);
       throw caught;
     }
   }, []);
@@ -443,7 +472,9 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
     symbol,
   ]);
 
-  const registries = useMemo(() => buildPluginRegistries(catalog), [catalog]);
+  const registries = useMemo(() => buildPluginRegistries(catalog, locale), [catalog, locale]);
+  const error = errorCause === null ? null : errorMessage(errorCause);
+  const notice = noticeMessage(noticeState);
   useEffect(() => {
     if (openViewId && ![...registries.sidePanel, ...registries.bottomPanel].some((item) => item.id === openViewId)) {
       setOpenViewId(null);
@@ -453,35 +484,38 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
     }
   }, [openSettingsId, openViewId, registries]);
 
-  const withRefresh = useCallback(async (operation: () => Promise<void>, success: string) => {
+  const withRefresh = useCallback(async (
+    operation: () => Promise<void>,
+    success: PluginNoticeMessage,
+  ) => {
     try {
       await operation();
       await refresh();
-      setNotice(success);
+      setNoticeState(success);
     } catch (caught) {
-      setNotice(errorMessage(caught));
+      setNoticeState({ kind: "error", cause: caught });
       throw caught;
     }
   }, [refresh]);
 
   const invokeCommand = useCallback(async (id: string, input: Record<string, JsonValue> = {}) => {
     try {
-      const result = await invokePluginCommand(id, input);
+      const result = await invokePluginCommand(id, input, locale);
       await refresh();
-      setNotice("Plugin command completed");
+      setNoticeState({ kind: "message", key: "plugin.notice.commandCompleted" });
       return result;
     } catch (caught) {
-      setNotice(errorMessage(caught));
+      setNoticeState({ kind: "error", cause: caught });
       throw caught;
     }
-  }, [refresh]);
+  }, [locale, refresh]);
 
   const changeState = useCallback(async (
     pluginId: string,
     action: "enable" | "disable" | "rollback" | "uninstall",
   ) => withRefresh(
     () => mutatePluginState(pluginId, action),
-    `Plugin ${action} completed`,
+    { kind: "message", key: `plugin.notice.state.${action}` as MessageKey },
   ), [withRefresh]);
 
   const decidePermission = useCallback(async (
@@ -491,12 +525,15 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
     scope?: Record<string, JsonValue>,
   ) => withRefresh(
     () => mutatePluginPermission(pluginId, permissionId, decision, scope),
-    `Permission ${decision} completed`,
+    { kind: "message", key: `plugin.notice.permission.${decision}` as MessageKey },
   ), [withRefresh]);
 
   const changePaperKillSwitch = useCallback(async (enabled: boolean) => withRefresh(
     () => setPaperKillSwitch(enabled),
-    enabled ? "Paper kill switch enabled" : "Paper order submission resumed",
+    {
+      kind: "message",
+      key: enabled ? "plugin.notice.paperKilled" : "plugin.notice.paperResumed",
+    },
   ), [withRefresh]);
 
   const changeLiveControlMode = useCallback(async (
@@ -507,15 +544,17 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
     try {
       const status = await setLiveControlMode(mode, reason, acknowledgeKill);
       setLiveControl(status);
-      setNotice(
+      setNoticeState({
+        kind: "message",
+        key:
         mode === "armed"
           ? status.liveSubmitAvailable
-            ? "Live control armed for pinned OKX Demo execution"
-            : "Live control armed; no execution method is installed"
-          : "Live control disarmed",
-      );
+            ? "plugin.notice.liveArmedExecution"
+            : "plugin.notice.liveArmedReceipt"
+          : "plugin.notice.liveDisarmed",
+      });
     } catch (caught) {
-      setNotice(errorMessage(caught));
+      setNoticeState({ kind: "error", cause: caught });
       throw caught;
     }
   }, []);
@@ -524,9 +563,9 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
     try {
       const status = await killLiveControl(reason);
       setLiveControl(status);
-      setNotice("Global Live kill applied; credentials, accounts, and receipts were revoked");
+      setNoticeState({ kind: "message", key: "plugin.notice.liveKilled" });
     } catch (caught) {
-      setNotice(errorMessage(caught));
+      setNoticeState({ kind: "error", cause: caught });
       throw caught;
     }
   }, []);
@@ -539,9 +578,12 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
     try {
       const status = await revokeLiveAuthority(scopeType, subject, reason);
       setLiveControl(status);
-      setNotice(`Live ${scopeType} authority revoked`);
+      setNoticeState({
+        kind: "message",
+        key: `plugin.notice.liveRevoked.${scopeType}` as MessageKey,
+      });
     } catch (caught) {
-      setNotice(errorMessage(caught));
+      setNoticeState({ kind: "error", cause: caught });
       throw caught;
     }
   }, []);
@@ -559,9 +601,9 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
       } finally {
         URL.revokeObjectURL(url);
       }
-      setNotice("Redacted Live audit export downloaded");
+      setNoticeState({ kind: "message", key: "plugin.notice.auditDownloaded" });
     } catch (caught) {
-      setNotice(errorMessage(caught));
+      setNoticeState({ kind: "error", cause: caught });
       throw caught;
     }
   }, []);
@@ -573,11 +615,11 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
   ) => {
     try {
       const execution = await submitLiveExecution(accountRef, shadowRef, receipt);
-      setNotice("OKX Demo submit acknowledged; reconcile before any next action");
+      setNoticeState({ kind: "message", key: "plugin.notice.liveSubmitted" });
       await refresh();
       return execution;
     } catch (caught) {
-      setNotice(errorMessage(caught));
+      setNoticeState({ kind: "error", cause: caught });
       throw caught;
     }
   }, [refresh]);
@@ -589,11 +631,11 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
   ) => {
     try {
       const execution = await cancelLiveExecution(accountRef, shadowRef, receipt);
-      setNotice("OKX Demo cancel acknowledged; reconcile final venue state");
+      setNoticeState({ kind: "message", key: "plugin.notice.liveCancelled" });
       await refresh();
       return execution;
     } catch (caught) {
-      setNotice(errorMessage(caught));
+      setNoticeState({ kind: "error", cause: caught });
       throw caught;
     }
   }, [refresh]);
@@ -604,10 +646,14 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
   ) => {
     try {
       const execution = await reconcileLiveExecution(accountRef, shadowRef);
-      setNotice(`OKX Demo execution reconciled: ${execution.state}`);
+      setNoticeState({
+        kind: "message",
+        key: "plugin.notice.liveReconciled",
+        vars: { state: execution.state },
+      });
       return execution;
     } catch (caught) {
-      setNotice(errorMessage(caught));
+      setNoticeState({ kind: "error", cause: caught });
       throw caught;
     }
   }, []);
@@ -642,16 +688,16 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
       closeView: () => setOpenViewId(null),
       openSettings: setOpenSettingsId,
       closeSettings: () => setOpenSettingsId(null),
-      clearNotice: () => setNotice(null),
+      clearNotice: () => setNoticeState(null),
       invokeCommand,
       readSettings: readPluginSettings,
       writeSettings: async (id, value) => {
         try {
           const saved = await writePluginSettings(id, value);
-          setNotice("Plugin settings saved");
+          setNoticeState({ kind: "message", key: "plugin.notice.settingsSaved" });
           return saved;
         } catch (caught) {
-          setNotice(errorMessage(caught));
+          setNoticeState({ kind: "error", cause: caught });
           throw caught;
         }
       },
@@ -659,44 +705,44 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
       loadMarketplaceStatus: fetchPluginMarketplaceStatus,
       refreshMarketplace: (marketplaceId) => withRefresh(
         () => refreshPluginMarketplace(marketplaceId),
-        "Signed marketplace index refreshed",
+        { kind: "message", key: "plugin.notice.marketplaceRefreshed" },
       ),
       prepareMarketplaceRelease: (pluginId, version) => withRefresh(
         () => preparePluginMarketplaceRelease(pluginId, version),
-        "Marketplace artifact downloaded, verified, and staged",
+        { kind: "message", key: "plugin.notice.marketplacePrepared" },
       ),
       applyMarketplaceRelease: (pluginId) => withRefresh(
         () => applyPluginMarketplaceRelease(pluginId),
-        "Marketplace release applied as an inactive staged activation",
+        { kind: "message", key: "plugin.notice.marketplaceApplied" },
       ),
       activateMarketplaceRelease: (pluginId) => withRefresh(
         () => activatePluginMarketplaceRelease(pluginId),
-        "Marketplace release activated and passed Host health observation",
+        { kind: "message", key: "plugin.notice.marketplaceActivated" },
       ),
       previewV1CompatibilityImport,
       applyV1CompatibilityImport: (previewSha256) => withRefresh(
         () => applyV1CompatibilityImport(previewSha256),
-        "v1 script runtime registry imported into the compatibility catalog",
+        { kind: "message", key: "plugin.notice.v1Imported" },
       ),
       previewV1CompatibilityRollback,
       applyV1CompatibilityRollback: (previewSha256) => withRefresh(
         () => applyV1CompatibilityRollback(previewSha256),
-        "v1 compatibility catalog rolled back to the previewed snapshot",
+        { kind: "message", key: "plugin.notice.v1RolledBack" },
       ),
       installBundle: (file) => withRefresh(
         () => installPluginBundle(file),
-        "Plugin bundle installed",
+        { kind: "message", key: "plugin.notice.bundleInstalled" },
       ),
       prepareLocalInstall: prepareLocalPluginInstall,
       reviewLocalInstall: reviewLocalPluginInstall,
       confirmLocalInstall: (candidateId, previewSha256, confirmationToken) => withRefresh(
         () => confirmLocalPluginInstall(candidateId, previewSha256, confirmationToken),
-        "Plugin bundle installed after exact local-code confirmation",
+        { kind: "message", key: "plugin.notice.bundleInstalledConfirmed" },
       ),
       reviewTrustChange: reviewPluginTrustChange,
       confirmTrustChange: (pluginId, changeId, previewSha256, confirmationToken) => withRefresh(
         () => confirmPluginTrustChange(pluginId, changeId, previewSha256, confirmationToken),
-        "Plugin trust mode changed and the previous runtime generation was revoked",
+        { kind: "message", key: "plugin.notice.trustChanged" },
       ),
       stageUserFile: stagePluginUserFile,
       prepareUserFileSave: preparePluginUserFileSave,
@@ -713,28 +759,32 @@ export function usePluginPlatformRuntime(identity: PluginMarketIdentity): Plugin
         try {
           return await previewLiveConfirmation(accountRef, shadowRef);
         } catch (caught) {
-          setNotice(errorMessage(caught));
+          setNoticeState({ kind: "error", cause: caught });
           throw caught;
         }
       },
       issueLiveConfirmation: async (accountRef, shadowRef, preview, ttlSeconds = 60) => {
         try {
           const receipt = await issueLiveConfirmation(accountRef, shadowRef, preview, ttlSeconds);
-          setNotice(`Intent confirmation issued until ${receipt.expiresAt}`);
+          setNoticeState({
+            kind: "message",
+            key: "plugin.notice.receiptIssued",
+            vars: { expires: receipt.expiresAt },
+          });
           await refresh();
           return receipt;
         } catch (caught) {
-          setNotice(errorMessage(caught));
+          setNoticeState({ kind: "error", cause: caught });
           throw caught;
         }
       },
       revokeLiveConfirmation: async (receiptRef, reason) => {
         try {
           await revokeLiveConfirmation(receiptRef, reason);
-          setNotice("Live confirmation revoked");
+          setNoticeState({ kind: "message", key: "plugin.notice.receiptRevoked" });
           await refresh();
         } catch (caught) {
-          setNotice(errorMessage(caught));
+          setNoticeState({ kind: "error", cause: caught });
           throw caught;
         }
       },

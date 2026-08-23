@@ -6,6 +6,8 @@ import {
   useRef,
   useState,
 } from "react";
+import { t, type LocaleId } from "../../i18n/index.js";
+import { useLocale } from "../../i18n/useLocale.js";
 import type { ChartSessionRuntime } from "../chart-session/chartSessionTypes.js";
 import type { ChartDataCommitMeta } from "../market-data/useChartDataRuntime.js";
 import type { SeriesWindowStore } from "../market-data/window/seriesWindowStore.js";
@@ -89,23 +91,25 @@ const SUMMARY_CHANNELS: readonly AdvancedMarketChannel[] = [
   "index_price",
   "basis",
 ];
-const MARKET_STUDY_CATALOG: Record<MarketMetricId, {
+function marketStudyCatalog(locale: LocaleId): Record<MarketMetricId, {
   name: string;
   description: string;
-}> = {
-  "market:funding-rate": {
-    name: "资金费率 (Funding Rate)",
-    description: "交易所结算、无前视历史估算与实时预估组成的资金费率轨迹，按百分比显示。",
-  },
-  "market:open-interest": {
-    name: "未平仓量 (Open Interest)",
-    description: "当前合约未平仓头寸规模，按交易所支持的采样周期显示。",
-  },
-  "market:liquidations": {
-    name: "观测爆仓额 (Liquidations)",
-    description: "公开强平流的本地观测名义金额；按方向显示，采样非全量且不可回填。",
-  },
-};
+}> {
+  return {
+    "market:funding-rate": {
+      name: t("study.funding", {}, locale),
+      description: t("study.fundingDesc", {}, locale),
+    },
+    "market:open-interest": {
+      name: t("study.oi", {}, locale),
+      description: t("study.oiDesc", {}, locale),
+    },
+    "market:liquidations": {
+      name: t("study.liq", {}, locale),
+      description: t("study.liqDesc", {}, locale),
+    },
+  };
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -214,6 +218,7 @@ export function useAdvancedMarketDataRuntime({
   dataMeta,
   seriesStore,
 }: UseAdvancedMarketDataRuntimeOptions): AdvancedMarketRuntime {
+  const locale = useLocale();
   const identity = useMemo(() => normalizeAdvancedMarketIdentity({
     exchange: session.view.exchange,
     marketType: session.view.marketType,
@@ -227,15 +232,21 @@ export function useAdvancedMarketDataRuntime({
     symbol: identity.symbol,
     interval,
   })), [identity, interval]);
-  const capabilitySnapshot = useMemo(() => resolveAdvancedMarketCapabilities({
-    marketType: session.view.marketType,
-    raw: session.view.exchangeConfig.raw,
-  }), [session.view.exchangeConfig.raw, session.view.marketType]);
-  const liquidationCapability = useMemo(() => resolveLiquidationCapability({
-    marketType: session.view.marketType,
-    interval,
-    raw: session.view.exchangeConfig.raw,
-  }), [interval, session.view.exchangeConfig.raw, session.view.marketType]);
+  const capabilitySnapshot = useMemo(() => {
+    void locale;
+    return resolveAdvancedMarketCapabilities({
+      marketType: session.view.marketType,
+      raw: session.view.exchangeConfig.raw,
+    });
+  }, [locale, session.view.exchangeConfig.raw, session.view.marketType]);
+  const liquidationCapability = useMemo(() => {
+    void locale;
+    return resolveLiquidationCapability({
+      marketType: session.view.marketType,
+      interval,
+      raw: session.view.exchangeConfig.raw,
+    });
+  }, [interval, locale, session.view.exchangeConfig.raw, session.view.marketType]);
   const {
     selections: metricSelections,
     add: addMarketStudy,
@@ -754,7 +765,7 @@ export function useAdvancedMarketDataRuntime({
 
   const marketStudies = useMemo<AdvancedMarketStudyView[]>(() => (
     metricSelections.map((item) => {
-      const catalog = MARKET_STUDY_CATALOG[item.id];
+      const catalog = marketStudyCatalog(locale)[item.id];
       const capability = metricCapabilities[item.channel];
       const isLiquidation = item.channel === "liquidation";
       const studyError = isLiquidation
@@ -788,6 +799,7 @@ export function useAdvancedMarketDataRuntime({
     liquidations.view.connectionStatus,
     liquidations.view.error,
     liquidations.view.historyError,
+    locale,
     metricCapabilities,
     metricSelections,
     streamError,

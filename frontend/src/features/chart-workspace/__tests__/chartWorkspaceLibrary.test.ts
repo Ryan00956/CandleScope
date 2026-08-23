@@ -3,12 +3,16 @@ import test from "node:test";
 
 import {
   chartCellStorageScope,
+  chartWorkspaceDisplayName,
   createChartWorkspaceRecord,
   createDefaultChartWorkspaceRecord,
   createTemplateChartWorkspaceDocument,
   mergeWorkspaceRecoveryRecord,
+  nextChartWorkspaceTemplateBuiltinName,
   normalizeChartWorkspaceLibrary,
+  normalizeChartWorkspaceRecord,
   removeChartWorkspace,
+  summarizeChartWorkspaces,
   uniqueChartWorkspaceName,
 } from "../chartWorkspaceLibrary.js";
 import { createDefaultChartWorkspace } from "../chartWorkspaceStorage.js";
@@ -86,6 +90,51 @@ test("main and confirmation template uses one primary and two higher-timeframe c
   assert.ok(childGroupId);
   assert.equal(chartWorkspaceCell(document, "cell-3").linkGroupId, childGroupId);
   assert.equal(document.linkGroups[childGroupId]!.parentId, parentGroupId);
+});
+
+test("built-in workspace names follow locale without rewriting persisted user data", () => {
+  const defaultWorkspace = createDefaultChartWorkspaceRecord(100, "zh-CN");
+  assert.equal(defaultWorkspace.name, "默认工作区");
+  assert.deepEqual(defaultWorkspace.builtinName, { kind: "default" });
+  assert.equal(chartWorkspaceDisplayName(defaultWorkspace, "en"), "Default workspace");
+  assert.equal(summarizeChartWorkspaces([defaultWorkspace], "en")[0]?.name, "Default workspace");
+
+  const firstName = nextChartWorkspaceTemplateBuiltinName("split-vertical", [], "en");
+  const first = createChartWorkspaceRecord({
+    id: "workspace-one",
+    name: firstName.name,
+    builtinName: firstName.builtinName,
+    createdAt: 101,
+  });
+  const secondName = nextChartWorkspaceTemplateBuiltinName("split-vertical", [first], "en");
+  const second = createChartWorkspaceRecord({
+    id: "workspace-two",
+    name: secondName.name,
+    builtinName: secondName.builtinName,
+    createdAt: 102,
+  });
+  assert.equal(chartWorkspaceDisplayName(first, "zh-CN"), "左右双图工作区");
+  assert.equal(chartWorkspaceDisplayName(second, "zh-CN"), "左右双图工作区 2");
+});
+
+test("legacy default workspace records gain built-in name provenance during normalization", () => {
+  const legacy = createDefaultChartWorkspaceRecord(100, "zh-CN");
+  const raw = { ...legacy };
+  delete raw.builtinName;
+  const normalized = normalizeChartWorkspaceRecord(raw, 200);
+  assert.deepEqual(normalized?.builtinName, { kind: "default" });
+  assert.equal(normalized && chartWorkspaceDisplayName(normalized, "en"), "Default workspace");
+
+  const legacyTemplate = normalizeChartWorkspaceRecord({
+    ...createChartWorkspaceRecord({ id: "legacy-template", name: "左右双图 2", createdAt: 101 }),
+    builtinName: undefined,
+  }, 200);
+  assert.deepEqual(legacyTemplate?.builtinName, {
+    kind: "template",
+    templateId: "split-vertical",
+    ordinal: 2,
+  });
+  assert.equal(legacyTemplate && chartWorkspaceDisplayName(legacyTemplate, "en"), "Left-right workspace 2");
 });
 
 test("library normalization fails a structurally malformed v7 document closed", () => {

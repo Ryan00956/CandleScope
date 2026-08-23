@@ -4,12 +4,12 @@ import type {
 } from "./settingsTypes.js";
 
 export const SETTINGS_CATEGORIES = [
-  { key: "appearance", label: "外观显示", icon: "🎨" },
-  { key: "network", label: "网络连接", icon: "🌐" },
-  { key: "exchanges", label: "交易所", icon: "🏦" },
-  { key: "data", label: "数据管理", icon: "💾" },
-  { key: "plugins", label: "插件与扩展", icon: "" },
-  { key: "about", label: "关于", icon: "ℹ️" },
+  { key: "appearance", labelKey: "settings.category.appearance", icon: "🎨" },
+  { key: "network", labelKey: "settings.category.network", icon: "🌐" },
+  { key: "exchanges", labelKey: "settings.category.exchanges", icon: "🏦" },
+  { key: "data", labelKey: "settings.category.data", icon: "💾" },
+  { key: "plugins", labelKey: "settings.category.plugins", icon: "" },
+  { key: "about", labelKey: "settings.category.about", icon: "ℹ️" },
 ] as const satisfies readonly SettingsCategoryDescriptor[];
 
 export function resolveSettingsTab(

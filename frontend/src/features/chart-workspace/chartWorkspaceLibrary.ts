@@ -1,3 +1,4 @@
+import { getLocale, t, type LocaleId, type MessageKey } from "../../i18n/index.js";
 import {
   CHART_CELL_IDS,
   CHART_LINK_GROUP_COLORS,
@@ -5,6 +6,7 @@ import {
   DEFAULT_CHART_LINK_GROUP_ID,
   type ChartCellState,
   type ChartCellId,
+  type ChartWorkspaceBuiltinName,
   type ChartWorkspaceDocument,
   type ChartWorkspaceId,
   type ChartWorkspaceLibrarySnapshot,
@@ -29,21 +31,122 @@ import {
 } from "./chartWorkspaceDocument.js";
 
 export const DEFAULT_CHART_WORKSPACE_ID = "workspace-default";
-export const DEFAULT_CHART_WORKSPACE_NAME = "默认工作区";
 export const MAX_CHART_WORKSPACE_NAME_LENGTH = 48;
 
-export const CHART_WORKSPACE_TEMPLATE_NAMES: Record<ChartWorkspaceTemplateId, string> = {
-  single: "单图工作区",
-  "split-vertical": "左右双图",
-  "split-horizontal": "上下双图",
-  "main-confirmation": "主图与确认图",
-  quad: "四图工作区",
-  "grid-6": "六图工作区",
-  "grid-8": "八图工作区",
-  "grid-9": "九图工作区",
-  "grid-12": "十二图工作区",
-  "grid-16": "十六图工作区",
+const CHART_WORKSPACE_TEMPLATE_NAME_KEYS: Record<ChartWorkspaceTemplateId, MessageKey> = {
+  single: "workspace.name.template.single",
+  "split-vertical": "workspace.name.template.splitVertical",
+  "split-horizontal": "workspace.name.template.splitHorizontal",
+  "main-confirmation": "workspace.name.template.mainConfirm",
+  quad: "workspace.name.template.quad",
+  "grid-6": "workspace.name.template.grid6",
+  "grid-8": "workspace.name.template.grid8",
+  "grid-9": "workspace.name.template.grid9",
+  "grid-12": "workspace.name.template.grid12",
+  "grid-16": "workspace.name.template.grid16",
 };
+
+export function defaultChartWorkspaceName(locale: LocaleId = getLocale()): string {
+  return t("workspace.name.default", {}, locale);
+}
+
+export function chartWorkspaceTemplateName(
+  templateId: ChartWorkspaceTemplateId,
+  locale: LocaleId = getLocale(),
+): string {
+  return t(CHART_WORKSPACE_TEMPLATE_NAME_KEYS[templateId], {}, locale);
+}
+
+function builtinWorkspaceName(
+  source: ChartWorkspaceBuiltinName,
+  locale: LocaleId,
+): string {
+  if (source.kind === "default") return defaultChartWorkspaceName(locale);
+  const base = chartWorkspaceTemplateName(source.templateId, locale);
+  return source.ordinal > 1 ? `${base} ${source.ordinal}` : base;
+}
+
+export function chartWorkspaceDisplayName(
+  workspace: Pick<ChartWorkspaceRecord, "name" | "builtinName">,
+  locale: LocaleId = getLocale(),
+): string {
+  return workspace.builtinName
+    ? builtinWorkspaceName(workspace.builtinName, locale)
+    : workspace.name;
+}
+
+function isChartWorkspaceTemplateId(value: unknown): value is ChartWorkspaceTemplateId {
+  return typeof value === "string"
+    && Object.prototype.hasOwnProperty.call(CHART_WORKSPACE_TEMPLATE_NAME_KEYS, value);
+}
+
+function normalizeBuiltinWorkspaceName(
+  value: unknown,
+  id: ChartWorkspaceId,
+  name: string,
+): ChartWorkspaceBuiltinName | null {
+  if (isRecord(value)) {
+    if (value.kind === "default" && id === DEFAULT_CHART_WORKSPACE_ID) {
+      return { kind: "default" };
+    }
+    const ordinal = Number(value.ordinal);
+    if (
+      value.kind === "template"
+      && isChartWorkspaceTemplateId(value.templateId)
+      && Number.isSafeInteger(ordinal)
+      && ordinal >= 1
+    ) {
+      return { kind: "template", templateId: value.templateId, ordinal };
+    }
+  }
+  if (
+    id === DEFAULT_CHART_WORKSPACE_ID
+    && (["zh-CN", "en"] as const).some((locale) => name === defaultChartWorkspaceName(locale))
+  ) return { kind: "default" };
+  const legacyChineseNames: Partial<Record<ChartWorkspaceTemplateId, string>> = {
+    "split-vertical": "左右双图",
+    "split-horizontal": "上下双图",
+    "main-confirmation": "主图与确认图",
+  };
+  const ordinalForBase = (base: string): number | null => {
+    if (name === base) return 1;
+    if (!name.startsWith(`${base} `)) return null;
+    const ordinal = Number(name.slice(base.length + 1));
+    return Number.isSafeInteger(ordinal) && ordinal >= 2
+      ? ordinal
+      : null;
+  };
+  for (const templateId of Object.keys(CHART_WORKSPACE_TEMPLATE_NAME_KEYS) as ChartWorkspaceTemplateId[]) {
+    const bases = (["zh-CN", "en"] as const).map((locale) => (
+      chartWorkspaceTemplateName(templateId, locale)
+    ));
+    const legacyName = legacyChineseNames[templateId];
+    if (legacyName) bases.push(legacyName);
+    for (const base of bases) {
+      const ordinal = ordinalForBase(base);
+      if (ordinal !== null) return { kind: "template", templateId, ordinal };
+    }
+  }
+  return null;
+}
+
+export function nextChartWorkspaceTemplateBuiltinName(
+  templateId: ChartWorkspaceTemplateId,
+  workspaces: readonly Pick<ChartWorkspaceRecord, "name" | "builtinName">[],
+  locale: LocaleId = getLocale(),
+): { name: string; builtinName: ChartWorkspaceBuiltinName } {
+  const occupied = new Set(workspaces.map((workspace) => (
+    chartWorkspaceDisplayName(workspace, locale).trim().toLocaleLowerCase()
+  )));
+  // With N existing workspaces, at least one of the first N + 1 localized
+  // template names must be free, even when user-defined names occupy slots.
+  for (let ordinal = 1; ordinal <= workspaces.length + 1; ordinal += 1) {
+    const builtinName = { kind: "template", templateId, ordinal } as const;
+    const name = builtinWorkspaceName(builtinName, locale);
+    if (!occupied.has(name.toLocaleLowerCase())) return { name, builtinName };
+  }
+  throw new Error("Unable to allocate a unique built-in workspace name.");
+}
 
 export function chartCellStorageScope(
   workspaceId: ChartWorkspaceId,
@@ -81,24 +184,24 @@ export function normalizeChartWorkspaceId(value: unknown): ChartWorkspaceId | nu
 
 export function normalizeChartWorkspaceName(
   value: unknown,
-  fallback = DEFAULT_CHART_WORKSPACE_NAME,
+  fallback = defaultChartWorkspaceName(),
 ): string {
   const normalized = typeof value === "string"
     ? value.trim().replace(/\s+/g, " ")
     : "";
-  const candidate = normalized || fallback.trim() || DEFAULT_CHART_WORKSPACE_NAME;
+  const candidate = normalized || fallback.trim() || defaultChartWorkspaceName();
   return candidate.slice(0, MAX_CHART_WORKSPACE_NAME_LENGTH);
 }
 
 export function uniqueChartWorkspaceName(
   requested: string,
-  workspaces: readonly Pick<ChartWorkspaceRecord, "id" | "name">[],
+  workspaces: readonly Pick<ChartWorkspaceRecord, "id" | "name" | "builtinName">[],
   excludeId: ChartWorkspaceId | null = null,
 ): string {
   const base = normalizeChartWorkspaceName(requested);
   const occupied = new Set(workspaces
     .filter((workspace) => workspace.id !== excludeId)
-    .map((workspace) => workspace.name.trim().toLocaleLowerCase()));
+    .map((workspace) => chartWorkspaceDisplayName(workspace).trim().toLocaleLowerCase()));
   if (!occupied.has(base.toLocaleLowerCase())) return base;
   for (let suffix = 2; suffix < 10_000; suffix += 1) {
     const suffixLabel = ` ${suffix}`;
@@ -165,7 +268,7 @@ export function createTemplateChartWorkspaceDocument(
       ...document.linkGroups,
       [confirmationGroupId]: {
         id: confirmationGroupId,
-        name: "多周期确认组",
+        name: t("workspace.linkGroup.confirmation"),
         color: CHART_LINK_GROUP_COLORS[1],
         parentId: DEFAULT_CHART_LINK_GROUP_ID,
         peerPolicy: cloneSerializable(primaryGroup.peerPolicy),
@@ -198,6 +301,7 @@ export function createTemplateChartWorkspaceDocument(
 export interface CreateChartWorkspaceRecordOptions {
   id?: ChartWorkspaceId;
   name?: string;
+  builtinName?: ChartWorkspaceBuiltinName;
   document?: ChartWorkspaceDocument;
   createdAt?: number;
   updatedAt?: number;
@@ -207,10 +311,14 @@ export function createChartWorkspaceRecord(
   options: CreateChartWorkspaceRecordOptions = {},
 ): ChartWorkspaceRecord {
   const now = options.createdAt ?? Date.now();
+  const id = normalizeChartWorkspaceId(options.id) ?? createChartWorkspaceId();
+  const name = normalizeChartWorkspaceName(options.name);
+  const builtinName = normalizeBuiltinWorkspaceName(options.builtinName, id, name);
   return {
     schemaVersion: CHART_WORKSPACE_RECORD_SCHEMA_VERSION,
-    id: normalizeChartWorkspaceId(options.id) ?? createChartWorkspaceId(),
-    name: normalizeChartWorkspaceName(options.name),
+    id,
+    name,
+    ...(builtinName ? { builtinName } : {}),
     createdAt: now,
     updatedAt: options.updatedAt ?? now,
     document: options.document
@@ -219,10 +327,14 @@ export function createChartWorkspaceRecord(
   };
 }
 
-export function createDefaultChartWorkspaceRecord(now = Date.now()): ChartWorkspaceRecord {
+export function createDefaultChartWorkspaceRecord(
+  now = Date.now(),
+  locale: LocaleId = getLocale(),
+): ChartWorkspaceRecord {
   return createChartWorkspaceRecord({
     id: DEFAULT_CHART_WORKSPACE_ID,
-    name: DEFAULT_CHART_WORKSPACE_NAME,
+    name: defaultChartWorkspaceName(locale),
+    builtinName: { kind: "default" },
     createdAt: now,
     updatedAt: now,
   });
@@ -237,10 +349,13 @@ export function normalizeChartWorkspaceRecord(
   if (!id) return null;
   const createdAt = finiteTimestamp(value.createdAt, now);
   const updatedAt = Math.max(createdAt, finiteTimestamp(value.updatedAt, createdAt));
+  const name = normalizeChartWorkspaceName(value.name);
+  const builtinName = normalizeBuiltinWorkspaceName(value.builtinName, id, name);
   return {
     schemaVersion: CHART_WORKSPACE_RECORD_SCHEMA_VERSION,
     id,
-    name: normalizeChartWorkspaceName(value.name),
+    name,
+    ...(builtinName ? { builtinName } : {}),
     createdAt,
     updatedAt,
     document: normalizeChartWorkspace(value.document),
@@ -309,10 +424,11 @@ export function mergeWorkspaceRecoveryRecord(
 
 export function summarizeChartWorkspaces(
   workspaces: readonly ChartWorkspaceRecord[],
+  locale: LocaleId = getLocale(),
 ): ChartWorkspaceSummary[] {
   return workspaces.map((workspace) => ({
     id: workspace.id,
-    name: workspace.name,
+    name: chartWorkspaceDisplayName(workspace, locale),
     createdAt: workspace.createdAt,
     updatedAt: workspace.updatedAt,
     layout: detectChartWorkspaceLayout(

@@ -7,14 +7,14 @@ const api = readFileSync(new URL("../backtestApi.ts", import.meta.url), "utf8");
 const chart = readFileSync(new URL("../BacktestResultChart.tsx", import.meta.url), "utf8");
 
 test("M9 workspace exposes immutable revision compile, smoke, trace, compare and clone paths", () => {
-  for (const token of ["StrategyRevision V2", "静态检查、编译并保存", "smoke 已通过",
-    "rsi-trace-pane", "decision / fill", "生成新不可变 Run"]) {
+  for (const token of ["backtest.revisionWorkspace", "backtest.compileSave", "backtest.smokeOk",
+    "rsi-trace-pane", "backtest.decisionFillHashes", "backtest.newImmutable"]) {
     assert.match(app, new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
   for (const path of ["/strategy-revisions", "/signal-trace", "/compare/pair", "/clone", "/review-bridge", "/review-bridges/"]) {
     assert.ok(api.includes(path));
   }
-  for (const token of ["交易差异", "成本差异", "drawdownDaily", "完成后检查并揭示只读对比"]) {
+  for (const token of ["backtest.tradeDiff", "backtest.costDiff", "drawdownDaily", "backtest.revealCompare"]) {
     assert.ok(app.includes(token));
   }
 });

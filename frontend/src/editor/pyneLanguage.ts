@@ -11,6 +11,7 @@
  */
 
 import type * as Monaco from "monaco-editor";
+import { getLocale, type LocaleId } from "../i18n/index.js";
 
 // ══════════════════════════════════════════════════════════════
 //  Pyne API Documentation Database
@@ -1166,6 +1167,76 @@ function buildHoverMap(): Map<string, PyneHoverInfo> {
 
 const HOVER_MAP = buildHoverMap();
 
+const PYNE_ENGLISH_GLOBAL_DOCS: Readonly<Record<string, string>> = {
+  open: "Open-price series.",
+  high: "High-price series.",
+  low: "Low-price series.",
+  close: "Close-price series.",
+  volume: "Volume series.",
+  time: "Bar timestamp list.",
+  bar_count: "Number of bars available to the script.",
+  params: "Legacy-compatible user parameter dictionary.",
+  np: "NumPy module, available as `np`.",
+  numpy: "NumPy module.",
+};
+
+function englishPyneDocumentation(key: string, detail: string): string {
+  const known = PYNE_ENGLISH_GLOBAL_DOCS[key];
+  if (known) return known;
+  if (key.startsWith("ta.")) {
+    return `Technical-analysis function \`${key}\`. Use the signature \`${detail}\` for its supported parameters and return value.`;
+  }
+  if (key.startsWith("input.")) {
+    return `Declares a user-configurable Pyne input with \`${key}\`. Use the signature \`${detail}\` for supported options.`;
+  }
+  if (key.startsWith("color.")) {
+    return key === "color.new"
+      ? "Creates a color with explicit transparency. Transparency ranges from 0 (opaque) to 100 (fully transparent)."
+      : `Named Pyne color \`${key}\`.`;
+  }
+  if (key.startsWith("math.")) {
+    return `Pyne math API \`${key}\`. Use the signature \`${detail}\` for supported inputs and output.`;
+  }
+  if (key.startsWith("snippet:")) return `Ready-to-edit Pyne template: ${key.slice("snippet:".length).trim()}.`;
+  return `Pyne chart-scripting API \`${key}\`. Use the signature \`${detail}\` for supported parameters and return value.`;
+}
+
+function englishPyneDetail(key: string, detail: string): string {
+  if (!/[\p{Script=Han}]/u.test(detail)) return detail;
+  if (key.startsWith("snippet:")) return `${key.slice("snippet:".length).trim()} template`;
+  return `${key} API`;
+}
+
+function englishPyneInsertText(value: string): string {
+  const labels: Readonly<Record<string, string>> = {
+    超买: "Overbought",
+    超卖: "Oversold",
+    买入: "Buy",
+    卖出: "Sell",
+    周期: "Period",
+    倍数: "Multiplier",
+    显示线条: "Show line",
+    数据源: "Source",
+    线条颜色: "Line color",
+    MA类型: "MA type",
+  };
+  return value.replace(/[\p{Script=Han}]+/gu, (word) => labels[word] ?? "Label");
+}
+
+export function localizePyneItem(
+  item: PyneItem,
+  key = item.label,
+  locale: LocaleId = getLocale(),
+): PyneItem {
+  if (locale === "zh-CN") return item;
+  return {
+    ...item,
+    detail: englishPyneDetail(key, item.detail),
+    documentation: englishPyneDocumentation(key, item.detail),
+    insertText: englishPyneInsertText(item.insertText),
+  };
+}
+
 function isPyneEditorModel(model: Monaco.editor.ITextModel): boolean {
   return model.uri.path.toLowerCase().endsWith(".pyne");
 }
@@ -1210,7 +1281,9 @@ export function registerPyneLanguageSupport(monaco: typeof Monaco): () => void {
         // Check if user typed "ta."
         if (/\bta\.\s*$/.test(textUntilPosition)) {
           return {
-            suggestions: TA_FUNCTIONS.map((item) => ({
+            suggestions: TA_FUNCTIONS.map((sourceItem) => {
+              const item = localizePyneItem(sourceItem, `ta.${sourceItem.label}`);
+              return ({
               label: item.label,
               kind: monacoCompletionKind(monaco, item.kind),
               detail: `ta.${item.label}${item.detail}`,
@@ -1220,14 +1293,17 @@ export function registerPyneLanguageSupport(monaco: typeof Monaco): () => void {
                 monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
               range,
               sortText: `0_${item.label}`,
-            })),
+              });
+            }),
           };
         }
 
         // Check if user typed "input."
         if (/\binput\.\s*$/.test(textUntilPosition)) {
           return {
-            suggestions: INPUT_FUNCTIONS.map((item) => ({
+            suggestions: INPUT_FUNCTIONS.map((sourceItem) => {
+              const item = localizePyneItem(sourceItem, `input.${sourceItem.label}`);
+              return ({
               label: item.label,
               kind: monacoCompletionKind(monaco, item.kind),
               detail: `input.${item.label}${item.detail}`,
@@ -1237,14 +1313,17 @@ export function registerPyneLanguageSupport(monaco: typeof Monaco): () => void {
                 monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
               range,
               sortText: `0_${item.label}`,
-            })),
+              });
+            }),
           };
         }
 
         // Check if user typed "color."
         if (/\bcolor\.\s*$/.test(textUntilPosition)) {
           return {
-            suggestions: COLOR_MEMBERS.map((item) => ({
+            suggestions: COLOR_MEMBERS.map((sourceItem) => {
+              const item = localizePyneItem(sourceItem, `color.${sourceItem.label}`);
+              return ({
               label: item.label,
               kind: monacoCompletionKind(monaco, item.kind),
               detail: item.detail,
@@ -1254,14 +1333,17 @@ export function registerPyneLanguageSupport(monaco: typeof Monaco): () => void {
                 monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
               range,
               sortText: `0_${item.label}`,
-            })),
+              });
+            }),
           };
         }
 
         // Check if user typed "math."
         if (/\bmath\.\s*$/.test(textUntilPosition)) {
           return {
-            suggestions: MATH_MEMBERS.map((item) => ({
+            suggestions: MATH_MEMBERS.map((sourceItem) => {
+              const item = localizePyneItem(sourceItem, `math.${sourceItem.label}`);
+              return ({
               label: item.label,
               kind: monacoCompletionKind(monaco, item.kind),
               detail: item.detail,
@@ -1271,14 +1353,16 @@ export function registerPyneLanguageSupport(monaco: typeof Monaco): () => void {
                 monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
               range,
               sortText: `0_${item.label}`,
-            })),
+              });
+            }),
           };
         }
 
         // Default: global variables + functions + snippets
         const suggestions: Monaco.languages.CompletionItem[] = [];
 
-        for (const item of GLOBAL_VARIABLES) {
+        for (const sourceItem of GLOBAL_VARIABLES) {
+          const item = localizePyneItem(sourceItem);
           suggestions.push({
             label: item.label,
             kind: monacoCompletionKind(monaco, item.kind),
@@ -1290,7 +1374,8 @@ export function registerPyneLanguageSupport(monaco: typeof Monaco): () => void {
           });
         }
 
-        for (const item of GLOBAL_FUNCTIONS) {
+        for (const sourceItem of GLOBAL_FUNCTIONS) {
+          const item = localizePyneItem(sourceItem);
           suggestions.push({
             label: item.label,
             kind: monacoCompletionKind(monaco, item.kind),
@@ -1306,12 +1391,13 @@ export function registerPyneLanguageSupport(monaco: typeof Monaco): () => void {
 
         // Namespace triggers
         for (const ns of ["ta", "input", "color", "math"]) {
+          const english = getLocale() === "en";
           suggestions.push({
             label: ns,
             kind: monaco.languages.CompletionItemKind.Module,
-            detail: `${ns}.* — 输入 "${ns}." 查看方法`,
+            detail: english ? `${ns}.* — type "${ns}." to list members` : `${ns}.* — 输入 "${ns}." 查看方法`,
             documentation: {
-              value: `输入 \`${ns}.\` 触发自动补全`,
+              value: english ? `Type \`${ns}.\` to trigger completion.` : `输入 \`${ns}.\` 触发自动补全`,
               isTrusted: true,
             },
             insertText: `${ns}.`,
@@ -1322,7 +1408,8 @@ export function registerPyneLanguageSupport(monaco: typeof Monaco): () => void {
         }
 
         // Snippets
-        for (const item of SNIPPET_ITEMS) {
+        for (const sourceItem of SNIPPET_ITEMS) {
+          const item = localizePyneItem(sourceItem);
           suggestions.push({
             label: item.label,
             kind: monaco.languages.CompletionItemKind.Snippet,
@@ -1360,6 +1447,10 @@ export function registerPyneLanguageSupport(monaco: typeof Monaco): () => void {
         const info = HOVER_MAP.get(fullKey);
         if (!info) return null;
 
+        const localizedDocumentation = getLocale() === "en"
+          ? englishPyneDocumentation(fullKey, info.detail)
+          : info.documentation;
+
         const headerLine = nsMatch
           ? `**${nsMatch[1]}.${wordText}** ${info.detail}`
           : `**${wordText}** ${info.detail}`;
@@ -1371,7 +1462,7 @@ export function registerPyneLanguageSupport(monaco: typeof Monaco): () => void {
             startColumn: word.startColumn,
             endColumn: word.endColumn,
           },
-          contents: [{ value: headerLine }, { value: info.documentation }],
+          contents: [{ value: headerLine }, { value: localizedDocumentation }],
         };
       },
     }),

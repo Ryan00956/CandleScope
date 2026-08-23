@@ -1,3 +1,4 @@
+import { t, tPlural } from "../../i18n/index.js";
 import type {
   IndicatorPanePointMetadata,
   IndicatorSubPane,
@@ -204,7 +205,7 @@ function orderFlowPointMetadata(
       time: point.time,
       value: point.value,
       valueLabel,
-      sourceLabel: "K线代理",
+      sourceLabel: t("pane.flow.klineProxy"),
       qualityLabel,
       appearance: "estimated",
       accessibilityLabel: `${label} ${valueLabel}`,
@@ -215,13 +216,13 @@ function orderFlowPointMetadata(
 function panes(state: ProjectionState): readonly IndicatorSubPane[] {
   const hasGap = state.missing > 0 || state.discontinuities > 0;
   const coverageParts = [
-    "K线代理",
-    ...(state.missing > 0 ? [`${state.missing} 根不可用`] : []),
-    ...(state.discontinuities > 0 ? [`${state.discontinuities} 处时间缺口`] : []),
+    t("pane.flow.klineProxy"),
+    ...(state.missing > 0 ? [tPlural("pane.flow.missing", state.missing)] : []),
+    ...(state.discontinuities > 0 ? [tPlural("pane.flow.gaps", state.discontinuities)] : []),
   ];
   const coverage = hasGap
-    ? `${coverageParts.join(" · ")} · CVD 从最近连续段锚定 0`
-    : "K线代理 · 当前连续窗口锚定 0";
+    ? t("pane.flow.cvdGap", { coverage: coverageParts.join(" · ") })
+    : t("pane.flow.cvdWindow");
   return [
     {
       id: "trade-flow-cvd",
@@ -240,16 +241,16 @@ function panes(state: ProjectionState): readonly IndicatorSubPane[] {
         id: "cvd-proxy",
         label: "CVD",
         appearance: "estimated",
-        description: "K线 taker volume 的连续前缀和；不是全历史绝对值",
+        description: t("pane.flow.cvdDesc"),
         color: CVD_COLOR,
       }],
       pointMetadata: orderFlowPointMetadata(
         state.cvd,
         "CVD",
-        hasGap ? "最近连续段锚定 0" : "窗口锚定 0",
+        hasGap ? t("pane.flow.anchorGap") : t("pane.flow.anchorWindow"),
       ),
       pointMetadataFallback: "none",
-      missingPointText: "当前 K 线源不提供可信订单流字段",
+      missingPointText: t("pane.flow.missingFields"),
       statusText: coverage,
     },
     {
@@ -267,27 +268,27 @@ function panes(state: ProjectionState): readonly IndicatorSubPane[] {
         },
         {
           id: "trade-flow-taker-buy-base",
-          name: "主动买",
+          name: t("pane.flow.buy"),
           type: "histogram",
           color: BUY_COLOR,
           data: state.buy,
         },
         {
           id: "trade-flow-taker-sell-base",
-          name: "主动卖",
+          name: t("pane.flow.sell"),
           type: "histogram",
           color: SELL_COLOR,
           data: state.sell,
         },
       ],
       legendItems: [
-        { id: "delta", label: "Delta", appearance: "estimated", description: "主动买量 - 主动卖量", color: DELTA_COLOR },
-        { id: "buy", label: "主动买", appearance: "estimated", description: "Taker buy base volume", color: BUY_COLOR },
-        { id: "sell", label: "主动卖", appearance: "estimated", description: "Taker sell base volume（图中为负轴）", color: SELL_COLOR },
+        { id: "delta", label: "Delta", appearance: "estimated", description: t("pane.flow.deltaDesc"), color: DELTA_COLOR },
+        { id: "buy", label: t("pane.flow.buy"), appearance: "estimated", description: t("pane.flow.buyDesc"), color: BUY_COLOR },
+        { id: "sell", label: t("pane.flow.sell"), appearance: "estimated", description: t("pane.flow.sellDesc"), color: SELL_COLOR },
       ],
-      pointMetadata: orderFlowPointMetadata(state.delta, "Volume Delta", "单根 K 线"),
+      pointMetadata: orderFlowPointMetadata(state.delta, "Volume Delta", t("pane.flow.singleBar")),
       pointMetadataFallback: "none",
-      missingPointText: "当前 K 线源不提供可信订单流字段",
+      missingPointText: t("pane.flow.missingFields"),
       statusText: coverage,
     },
   ];

@@ -19,11 +19,14 @@ import {
   supportsDrawingAnchorMode,
   supportsDrawingTool,
 } from "../features/drawings/drawingCapabilities.js";
+import { t } from "../i18n/index.js";
+import { useLocale } from "../i18n/useLocale.js";
 import { markPerfOnce } from "../runtime/performance/perfMarks";
 import DrawingActionButtons from "./drawing/DrawingActionButtons.js";
 import DrawingStyleControls from "./drawing/DrawingStyleControls.js";
 import DrawingToolButton from "./drawing/DrawingToolButton.js";
 import DrawingVariantToolButton from "./drawing/DrawingVariantToolButton.js";
+import { drawingVariantLabel } from "./drawing/drawingToolbarI18n.js";
 import {
   CHART_TYPE_VARIANTS,
   ContinuousDrawingIcon,
@@ -128,6 +131,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
   chartType = "candlestick",
   onChartTypeChange,
 }: DrawingToolbarProps) {
+  useLocale();
   useEffect(() => {
     markPerfOnce("lazy.drawingToolbar.ready");
   }, []);
@@ -278,8 +282,8 @@ const DrawingToolbar = memo(function DrawingToolbar({
     lineVariantSupported,
   ]);
   const drawingToolTitle = !drawingFeaturesEnabled
-    ? `${currentChartType.label} 当前坐标模式暂不支持此绘图工具`
-    : "绘图引擎正在初始化";
+    ? t("drawing.unsupported", { chartType: drawingVariantLabel(currentChartType) })
+    : t("drawing.initializing");
   const selectedStyleType = selectedDrawing?.type ?? null;
   const selectedStyleControls = selectedStyleType === null ? null : {
     fibonacci: selectedStyleType === "fibonacci",
@@ -293,14 +297,14 @@ const DrawingToolbar = memo(function DrawingToolbar({
   };
   const snapTitle = usesSourceLineageAnchors
     ? (drawingSnapEnabled
-        ? "Snap enabled; drawings use absolute source time in future space (hold Alt to disable price snap)"
-        : "Price snap disabled; drawings still use absolute source time in future space")
+        ? t("drawing.snap.sourceEnabled")
+        : t("drawing.snap.sourcePriceDisabled"))
     : (drawingSnapEnabled
-        ? "Snap enabled (hold Alt to disable temporarily)"
-        : "Snap disabled");
+        ? t("drawing.snap.enabled")
+        : t("drawing.snap.disabled"));
   const continuousDrawingTitle = drawingContinuousEnabled
-    ? "Continuous drawing enabled; stay on the selected tool after completing a drawing"
-    : "Continuous drawing disabled; return to the cursor after completing a drawing";
+    ? t("drawing.continuous.enabled")
+    : t("drawing.continuous.disabled");
 
   return (
     <div
@@ -321,7 +325,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
         onClick={handleChartTypeClick}
         onCloseFlyout={closeFlyout}
         onSelect={handleSelectChartType}
-        title={`Chart type: ${currentChartType.label}`}
+        title={t("drawing.chartType", { type: drawingVariantLabel(currentChartType) })}
         variants={CHART_TYPE_VARIANTS}
         wrapperClassName="chart-type-tool-wrapper"
       />
@@ -342,7 +346,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
         onContextMenu={handleCursorContextMenu}
         onDoubleClick={handleCursorDblClick}
         onSelect={handleSelectCursorVariant}
-        title={cursorToolsDisabled ? drawingToolTitle : `${currentCursorLabel} (right-click or double-click to switch cursor)`}
+        title={cursorToolsDisabled ? drawingToolTitle : t("drawing.switch.cursor", { tool: currentCursorLabel })}
         variants={CURSOR_VARIANTS}
         isVariantDisabled={isVariantDisabled}
       />
@@ -361,7 +365,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
         onContextMenu={handleFreehandContextMenu}
         onDoubleClick={handleFreehandDblClick}
         onSelect={handleSelectFreehandVariant}
-        title={freehandToolsDisabled ? drawingToolTitle : `${currentFreehandLabel} (right-click or double-click to switch pen type)`}
+        title={freehandToolsDisabled ? drawingToolTitle : t("drawing.switch.pen", { tool: currentFreehandLabel })}
         variants={FREEHAND_VARIANTS}
         isVariantDisabled={isVariantDisabled}
       />
@@ -389,7 +393,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
         onContextMenu={handleLineContextMenu}
         onDoubleClick={handleLineDblClick}
         onSelect={handleSelectLineVariant}
-        title={lineToolsDisabled ? drawingToolTitle : `${lineVariantSupported ? currentLineLabel : displayedLineVariant.label} (right-click or double-click to switch mode)`}
+        title={lineToolsDisabled ? drawingToolTitle : t("drawing.switch.line", { tool: lineVariantSupported ? currentLineLabel : drawingVariantLabel(displayedLineVariant) })}
         variants={LINE_VARIANTS}
         isVariantDisabled={isVariantDisabled}
       />
@@ -408,7 +412,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
         onContextMenu={handleShapeContextMenu}
         onDoubleClick={handleShapeDblClick}
         onSelect={handleSelectShapeVariant}
-        title={shapeToolsDisabled ? drawingToolTitle : `${currentShapeLabel} (right-click or double-click to switch shape; Shift locks square/circle)`}
+        title={shapeToolsDisabled ? drawingToolTitle : t("drawing.switch.shape", { tool: currentShapeLabel })}
         variants={SHAPE_VARIANTS}
         isVariantDisabled={isVariantDisabled}
       />
@@ -464,7 +468,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
         onContextMenu={handlePositionContextMenu}
         onDoubleClick={handlePositionDblClick}
         onSelect={handleSelectPositionVariant}
-        title={positionToolsDisabled ? drawingToolTitle : `${currentPosLabel} (right-click or double-click to switch long/short)`}
+        title={positionToolsDisabled ? drawingToolTitle : t("drawing.switch.position", { tool: currentPosLabel })}
         variants={POSITION_VARIANTS}
         isVariantDisabled={isVariantDisabled}
       >

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { t } from "../../i18n/index.js";
 import { API_BASE, httpBaseToWsBase } from "../../services/apiConfig.js";
 import { parseIntervalSeconds } from "../../utils/intervals.js";
 import type { IntervalString } from "../../utils/intervals.js";
@@ -28,11 +29,11 @@ function normalizeIdentity(identity: TradeFlowIdentity): TradeFlowIdentity {
 }
 
 function supportMessage(identity: TradeFlowIdentity): string | null {
-  if (identity.exchange !== "binance") return "逐笔订单流目前仅支持 Binance";
+  if (identity.exchange !== "binance") return t("trade.rt.binanceOnly");
   if (identity.marketType !== "futures" && identity.marketType !== "spot") {
-    return "逐笔订单流目前仅支持 Binance 现货与 U 本位合约";
+    return t("trade.rt.binanceMarkets");
   }
-  if (!identity.symbol) return "请选择交易品种";
+  if (!identity.symbol) return t("orderBook.rt.pickSymbol");
   return null;
 }
 
@@ -68,7 +69,7 @@ export function useTradeFlowRuntime({
       return undefined;
     }
     if (!streamOpen) {
-      store.reset("idle", "右侧实时订单流未打开");
+      store.reset("idle", t("trade.rt.closed"));
       return undefined;
     }
     const controller = new TradeFlowStreamController({

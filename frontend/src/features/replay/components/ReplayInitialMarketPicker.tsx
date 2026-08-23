@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
+import { t } from "../../../i18n/index.js";
+import { useLocale } from "../../../i18n/useLocale.js";
 import type { ReplayCatalog, ReplayCatalogEntry } from "../replayTypes.js";
 import type { TrainingRunCard } from "../replayV2Types.js";
 import { defaultReplayV2Api, ReplayV2ApiError } from "../replayV2Api.js";
@@ -56,7 +58,7 @@ function ReplayMarketPickerRow({
   readonly onSelect: () => void;
 }) {
   const reason = entry.start_compatibility?.message
-    ?? "服务端尚未返回本局时间兼容性。";
+    ?? t("replay.picker.compatUnknown");
   return (
     <article
       className="replay-market-picker-row"
@@ -70,11 +72,11 @@ function ReplayMarketPickerRow({
         </div>
         <dl>
           <div>
-            <dt>周期</dt>
+            <dt>{t("replay.picker.interval")}</dt>
             <dd>{entry.selected_base_interval ?? "—"}</dd>
           </div>
           <div>
-            <dt>覆盖</dt>
+            <dt>{t("replay.picker.coverage")}</dt>
             <dd>{coverage}</dd>
           </div>
         </dl>
@@ -88,9 +90,9 @@ function ReplayMarketPickerRow({
         >
           {selecting
             ? sourceKind === "AGG_TRADE"
-              ? "正在下载并校验…"
-              : "正在初始化…"
-            : "选择"}
+              ? t("replay.picker.downloading")
+              : t("replay.picker.init")
+            : t("replay.picker.select")}
         </button>
       ) : (
         <p className="replay-market-picker-reason">{reason}</p>
@@ -103,6 +105,7 @@ export default function ReplayInitialMarketPicker({
   run,
   onInitialized,
 }: ReplayInitialMarketPickerProps) {
+  useLocale();
   const [catalog, setCatalog] = useState<ReplayCatalog | null>(null);
   const [query, setQuery] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -120,7 +123,7 @@ export default function ReplayInitialMarketPicker({
     setDowngrade(null);
     setCatalog(null);
     void defaultReplayV2Api.marketCatalog(run.run_id).then(setCatalog).catch((reason: unknown) => {
-      setError(reason instanceof Error ? reason.message : "商品目录读取失败");
+      setError(reason instanceof Error ? reason.message : t("replay.picker.catalogFailed"));
     });
   };
 
@@ -130,7 +133,7 @@ export default function ReplayInitialMarketPicker({
       .then(setCatalog)
       .catch((reason: unknown) => {
         if (abort.signal.aborted) return;
-        setError(reason instanceof Error ? reason.message : "商品目录读取失败");
+        setError(reason instanceof Error ? reason.message : t("replay.picker.catalogFailed"));
       });
     return () => abort.abort();
   }, [run.run_id]);
@@ -169,9 +172,9 @@ export default function ReplayInitialMarketPicker({
   const visibleBlocked = !availableOnly || unavailableOpen ? blockedEntries : [];
   const timeCommitment = catalog?.time_commitment;
   const committedTimeLabel = timeCommitment?.committed_start_ms === null
-    ? "已冻结（按披露策略隐藏）"
+    ? t("replay.picker.frozenHidden")
     : timeCommitment?.committed_start_ms === undefined
-      ? "正在读取"
+      ? t("replay.picker.reading")
       : formatReplayUtcDateTime(timeCommitment.committed_start_ms);
   const hedgeLocked = (catalog?.entries ?? []).some((entry) => {
     const text = `${entry.start_compatibility?.code ?? ""} ${entry.start_compatibility?.message ?? ""}`;
@@ -209,7 +212,7 @@ export default function ReplayInitialMarketPicker({
     } catch (reason) {
       const message = reason instanceof ReplayV2ApiError
         ? `${reason.code}: ${reason.message}`
-        : reason instanceof Error ? reason.message : "商品初始化失败";
+        : reason instanceof Error ? reason.message : t("replay.picker.initFailed");
       setError(message);
       setSelecting(null);
       if (reason instanceof ReplayV2ApiError && reason.code === "CATALOG_EPOCH_MISMATCH") {
@@ -228,53 +231,53 @@ export default function ReplayInitialMarketPicker({
           <div className="training-hub-brand">
             <div className="training-hub-brand-mark" aria-hidden="true">T0</div>
             <div>
-              <span className="training-hub-kicker">开局时间已冻结 · 尚未加载商品</span>
+              <span className="training-hub-kicker">{t("replay.picker.kicker")}</span>
               <h1>{run.name}</h1>
-              <p>选择商品只会检查它是否支持这局已冻结的时间，不会改时间、顺延或重新随机。</p>
+              <p>{t("replay.picker.intro")}</p>
             </div>
           </div>
           <div className="training-hub-heading-actions">
-            <button type="button" onClick={loadCatalog} disabled={selecting !== null}>刷新目录</button>
-            <a href="/replay.html">返回大厅</a>
+            <button type="button" onClick={loadCatalog} disabled={selecting !== null}>{t("replay.picker.refresh")}</button>
+            <a href="/replay.html">{t("replay.picker.backToHub")}</a>
           </div>
         </header>
 
-        <section className="replay-market-picker-commit" aria-label="本局约束">
-          <div><span>开局时间</span><strong>{committedTimeLabel}</strong></div>
-          <div><span>结算资产</span><strong>{run.settlement_asset}</strong></div>
-          <div><span>历史源</span><strong>{trainingSourceKindLabel(run.source_kind)}</strong></div>
-          {hedgeLocked && <div><span>持仓</span><strong>双向</strong></div>}
+        <section className="replay-market-picker-commit" aria-label={t("replay.picker.constraints")}>
+          <div><span>{t("replay.picker.startTime")}</span><strong>{committedTimeLabel}</strong></div>
+          <div><span>{t("replay.picker.settlement")}</span><strong>{run.settlement_asset}</strong></div>
+          <div><span>{t("replay.picker.source")}</span><strong>{trainingSourceKindLabel(run.source_kind)}</strong></div>
+          {hedgeLocked && <div><span>{t("replay.picker.position")}</span><strong>{t("replay.picker.hedge")}</strong></div>}
         </section>
 
         {run.source_kind === "AGG_TRADE" && (
           <div className="replay-info-note" data-replay-agg-trade-download-note>
-            首次选择需下载并校验整日成交档；官方目录不提供可信行数或大小，下载量未知。
+            {t("replay.picker.firstDownload")}
           </div>
         )}
         {hedgeLocked && (
           <div className="replay-info-note" data-replay-hedge-lock-note>
-            本局已锁定双向持仓；只有支持该账户模式的商品可以开局。
+            {t("replay.picker.hedgeLocked")}
           </div>
         )}
 
         <div className="replay-market-picker-toolbar">
           <label className="replay-market-picker-search">
-            <span>搜索商品</span>
+            <span>{t("replay.picker.search")}</span>
             <input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="BTC、ETH、交易所或市场类型"
+              placeholder={t("replay.picker.searchPh")}
               autoFocus
             />
           </label>
           {marketTypes.length > 1 && (
-            <div className="training-hub-filter-chips" role="group" aria-label="市场类型">
+            <div className="training-hub-filter-chips" role="group" aria-label={t("replay.picker.marketType")}>
               <button
                 type="button"
                 aria-pressed={marketType === null}
                 onClick={() => setMarketType(null)}
               >
-                全部市场
+                {t("replay.picker.allMarkets")}
               </button>
               {marketTypes.map((filter) => (
                 <button
@@ -297,14 +300,14 @@ export default function ReplayInitialMarketPicker({
                 if (event.target.checked) setUnavailableOpen(false);
               }}
             />
-            只看可用
+            {t("replay.picker.availableOnly")}
           </label>
         </div>
 
         {error !== null && <div className="replay-error-summary" role="alert">{error}</div>}
         {downgrade !== null && (
           <section className="replay-error-summary" role="alert" data-replay-market-downgrade="HEDGE_HYBRID">
-            <strong>确认降级后再选择 {downgrade.entry.identity.symbol}</strong>
+            <strong>{t("replay.picker.confirmDowngrade", { symbol: downgrade.entry.identity.symbol })}</strong>
             <span>{downgrade.message}</span>
             <div>
               <button
@@ -312,26 +315,26 @@ export default function ReplayInitialMarketPicker({
                 disabled={selecting !== null}
                 onClick={() => void selectMarket(downgrade.entry, true)}
               >
-                确认使用 HEDGE_HYBRID 并选择
+                {t("replay.picker.confirmHybrid")}
               </button>
               <button type="button" disabled={selecting !== null} onClick={() => setDowngrade(null)}>
-                取消
+                {t("replay.hub.cancel")}
               </button>
             </div>
           </section>
         )}
 
         {catalog === null ? (
-          <div className="training-hub-empty"><div className="replay-loading-spinner" />正在读取可用商品…</div>
+          <div className="training-hub-empty"><div className="replay-loading-spinner" />{t("replay.picker.loading")}</div>
         ) : entries.length === 0 ? (
           <div className="training-hub-empty">
-            <strong>没有匹配商品</strong>
-            <span>清空搜索词，或改成查看全部市场。</span>
+            <strong>{t("replay.picker.noMatch")}</strong>
+            <span>{t("replay.picker.noMatchHint")}</span>
           </div>
         ) : availableEntries.length === 0 && visibleBlocked.length === 0 ? (
           <div className="training-hub-empty">
-            <strong>没有本局可用商品</strong>
-            <span>当前过滤下没有兼容商品。可以显示不可用原因，或另开一局。</span>
+            <strong>{t("replay.picker.noneReady")}</strong>
+            <span>{t("replay.picker.noneReadyHint")}</span>
             <div className="replay-market-picker-empty-actions">
               {blockedEntries.length > 0 && (
                 <button type="button" onClick={() => {
@@ -339,18 +342,18 @@ export default function ReplayInitialMarketPicker({
                   setUnavailableOpen(true);
                 }}
                 >
-                  查看 {blockedEntries.length} 个不可用商品
+                  {t("replay.picker.viewBlocked", { count: blockedEntries.length })}
                 </button>
               )}
-              <a href="/replay.html">另开一局</a>
+              <a href="/replay.html">{t("replay.picker.newRun")}</a>
             </div>
           </div>
         ) : (
           <div className="replay-market-picker-list">
             {availableEntries.length > 0 && (
-              <section aria-label="可用商品">
+              <section aria-label={t("replay.picker.available")}>
                 <header>
-                  <h2>可用</h2>
+                  <h2>{t("replay.picker.availableH")}</h2>
                   <span>{availableEntries.length}</span>
                 </header>
                 {availableEntries.map((entry, index) => (
@@ -368,9 +371,9 @@ export default function ReplayInitialMarketPicker({
               </section>
             )}
             {visibleBlocked.length > 0 && (
-              <section aria-label="本局不可用商品">
+              <section aria-label={t("replay.picker.blocked")}>
                 <header>
-                  <h2>本局不可用</h2>
+                  <h2>{t("replay.picker.blockedH")}</h2>
                   <span>{visibleBlocked.length}</span>
                 </header>
                 {visibleBlocked.map((entry) => (
@@ -391,10 +394,10 @@ export default function ReplayInitialMarketPicker({
               <div className="replay-market-picker-more">
                 {availableOnly && !unavailableOpen && (
                   <button type="button" onClick={() => setUnavailableOpen(true)}>
-                    显示 {blockedEntries.length} 个不可用商品
+                    {t("replay.picker.showBlocked", { count: blockedEntries.length })}
                   </button>
                 )}
-                <a href="/replay.html">另开一局</a>
+                <a href="/replay.html">{t("replay.picker.newRun")}</a>
               </div>
             )}
           </div>

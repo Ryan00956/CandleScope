@@ -1,6 +1,7 @@
 import type { ReplayLaunchContext } from "../replay/replayV2Types.js";
 import type { WatchlistGroup } from "../watchlist/watchlistTypes.js";
 import { parseSymbolKey } from "../../utils/symbolKey.js";
+import { t } from "../../i18n/index.js";
 
 const SAFE_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SAFE_MARKET_IDENTITY = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
@@ -91,7 +92,7 @@ export function buildLiveReplayLaunchContext({
     }
     return {
       id,
-      name: displayString(group.name, `自选 ${groupIndex + 1}`, 80),
+      name: displayString(group.name, t("watchlist.unnamedGroup", { count: groupIndex + 1 }), 80),
       color: displayString(group.color, "#3b82f6", 32),
       items,
     };

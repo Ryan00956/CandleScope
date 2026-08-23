@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import type {
   AggregateTrade,
   TradeFlowAggregateStats,
@@ -155,7 +156,7 @@ export function createTradeFlowStore({
     replaceRecent: (records) => {
       if (destroyed) return false;
       if (!isStrictlyContinuous(records)) {
-        failGap("近期成交存在聚合成交 ID 缺口，已停止展示不完整订单流");
+        failGap(t("trade.rt.recentGap"));
         return false;
       }
       working = records.slice(-capacity);
@@ -169,11 +170,11 @@ export function createTradeFlowStore({
       for (const record of records) {
         if (lastId !== null && record.aggTradeId <= lastId) {
           if (!appended) continue;
-          failGap("成交批次内部顺序倒退");
+          failGap(t("trade.rt.batchRewind"));
           return false;
         }
         if (lastId !== null && record.aggTradeId !== lastId + 1) {
-          failGap(`成交序列缺口：${lastId + 1}–${record.aggTradeId - 1}`);
+          failGap(t("trade.rt.idGap", { from: lastId + 1, to: record.aggTradeId - 1 }));
           return false;
         }
         working.push(record);

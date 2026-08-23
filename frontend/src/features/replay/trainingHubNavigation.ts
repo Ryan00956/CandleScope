@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import type { TrainingRunReturnResponse } from "./replayV2Types.js";
 
 export interface ReturnToHubApi {
@@ -14,7 +15,7 @@ export async function returnToTrainingHub(
   if (!new Set(["PAUSED", "ENDED", "ERROR"]).has(result.state)
     || !result.checkpointed
     || !result.released) {
-    throw new Error("服务端未确认可持久化状态、checkpoint 与运行时释放；不会离开训练页");
+    throw new Error(t("replay.hub.returnUnconfirmed"));
   }
   navigate("/replay.html");
   return result;

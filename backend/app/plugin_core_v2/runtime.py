@@ -1178,6 +1178,7 @@ class CorePluginPlatform:
         *,
         user_action: bool,
         trace_id: str,
+        locale: str | None = None,
     ) -> dict[str, Any]:
         await self._ensure_active(contribution.plugin_id, contribution.entrypoint_id)
         return await self.manager.invoke(
@@ -1185,6 +1186,7 @@ class CorePluginPlatform:
             input_value,
             user_action=user_action,
             trace_id=trace_id,
+            locale=locale,
         )
 
     async def _invoke_provider(
@@ -1232,6 +1234,7 @@ class CorePluginPlatform:
         *,
         user_action: bool,
         trace_id: str,
+        locale: str | None = None,
     ) -> dict[str, Any]:
         contribution = self._resolve_full(contribution_id, kind="command/1")
         if (
@@ -1267,6 +1270,7 @@ class CorePluginPlatform:
             normalized,
             user_action=user_action,
             trace_id=trace_id,
+            locale=locale,
         )
 
     async def _invoke_job_callback(

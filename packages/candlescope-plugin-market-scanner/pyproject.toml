@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "candlescope-plugin-market-scanner"
+version = "0.1.0"
+description = "Read-only first-party market scanner for CandleScope Plugin Platform v2."
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = "GPL-3.0-only"
+authors = [{ name = "CandleScope contributors" }]
+dependencies = ["candlescope-plugin-sdk==0.2.0"]
+
+[project.optional-dependencies]
+dev = [
+  "build>=1",
+  "hatchling>=1.25",
+  "jsonschema>=4.22",
+  "pytest>=7",
+  "ruff>=0.5",
+  "twine>=5",
+]
+
+[project.scripts]
+candlescope-market-scanner = "candlescope_plugin_market_scanner.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/candlescope_plugin_market_scanner"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "src", "../candlescope-plugin-sdk/src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

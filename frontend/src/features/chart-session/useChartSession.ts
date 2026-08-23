@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { t } from "../../i18n/index.js";
 import { useCustomIntervals } from "./customIntervalStore.js";
 import {
   buildSortedIntervals,
@@ -50,7 +51,7 @@ function unavailableIntervalMessage(
   marketType: MarketType,
   interval: IntervalString,
 ): string {
-  return `当前 ${exchange}/${marketType} 没有可精确拼接 ${interval} 的历史 K 线基准周期`;
+  return t("interval.cannotComposeSession", { exchange, marketType, interval });
 }
 
 export function useChartSession({
@@ -347,7 +348,7 @@ export function useChartSession({
     const canonicalInterval = canonicalizeIntervalValue(nextInterval);
     if (!canonicalInterval || intervalsSemanticallyEquivalent(canonicalInterval, interval)) return;
     if (exchangeCatalogStatus === "loading") {
-      showIntervalNotice({ type: "info", text: "交易所周期能力正在加载，请稍候" });
+      showIntervalNotice({ type: "info", text: t("interval.capabilityLoading") });
       return;
     }
     if (!canResolveIntervalFromNativeValues(canonicalInterval, nativeIntervalValues)) {
@@ -457,7 +458,7 @@ export function useChartSession({
     nextInterval: IntervalString,
   ): CreateCustomIntervalResult => {
     if (exchangeCatalogStatus === "loading") {
-      return { ok: false, message: "交易所周期能力正在加载，请稍候" };
+      return { ok: false, message: t("interval.capabilityLoading") };
     }
     if (isNativeIntervalSupported(exchange, nextInterval, exchangeCatalog, marketType, "history")) {
       selectInterval(nextInterval);
@@ -470,9 +471,9 @@ export function useChartSession({
       };
     }
     const result = addCustomInterval(nextInterval, { markUsed: true });
-    if (!result.ok) return { ok: false, message: "周期格式无效" };
+    if (!result.ok) return { ok: false, message: t("interval.invalidPeriod") };
     selectInterval(result.value);
-    showIntervalNotice({ type: "success", text: `${result.value} 已添加并切换` });
+    showIntervalNotice({ type: "success", text: t("interval.addedAndSwitched", { value: result.value }) });
     return { ok: true, added: result.added };
   }, [addCustomInterval, exchange, exchangeCatalog, exchangeCatalogStatus, marketType, nativeIntervalValues, selectInterval, showIntervalNotice]);
 
@@ -493,8 +494,8 @@ export function useChartSession({
     }
     showIntervalNotice({
       type: "warning",
-      text: `${removedInterval} 已删除`,
-      actionLabel: "撤销",
+      text: t("interval.deleted", { value: removedInterval }),
+      actionLabel: t("interval.undo"),
       duration: 6500,
     });
   }, [customIntervalRecords, exchange, exchangeCatalog, interval, marketType, nativeIntervals, removeCustomInterval, selectInterval, showIntervalNotice]);
@@ -503,7 +504,7 @@ export function useChartSession({
     const restored = restoreCustomInterval(lastRemovedIntervalRef.current);
     if (!restored) return;
     lastRemovedIntervalRef.current = null;
-    showIntervalNotice({ type: "success", text: `${restored.value} 已恢复` });
+    showIntervalNotice({ type: "success", text: t("interval.restored", { value: restored.value }) });
   }, [restoreCustomInterval, showIntervalNotice]);
 
   const clearCustomIntervalsAction = useCallback((): void => {
@@ -516,8 +517,8 @@ export function useChartSession({
     }
     showIntervalNotice({
       type: "warning",
-      text: `已清空 ${removed.length} 个自定义周期，最近一项可撤销`,
-      actionLabel: "撤销最近一项",
+      text: t("interval.clearedNotice", { count: removed.length }),
+      actionLabel: t("interval.undoLast"),
       duration: 6500,
     });
   }, [clearCustomIntervals, interval, nativeIntervals, selectInterval, showIntervalNotice]);

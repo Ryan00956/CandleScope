@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import {
   getIntervalSemanticSpec,
   intervalsSemanticallyEquivalent,
@@ -41,10 +42,10 @@ export function resolveLocalIntervalSupport(
   const source = sourceSpec?.canonicalValue ?? manifest.interval;
   const target = targetSpec?.canonicalValue ?? requestedInterval.trim();
   if (!sourceSpec) {
-    return unsupported(source, target, "dataset_corrupt", `源周期 ${manifest.interval} 无法识别`);
+    return unsupported(source, target, "dataset_corrupt", t("local.int.unrecognized", { interval: manifest.interval }));
   }
   if (!targetSpec) {
-    return unsupported(source, target, "interval_not_available", "周期格式无效，例如 30m、1h 或 90m");
+    return unsupported(source, target, "interval_not_available", t("local.int.badFormat"));
   }
   if (intervalsSemanticallyEquivalent(source, target)) {
     return {
@@ -54,7 +55,7 @@ export function resolveLocalIntervalSupport(
       factor: 1,
       derived: false,
       code: null,
-      message: `${source} 是导入的源周期`,
+      message: t("local.int.source", { source }),
     };
   }
   const sourceWidth = sourceSpec.widthSeconds;
@@ -64,7 +65,7 @@ export function resolveLocalIntervalSupport(
       source,
       target,
       "interval_not_composable",
-      "派生周期目前只支持固定长度的秒、分钟、小时和日线",
+      t("local.int.fixedOnly"),
     );
   }
   if (targetWidth <= sourceWidth) {
@@ -72,7 +73,7 @@ export function resolveLocalIntervalSupport(
       source,
       target,
       "interval_not_composable",
-      `${target} 不大于源周期 ${source}，本地模式不会向下拆分 K 线`,
+      t("local.int.noDownsample", { target, source }),
     );
   }
   const alignmentOffsetMs = manifest.alignment_offset_ms
@@ -84,7 +85,7 @@ export function resolveLocalIntervalSupport(
       source,
       target,
       "interval_alignment_incompatible",
-      `源数据没有对齐 UTC 的 ${source} 网格，无法可靠生成更大周期`,
+      t("local.int.notUtc", { source }),
     );
   }
   if (targetWidth % sourceWidth !== 0) {
@@ -92,7 +93,7 @@ export function resolveLocalIntervalSupport(
       source,
       target,
       "interval_not_composable",
-      `${target} 不是 ${source} 的整数倍，无法精确合成`,
+      t("local.int.notMultiple", { target, source }),
     );
   }
   const factor = targetWidth / sourceWidth;
@@ -101,7 +102,7 @@ export function resolveLocalIntervalSupport(
       source,
       target,
       "interval_resample_factor_too_large",
-      `需要 ${factor} 根 ${source}，超过单根 ${MAX_LOCAL_RESAMPLE_FACTOR} 个基础周期的安全上限`,
+      t("local.int.factorTooBig", { factor, source, limit: MAX_LOCAL_RESAMPLE_FACTOR }),
     );
   }
   return {
@@ -111,7 +112,7 @@ export function resolveLocalIntervalSupport(
     factor,
     derived: true,
     code: null,
-    message: `每 ${factor} 根 ${source} 精确合成 1 根 ${target}`,
+    message: t("local.int.compose", { factor, source, target }),
   };
 }
 

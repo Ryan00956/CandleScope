@@ -2,11 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { getLocale, setLocale } from "../../../i18n/index.js";
 import PluginLiveControl, { IntentFacts } from "../PluginLiveControl.js";
 import type {
   PluginLiveControlStatus,
   PluginPlatformRuntime,
 } from "../pluginPlatformTypes.js";
+
+const initialLocale = getLocale();
+test.before(() => setLocale("en"));
+test.after(() => setLocale(initialLocale));
 
 function status(
   mode: PluginLiveControlStatus["mode"],

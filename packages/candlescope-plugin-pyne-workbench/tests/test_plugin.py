@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from importlib.resources import files
+
 import jsonschema
 
 from candlescope_plugin_sdk.platform_v2 import (
@@ -79,6 +81,18 @@ def test_manifest_is_independent_v2_plugin_with_bounded_capabilities() -> None:
         "market.bars.read",
         "chart.layer.publish",
     ]
+
+
+def test_sandbox_ui_owns_zh_cn_and_english_copy() -> None:
+    web = files("candlescope_plugin_pyne_workbench").joinpath("web")
+    html = web.joinpath("index.html").read_text(encoding="utf-8")
+    javascript = web.joinpath("app.js").read_text(encoding="utf-8")
+
+    assert 'data-i18n="statusWaiting"' in html
+    assert '"zh-CN": {' in javascript
+    assert "en: {" in javascript
+    assert "applyLocale(payload.locale)" in javascript
+    assert 'setStatus("statusRejected")' in javascript
 
 
 def test_batch_command_reads_chart_bars_and_publishes_render_v2() -> None:

@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { DEFAULT_FIB_LEVELS } from "../../features/drawings/primitives/FibonacciDrawingPrimitive.js";
 import type { KeyboardEvent as ReactKeyboardEvent, RefObject } from "react";
 import type { FibonacciLevel } from "../../features/drawings/drawingTypes.js";
+import { t } from "../../i18n/index.js";
+import { useLocale } from "../../i18n/useLocale.js";
 
 export interface FibLevelsPanelProps {
   levels?: FibonacciLevel[] | null;
@@ -37,6 +39,7 @@ export default function FibLevelsPanel({
   onClose,
   anchorRef,
 }: FibLevelsPanelProps) {
+  useLocale();
   const panelRef = useRef<HTMLDivElement | null>(null);
   const [newLevelInput, setNewLevelInput] = useState("");
   const panelLevels = Array.isArray(levels) ? levels : DEFAULT_FIB_LEVELS;
@@ -99,13 +102,13 @@ export default function FibLevelsPanel({
   return (
     <div className="fib-levels-panel" ref={panelRef}>
       <div className="fib-levels-header">
-        <span>Fibonacci levels</span>
+        <span>{t("drawing.settings.fibonacciLevels")}</span>
         <button className="fib-levels-close" onClick={onClose}>x</button>
       </div>
 
       <div className="fib-invert-row">
         <label className="fib-invert-label">
-          <span>First click defines</span>
+          <span>{t("drawing.settings.firstClickDefines")}</span>
           <button
             className={`fib-invert-btn ${!inverted ? "active" : ""}`}
             onClick={() => onInvertedChange(false)}
@@ -142,7 +145,7 @@ export default function FibLevelsPanel({
               {level.level}
             </span>
             {!isDefault(level) && (
-              <button className="fib-level-remove" onClick={() => removeLevel(index)} title="Remove">
+              <button className="fib-level-remove" onClick={() => removeLevel(index)} title={t("drawing.settings.removeLevel")}>
                 x
               </button>
             )}
@@ -154,7 +157,7 @@ export default function FibLevelsPanel({
         <input
           type="text"
           className="fib-add-level-input"
-          placeholder="Add level, e.g. 1.414"
+          placeholder={t("drawing.settings.addLevelPlaceholder")}
           value={newLevelInput}
           onChange={(event) => setNewLevelInput(event.target.value)}
           onKeyDown={handleKeyDown}

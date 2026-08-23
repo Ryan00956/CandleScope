@@ -8,7 +8,15 @@ import "@fontsource/inter/latin-700.css";
 import "@fontsource/jetbrains-mono/latin-400.css";
 import "@fontsource/jetbrains-mono/latin-500.css";
 import LocalApp from "./features/local-data/LocalApp.js";
+import { readPersistedLocale } from "./features/settings/chartAppearanceSettings.js";
+import { bindDocumentLocale, hydrateLocale } from "./i18n/index.js";
 import "./index.css";
+
+hydrateLocale(readPersistedLocale());
+bindDocumentLocale({
+  titleKey: "local.documentTitle",
+  descriptionKey: "local.documentDescription",
+});
 
 const root = document.getElementById("root");
 if (!(root instanceof HTMLElement)) throw new Error("Local document root is missing");

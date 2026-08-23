@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { t } from "../../i18n/index.js";
+import { useLocale } from "../../i18n/useLocale.js";
 import type { BacktestApiClient, BacktestSnapshot, StrategyRevisionRecord } from "./backtestApi.js";
 import { isPythonTrustedLocalEnabled } from "./backtestFlags.js";
 import {
   PYTHON_TEMPLATES,
   PYTHON_UNSUPPORTED,
-  TRUSTED_LOCAL_CONFIRM_LABEL,
-  TRUSTED_LOCAL_FACTS,
+  TRUSTED_LOCAL_FACT_KEYS,
+  trustedLocalConfirmLabel,
   assessCoverage,
   assertRequiredBundleFiles,
   canStartTrustedLocal,
@@ -64,6 +66,7 @@ export default function PythonStudioPanel({
   onRevisionReady,
   onGateChange,
 }: PythonStudioPanelProps) {
+  const locale = useLocale();
   const defaultTemplate = PYTHON_TEMPLATES[0]!;
   const [templateId, setTemplateId] = useState(defaultTemplate.id);
   const [files, setFiles] = useState<PythonBundleFileMap>(defaultTemplate.files);
@@ -133,7 +136,7 @@ export default function PythonStudioPanel({
     const next = templateById(templateId);
     if (!next) return;
     applyFiles(next.files);
-    onNotice(`已用 ${next.label} 模板生成 strategy.json / strategy.py / requirements.lock，无需手写 JSON。`);
+    onNotice(t("python.notice.template", { label: next.label }));
   }, [applyFiles, onNotice, templateId]);
 
   const handleImport = useCallback(async (list: FileList | null) => {
@@ -145,7 +148,7 @@ export default function PythonStudioPanel({
         throw new Error(`BUNDLE_INCOMPLETE: missing ${absent.join(", ")}`);
       }
       applyFiles(next);
-      onNotice("已导入策略文件；静态检查不会执行用户代码。");
+      onNotice(t("python.notice.imported"));
     } catch (reason) {
       reportFailure(reason);
     }
@@ -158,7 +161,7 @@ export default function PythonStudioPanel({
     try {
       const inspected = await api.inspectPythonBundle(zipFilesToBase64(files));
       setInspectResult(inspected);
-      onNotice("静态检查已完成；尚未冻结 revision，也未执行用户代码。");
+      onNotice(t("python.notice.inspected"));
     } catch (reason) {
       reportFailure(reason);
     } finally {
@@ -186,7 +189,10 @@ export default function PythonStudioPanel({
       setBundleIdentity(identity);
       setSmokePassed(false);
       onRevisionReady(revision, identity);
-      onNotice(`已冻结 bundle ${identity.bundle_id} 与 revision ${revision.revision_id}。`);
+      onNotice(t("python.notice.frozen", {
+        bundle: identity.bundle_id ?? "",
+        revision: revision.revision_id,
+      }));
     } catch (reason) {
       reportFailure(reason);
     } finally {
@@ -211,7 +217,7 @@ export default function PythonStudioPanel({
         python_trusted_confirmed: runtimeMode === "TRUSTED_LOCAL" && trustedConfirmed,
       });
       setSmokePassed(true);
-      onNotice("小窗口 smoke 已通过。Python 只产生决策，Host 才会生成订单和成交。");
+      onNotice(t("python.notice.smoke"));
     } catch (reason) {
       setSmokePassed(false);
       reportFailure(reason);
@@ -245,11 +251,11 @@ export default function PythonStudioPanel({
 
   return (
     <div className="backtest-strategy-help python-studio" data-testid="python-strategy-studio">
-      <strong>Python Studio</strong>
+      <strong>{t("backtest.pythonStudio")}</strong>
       <p>{hostOwnsOrdersCopy()}</p>
       <div className="backtest-form-row">
         <label>
-          官方模板
+          {t("backtest.template")}
           <select value={templateId} onChange={(event) => setTemplateId(event.target.value as typeof templateId)}>
             {PYTHON_TEMPLATES.map((item) => (
               <option key={item.id} value={item.id}>{item.label}</option>
@@ -257,13 +263,13 @@ export default function PythonStudioPanel({
           </select>
         </label>
         <button type="button" disabled={loading} onClick={handleTemplate} data-testid="python-template-create">
-          从模板创建（不写 JSON）
+          {t("backtest.fromTemplate")}
         </button>
       </div>
-      {template && <p>{template.description}</p>}
+      {template && <p>{t(template.descriptionKey, {}, locale)}</p>}
       <div className="backtest-form-row">
         <label>
-          导入 zip
+          {t("backtest.importZip")}
           <input
             type="file"
             accept=".zip,application/zip"
@@ -272,7 +278,7 @@ export default function PythonStudioPanel({
           />
         </label>
         <label>
-          导入策略目录
+          {t("backtest.importDir")}
           <input
             type="file"
             data-testid="python-import-directory"
@@ -284,10 +290,10 @@ export default function PythonStudioPanel({
           />
         </label>
       </div>
-      {missing.length > 0 && <p>缺少 {missing.join("、")}。模板或导入必须包含这三个文件。</p>}
+      {missing.length > 0 && <p>{t("backtest.missingFiles", { list: missing.join("、") })}</p>}
       <label className="backtest-checkbox">
         <input type="checkbox" checked={showManifest} onChange={(event) => setShowManifest(event.target.checked)} />
-        高级查看：UI 生成的 strategy.json
+        {t("backtest.viewManifest")}
       </label>
       {showManifest && (
         <textarea
@@ -299,10 +305,10 @@ export default function PythonStudioPanel({
       )}
       <div className="backtest-form-row three">
         <button type="button" disabled={loading || missing.length > 0} onClick={() => void handleInspect()}>
-          静态检查（不执行）
+          {t("backtest.inspect")}
         </button>
         <button type="button" disabled={loading || !inspectResult} onClick={() => void handleFreeze()}>
-          冻结 bundle / revision
+          {t("backtest.freeze")}
         </button>
         <button
           type="button"
@@ -310,18 +316,21 @@ export default function PythonStudioPanel({
           onClick={() => void handleSmoke()}
           data-testid="python-smoke"
         >
-          {smokePassed ? "smoke 已通过" : "运行 7 天以内 smoke"}
+          {smokePassed ? t("backtest.smokeOk") : t("backtest.smokeRun")}
         </button>
       </div>
       {inspectHashes && (
         <div className="backtest-strategy-evidence" data-testid="python-bundle-identity">
-          <strong>bundle {inspectHashes.bundle.slice(0, 18)}…</strong>
-          <span>source {inspectHashes.source.slice(0, 18)}… · manifest {inspectHashes.manifest.slice(0, 18)}…</span>
-          <span>不支持：{PYTHON_UNSUPPORTED.join("；")}</span>
+          <strong>{t("backtest.bundleHash", { hash: `${inspectHashes.bundle.slice(0, 18)}…` })}</strong>
+          <span>{t("backtest.sourceManifestHashes", {
+            source: `${inspectHashes.source.slice(0, 18)}…`,
+            manifest: `${inspectHashes.manifest.slice(0, 18)}…`,
+          })}</span>
+          <span>{t("backtest.unsupportedList", { list: PYTHON_UNSUPPORTED.join("；") })}</span>
         </div>
       )}
       <div className="backtest-strategy-evidence" data-testid="python-runtime-mode">
-        <strong>运行时隔离</strong>
+        <strong>{t("backtest.runtimeIso")}</strong>
         <label className="backtest-checkbox">
           <input
             type="radio"
@@ -329,7 +338,7 @@ export default function PythonStudioPanel({
             checked={runtimeMode === "SANDBOXED_LOCAL"}
             onChange={() => { setRuntimeMode("SANDBOXED_LOCAL"); setTrustedConfirmed(false); }}
           />
-          SANDBOXED_LOCAL（默认，AppContainer + Job Object，不可用则失败关闭）
+          {t("backtest.sandboxed")}
         </label>
         <label className="backtest-checkbox">
           <input
@@ -338,12 +347,12 @@ export default function PythonStudioPanel({
             checked={runtimeMode === "TRUSTED_LOCAL"}
             onChange={() => setRuntimeMode("TRUSTED_LOCAL")}
           />
-          TRUSTED_LOCAL（必须 flag + 权限事实确认）
+          {t("backtest.trusted")}
         </label>
         {runtimeMode === "TRUSTED_LOCAL" && (
           <div data-testid="python-trusted-facts">
-            {TRUSTED_LOCAL_FACTS.map((fact) => <span key={fact}>{fact}</span>)}
-            <small>后端 TRUSTED_LOCAL flag {trustedFlagEnabled ? "已在本前端探测为打开" : "默认关闭"}。</small>
+            {TRUSTED_LOCAL_FACT_KEYS.map((key) => <span key={key}>{t(key, {}, locale)}</span>)}
+            <small>{t("backtest.flagState", { state: trustedFlagEnabled ? t("backtest.flagOn") : t("backtest.flagOff") })}</small>
             <label className="backtest-checkbox">
               <input
                 type="checkbox"
@@ -351,15 +360,15 @@ export default function PythonStudioPanel({
                 onChange={(event) => setTrustedConfirmed(event.target.checked)}
                 data-testid="python-trusted-confirm"
               />
-              {TRUSTED_LOCAL_CONFIRM_LABEL}
+              {trustedLocalConfirmLabel()}
             </label>
           </div>
         )}
       </div>
       <div className="backtest-snapshot" data-testid="python-coverage">
-        <span className={coverage.ready ? "ready" : "pending"}>{coverage.ready ? "覆盖足够" : "覆盖不足"}</span>
+        <span className={coverage.ready ? "ready" : "pending"}>{coverage.ready ? t("backtest.coverOk") : t("backtest.coverNo")}</span>
         <div>
-          <strong>{coverage.snapshotRows} rows / warmup {coverage.warmupRows}</strong>
+          <strong>{t("backtest.coverageRows", { rows: coverage.snapshotRows, warmup: coverage.warmupRows })}</strong>
           <small>{coverage.reason}</small>
         </div>
       </div>
@@ -367,7 +376,7 @@ export default function PythonStudioPanel({
         <div className="backtest-strategy-evidence" data-testid="python-smoke-failure">
           <strong>{failure.code}{failure.line ? ` · ${failure.line}:${failure.column}` : ""}</strong>
           <span>{failure.message}</span>
-          <small>下一步：{failure.nextStep}</small>
+          <small>{t("backtest.nextStep", { step: failure.nextStep })}</small>
         </div>
       )}
     </div>

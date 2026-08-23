@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import type { ReplayCapabilities, ReplayCatalog, ReplayCatalogEntry } from "./replayTypes.js";
 import type {
   ReplayLaunchContext,
@@ -67,11 +68,11 @@ export interface TrainingRunDraft {
 }
 
 export interface TrainingHubUnsupportedCapabilities {
-  readonly account_history: "精确账户只接受服务端已校验并固定的 mark/index/funding/规则归档；公开 K 线代理不算 exact";
-  readonly funding: "HEDGE 优先使用 pinned historical funding；缺失时可明确降级为 OFF 或 Sandbox 固定模型";
-  readonly historical_l2: "仅连续、可 pin、已验证的 Binance USD-M 历史 L2 可开启；不含真实盘口排队";
-  readonly rule_changes: "费率、杠杆与 Sandbox 固定资金费可按白名单审计变更";
-  readonly isolated_margin: "CROSS 与 ISOLATED 均可用；逐仓开仓前必须显式分配保证金";
+  readonly account_history: string;
+  readonly funding: string;
+  readonly historical_l2: string;
+  readonly rule_changes: string;
+  readonly isolated_margin: string;
 }
 
 export interface TrainingRunDraftEvaluation {
@@ -84,13 +85,15 @@ export interface TrainingRunDraftEvaluation {
   readonly unsupported: TrainingHubUnsupportedCapabilities;
 }
 
-export const PHASE_6_BOUNDARIES: TrainingHubUnsupportedCapabilities = Object.freeze({
-  account_history: "精确账户只接受服务端已校验并固定的 mark/index/funding/规则归档；公开 K 线代理不算 exact",
-  funding: "HEDGE 优先使用 pinned historical funding；缺失时可明确降级为 OFF 或 Sandbox 固定模型",
-  historical_l2: "仅连续、可 pin、已验证的 Binance USD-M 历史 L2 可开启；不含真实盘口排队",
-  rule_changes: "费率、杠杆与 Sandbox 固定资金费可按白名单审计变更",
-  isolated_margin: "CROSS 与 ISOLATED 均可用；逐仓开仓前必须显式分配保证金",
-});
+export function getPhase6Boundaries(): TrainingHubUnsupportedCapabilities {
+  return {
+    account_history: t("replay.boundary.account"),
+    funding: t("replay.boundary.funding"),
+    historical_l2: t("replay.boundary.l2"),
+    rule_changes: t("replay.boundary.rules"),
+    isolated_margin: t("replay.boundary.isolated"),
+  };
+}
 
 function firstEntry(catalog: ReplayCatalog): ReplayCatalogEntry | undefined {
   return catalog.entries.find((entry) => (
@@ -122,7 +125,7 @@ export function createTrainingRunDraft(
         (Date.now() - (catalog?.horizon_ms ?? 86_400_000)) / 60_000,
       ) * 60_000;
   return {
-    name: "回放训练",
+    name: t("replay.hub.defaultName"),
     sourceKind: "BAR",
     startMode: "MANUAL",
     exchange: launchContext?.exchange ?? entry?.identity.exchange ?? "binance",
@@ -253,33 +256,33 @@ export function evaluateTrainingRunDraft(
   const source = draft.sourceKind === "BAR"
     ? capabilities.sources.bar
     : capabilities.sources.agg_trade;
-  if (!capabilities.enabled || !capabilities.available) errors.push("回放服务当前不可用");
-  if (capabilities.persistence.degraded) errors.push("回放持久化处于降级状态");
-  if (!source.enabled) errors.push(`${draft.sourceKind} 历史源不可用`);
-  if (!entry) errors.push("所选商品不在当前能力目录中");
+  if (!capabilities.enabled || !capabilities.available) errors.push(t("replay.err.unavailable"));
+  if (capabilities.persistence.degraded) errors.push(t("replay.err.degraded"));
+  if (!source.enabled) errors.push(t("replay.err.sourceOff", { kind: draft.sourceKind }));
+  if (!entry) errors.push(t("replay.err.notInCatalog"));
   if (entry && !entry.base_intervals.includes(draft.baseInterval)) {
-    errors.push("基础周期不在服务端精确覆盖范围内");
+    errors.push(t("replay.err.baseNotCovered"));
   }
   if (entry?.selected_base_interval !== draft.baseInterval) {
-    errors.push("基础周期必须使用服务端选定的精确周期");
+    errors.push(t("replay.err.baseMustMatch"));
   }
   if (!intervalTiles(draft.baseInterval, draft.displayInterval)) {
-    errors.push("当前显示周期不能由服务端选定的基础周期精确拼接");
+    errors.push(t("replay.err.displayNotTile"));
   }
   if (draft.startMode === "MANUAL" && draft.requestedStartMs === null) {
-    errors.push("手动开始需要明确的 UTC 时间");
+    errors.push(t("replay.err.manualUtc"));
   }
   if (draft.startMode === "RANDOM" && draft.requestedStartMs !== null) {
-    errors.push("随机开始不能携带真实开始时间");
+    errors.push(t("replay.err.randomNoTime"));
   }
   if (draft.bookMode === "BOOK_ASSISTED_REQUIRED") {
     if (segmentPlan?.historical_book.capability_state !== "AVAILABLE_EXACT") {
-      errors.push("历史盘口尚未取得连续、可 pin 的 exact L2 能力证明");
+      errors.push(t("replay.err.l2Proof"));
     }
   }
   if (draft.indicatorWarmupBars < 1
     || draft.indicatorWarmupBars > capabilities.limits.max_warmup_bars) {
-    errors.push("指标预热 BAR 数超出服务端限制");
+    errors.push(t("replay.err.warmupLimit"));
   }
   const baseIntervalSeconds = parseIntervalSeconds(draft.baseInterval);
   const baseIntervalMs = baseIntervalSeconds === null ? null : baseIntervalSeconds * 1_000;
@@ -288,23 +291,23 @@ export function evaluateTrainingRunDraft(
     if (draft.visibleHistoryLookbackMs === null
       || !Number.isSafeInteger(draft.visibleHistoryLookbackMs)
       || draft.visibleHistoryLookbackMs < 1) {
-      errors.push("可见历史时长必须是正的安全整数毫秒");
+      errors.push(t("replay.err.visibleMs"));
     } else if (baseIntervalMs === null
       || draft.visibleHistoryLookbackMs % baseIntervalMs !== 0) {
-      errors.push("可见历史时长必须精确对齐基础周期");
+      errors.push(t("replay.err.visibleAlign"));
     } else {
       visibleRows = draft.visibleHistoryLookbackMs / baseIntervalMs;
     }
   } else if (draft.visibleHistoryMode === "ALL_AVAILABLE") {
     if (draft.visibleHistoryLookbackMs !== null) {
-      errors.push("全部可用历史不能同时指定固定时长");
+      errors.push(t("replay.err.allNoDuration"));
     }
   } else {
-    errors.push("可见历史模式不受支持");
+    errors.push(t("replay.err.visibleMode"));
   }
   const maxForwardMs = capabilities.limits.max_horizon_days * 86_400_000;
   if (draft.forwardCacheMs < 1 || draft.forwardCacheMs > maxForwardMs) {
-    errors.push("前向缓存窗口超出服务端限制");
+    errors.push(t("replay.err.forwardLimit"));
   }
   if (baseIntervalMs !== null && visibleRows !== null) {
     const forwardRows = Math.ceil(draft.forwardCacheMs / baseIntervalMs);
@@ -312,34 +315,34 @@ export function evaluateTrainingRunDraft(
       + forwardRows
       + 1;
     if (totalRows > capabilities.limits.max_bar_dataset_rows) {
-      errors.push("指标预热、可见历史与前向缓存合计超出不可变数据集上限");
+      errors.push(t("replay.err.datasetCap"));
     }
   }
   if (segmentPlan?.history_policy.accepted === false) {
-    errors.push(`服务端拒绝当前历史策略：${segmentPlan.history_policy.blocked_reason ?? "UNKNOWN"}`);
+    errors.push(t("replay.err.policyRejected", { reason: segmentPlan.history_policy.blocked_reason ?? "UNKNOWN" }));
   }
   if (entry && draft.startMode === "MANUAL" && draft.requestedStartMs !== null
     && !isEligibleReplayStart(entry, draft.requestedStartMs)) {
-    errors.push("手动开始时间必须落在服务端合格窗口且对齐基础周期");
+    errors.push(t("replay.err.manualWindow"));
   }
   if (draft.name.trim().length < 1 || draft.name.trim().length > 80) {
-    errors.push("名称必须为 1–80 个字符");
+    errors.push(t("replay.err.nameLen"));
   }
   for (const [label, value] of [
-    ["初始权益", draft.initialEquity],
-    ["最大杠杆", draft.maxLeverage],
+    [t("replay.hub.initialEquity"), draft.initialEquity],
+    [t("replay.hub.maxLeverage"), draft.maxLeverage],
   ] as const) {
-    if (!POSITIVE_DECIMAL.test(value)) errors.push(`${label}必须是正的规范十进制字符串`);
+    if (!POSITIVE_DECIMAL.test(value)) errors.push(t("replay.err.positiveDecimal", { label }));
   }
   for (const [label, value] of [
-    ["Maker 费率", draft.makerFeeBps],
-    ["Taker 费率", draft.takerFeeBps],
-    ["市价滑点", draft.marketSlippageBps],
+    [t("replay.err.makerFee"), draft.makerFeeBps],
+    [t("replay.err.takerFee"), draft.takerFeeBps],
+    [t("replay.err.slippage"), draft.marketSlippageBps],
   ] as const) {
-    if (!NON_NEGATIVE_DECIMAL.test(value)) errors.push(`${label}必须是非负规范十进制字符串`);
+    if (!NON_NEGATIVE_DECIMAL.test(value)) errors.push(t("replay.err.nonNegDecimal", { label }));
   }
   if (catalog.blind_mode !== requiresBlindTrainingCatalog(draft)) {
-    errors.push("当前能力目录与开始方式/时间披露策略不匹配");
+    errors.push(t("replay.err.catalogMismatch"));
   }
   const accountHistoryPlan = segmentPlan?.account_history ?? null;
   let accountHistoryRef: ReplayAccountHistoryRef | null = null;
@@ -347,14 +350,14 @@ export function evaluateTrainingRunDraft(
   let simulationManifestRef: ReplayHedgeSimulationManifestRef | null = null;
   if (draft.accountDataMode === "HISTORICAL_EXACT") {
     if (draft.fundingMode === "SANDBOX_FIXED") {
-      errors.push("精确账户历史不能混用 Sandbox 合成资金费");
+      errors.push(t("replay.err.exactNoSandbox"));
     }
     if (accountHistoryPlan === null) {
-      errors.push("尚未按当前参数校验精确账户历史归档");
+      errors.push(t("replay.err.exactUnchecked"));
     } else if (accountHistoryPlan.requested_mode !== "HISTORICAL_EXACT"
       || accountHistoryPlan.capability_state !== "AVAILABLE_EXACT"
       || accountHistoryPlan.account_history_ref === null) {
-      errors.push(`精确账户历史不可用：${accountHistoryPlan.reason}`);
+      errors.push(t("replay.err.exactUnavailable", { reason: accountHistoryPlan.reason }));
     } else {
       accountHistoryRef = accountHistoryPlan.account_history_ref;
     }
@@ -362,57 +365,57 @@ export function evaluateTrainingRunDraft(
   if (draft.fundingMode === "HISTORICAL_EXACT") {
     if (draft.accountDataMode !== "HISTORICAL_EXACT"
       && draft.accountDataMode !== "DETERMINISTIC_SIMULATION") {
-      errors.push("历史精确资金费必须使用固定历史输入");
+      errors.push(t("replay.err.fundingFixedHist"));
     } else if (draft.accountDataMode === "HISTORICAL_EXACT" && (accountHistoryPlan === null
       || accountHistoryPlan.capability_state !== "AVAILABLE_EXACT"
       || !accountHistoryPlan.historical_funding_exact)) {
-      errors.push("当前精确账户归档没有完整 funding 与同刻 mark");
+      errors.push(t("replay.err.noFundingMark"));
     }
   } else if (draft.fundingMode === "SANDBOX_FIXED") {
     if (draft.integrityMode !== "SANDBOX") {
-      errors.push("固定资金费只允许用于 Sandbox 近似练习");
+      errors.push(t("replay.err.fixedSandboxOnly"));
     }
     if (!SIGNED_DECIMAL.test(draft.fixedFundingRate) || draft.fixedFundingRate === "-0") {
-      errors.push("固定资金费率必须是规范十进制字符串");
+      errors.push(t("replay.err.fixedRate"));
     }
     if (!Number.isSafeInteger(draft.fundingIntervalMs)
       || draft.fundingIntervalMs < 60_000
       || draft.fundingIntervalMs > 30 * 86_400_000) {
-      errors.push("资金费结算间隔必须在 1 分钟至 30 天之间");
+      errors.push(t("replay.err.fundingInterval"));
     }
   }
   if (draft.positionMode === "HEDGE") {
     if (draft.accountDataMode !== "DETERMINISTIC_SIMULATION") {
-      errors.push("双向持仓必须使用版本化确定性模拟账户");
+      errors.push(t("replay.err.hedgeSim"));
     }
     if (draft.exchange !== "binance" || draft.marketType !== "futures") {
-      errors.push("双向持仓当前要求 Binance USD-M futures 历史输入");
+      errors.push(t("replay.err.hedgeBinance"));
     }
     const hedgePlan = segmentPlan?.hedge_inputs ?? null;
     if (hedgePlan === null) {
-      errors.push("尚未按当前参数校验双向持仓公开历史与模拟清单");
+      errors.push(t("replay.err.hedgeUnchecked"));
     } else if (hedgePlan.requested_position_mode !== "HEDGE"
       || (hedgePlan.capability_state !== "AVAILABLE_EXACT"
         && hedgePlan.capability_state !== "AVAILABLE_APPROX")
       || hedgePlan.hedge_public_history_ref === null
       || hedgePlan.simulation_manifest_ref === null) {
-      errors.push(`双向持仓输入不可用：${hedgePlan.reason}`);
+      errors.push(t("replay.err.hedgeUnavailable", { reason: hedgePlan.reason }));
     } else {
       hedgePublicHistoryRef = hedgePlan.hedge_public_history_ref;
       simulationManifestRef = hedgePlan.simulation_manifest_ref;
     }
   } else if (draft.accountDataMode === "DETERMINISTIC_SIMULATION") {
-    errors.push("确定性双向模拟账户不能用于单向持仓");
+    errors.push(t("replay.err.hedgeNotOneWay"));
   }
   if (new Set(draft.allowedMutations).size !== draft.allowedMutations.length
     || draft.allowedMutations.some((item) => !REPLAY_POLICY_MUTATIONS.includes(item))) {
-    errors.push("规则变更白名单包含重复或未知项");
+    errors.push(t("replay.err.whitelist"));
   }
   if (draft.integrityMode === "CHALLENGE" && draft.allowedMutations.length > 0) {
-    errors.push("Challenge 模式必须锁定全部规则变更");
+    errors.push(t("replay.err.challengeLock"));
   }
   if (draft.integrityMode === "PRACTICE" && draft.allowedMutations.length === 0) {
-    errors.push("Practice 模式必须显式选择至少一项可审计变更");
+    errors.push(t("replay.err.practiceNeed"));
   }
   return {
     canSubmit: errors.length === 0,
@@ -421,7 +424,7 @@ export function evaluateTrainingRunDraft(
     accountHistoryRef,
     hedgePublicHistoryRef,
     simulationManifestRef,
-    unsupported: PHASE_6_BOUNDARIES,
+    unsupported: getPhase6Boundaries(),
   };
 }
 
@@ -433,99 +436,99 @@ export function evaluateTrainingRunSetupDraft(
   const source = draft.sourceKind === "BAR"
     ? capabilities.sources.bar
     : capabilities.sources.agg_trade;
-  if (!capabilities.enabled || !capabilities.available) errors.push("回放服务当前不可用");
-  if (capabilities.persistence.degraded) errors.push("回放持久化处于降级状态");
-  if (!source.enabled) errors.push(`${draft.sourceKind} 历史源不可用`);
+  if (!capabilities.enabled || !capabilities.available) errors.push(t("replay.err.unavailable"));
+  if (capabilities.persistence.degraded) errors.push(t("replay.err.degraded"));
+  if (!source.enabled) errors.push(t("replay.err.sourceOff", { kind: draft.sourceKind }));
   if (draft.startMode === "MANUAL" && draft.requestedStartMs === null) {
-    errors.push("手动开始需要明确的 UTC 时间");
+    errors.push(t("replay.err.manualUtc"));
   }
   if (draft.startMode === "RANDOM" && draft.requestedStartMs !== null) {
-    errors.push("随机开始不能携带真实开始时间");
+    errors.push(t("replay.err.randomNoTime"));
   }
   if (draft.startMode === "RANDOM") {
     if (draft.randomRangeStartMs === null || draft.randomRangeEndMs === null) {
-      errors.push("区间随机需要明确的起止时间");
+      errors.push(t("replay.err.rangeNeedTimes"));
     } else if (draft.randomRangeEndMs < draft.randomRangeStartMs) {
-      errors.push("随机区间结束时间不能早于开始时间");
+      errors.push(t("replay.err.rangeOrder"));
     } else if ((draft.randomRangeEndMs - draft.randomRangeStartMs) % 60_000 !== 0) {
-      errors.push("随机区间起止时间必须使用同一分钟网格");
+      errors.push(t("replay.err.rangeGrid"));
     }
   }
   if (draft.indicatorWarmupBars < 1
     || draft.indicatorWarmupBars > capabilities.limits.max_warmup_bars) {
-    errors.push("指标预热 BAR 数超出服务端限制");
+    errors.push(t("replay.err.warmupLimit"));
   }
   if (draft.visibleHistoryMode === "DURATION") {
     if (draft.visibleHistoryLookbackMs === null
       || !Number.isSafeInteger(draft.visibleHistoryLookbackMs)
       || draft.visibleHistoryLookbackMs < 1) {
-      errors.push("可见历史时长必须是正的安全整数毫秒");
+      errors.push(t("replay.err.visibleMs"));
     }
   } else if (draft.visibleHistoryMode === "ALL_AVAILABLE") {
     if (draft.visibleHistoryLookbackMs !== null) {
-      errors.push("全部可用历史不能同时指定固定时长");
+      errors.push(t("replay.err.allNoDuration"));
     }
   } else {
-    errors.push("可见历史模式不受支持");
+    errors.push(t("replay.err.visibleMode"));
   }
   const maxForwardMs = capabilities.limits.max_horizon_days * 86_400_000;
   if (draft.forwardCacheMs < 1 || draft.forwardCacheMs > maxForwardMs) {
-    errors.push("前向缓存窗口超出服务端限制");
+    errors.push(t("replay.err.forwardLimit"));
   }
   if (draft.name.trim().length < 1 || draft.name.trim().length > 80) {
-    errors.push("名称必须为 1–80 个字符");
+    errors.push(t("replay.err.nameLen"));
   }
   for (const [label, value] of [
-    ["初始权益", draft.initialEquity],
-    ["最大杠杆", draft.maxLeverage],
+    [t("replay.hub.initialEquity"), draft.initialEquity],
+    [t("replay.hub.maxLeverage"), draft.maxLeverage],
   ] as const) {
-    if (!POSITIVE_DECIMAL.test(value)) errors.push(`${label}必须是正的规范十进制字符串`);
+    if (!POSITIVE_DECIMAL.test(value)) errors.push(t("replay.err.positiveDecimal", { label }));
   }
   for (const [label, value] of [
-    ["Maker 费率", draft.makerFeeBps],
-    ["Taker 费率", draft.takerFeeBps],
-    ["市价滑点", draft.marketSlippageBps],
+    [t("replay.err.makerFee"), draft.makerFeeBps],
+    [t("replay.err.takerFee"), draft.takerFeeBps],
+    [t("replay.err.slippage"), draft.marketSlippageBps],
   ] as const) {
-    if (!NON_NEGATIVE_DECIMAL.test(value)) errors.push(`${label}必须是非负规范十进制字符串`);
+    if (!NON_NEGATIVE_DECIMAL.test(value)) errors.push(t("replay.err.nonNegDecimal", { label }));
   }
   if (draft.accountDataMode === "HISTORICAL_EXACT") {
     if (draft.fundingMode === "SANDBOX_FIXED") {
-      errors.push("精确账户历史不能混用 Sandbox 合成资金费");
+      errors.push(t("replay.err.exactNoSandbox"));
     }
   }
   if (draft.fundingMode === "HISTORICAL_EXACT"
     && draft.accountDataMode !== "HISTORICAL_EXACT"
     && draft.accountDataMode !== "DETERMINISTIC_SIMULATION") {
-    errors.push("历史精确资金费必须使用固定历史输入");
+    errors.push(t("replay.err.fundingFixedHist"));
   } else if (draft.fundingMode === "SANDBOX_FIXED") {
     if (draft.integrityMode !== "SANDBOX") {
-      errors.push("固定资金费只允许用于 Sandbox 近似练习");
+      errors.push(t("replay.err.fixedSandboxOnly"));
     }
     if (!SIGNED_DECIMAL.test(draft.fixedFundingRate) || draft.fixedFundingRate === "-0") {
-      errors.push("固定资金费率必须是规范十进制字符串");
+      errors.push(t("replay.err.fixedRate"));
     }
     if (!Number.isSafeInteger(draft.fundingIntervalMs)
       || draft.fundingIntervalMs < 60_000
       || draft.fundingIntervalMs > 30 * 86_400_000) {
-      errors.push("资金费结算间隔必须在 1 分钟至 30 天之间");
+      errors.push(t("replay.err.fundingInterval"));
     }
   }
   if (draft.positionMode === "HEDGE") {
     if (draft.accountDataMode !== "DETERMINISTIC_SIMULATION") {
-      errors.push("双向持仓必须使用版本化确定性模拟账户");
+      errors.push(t("replay.err.hedgeSim"));
     }
   } else if (draft.accountDataMode === "DETERMINISTIC_SIMULATION") {
-    errors.push("确定性双向模拟账户不能用于单向持仓");
+    errors.push(t("replay.err.hedgeNotOneWay"));
   }
   if (new Set(draft.allowedMutations).size !== draft.allowedMutations.length
     || draft.allowedMutations.some((item) => !REPLAY_POLICY_MUTATIONS.includes(item))) {
-    errors.push("规则变更白名单包含重复或未知项");
+    errors.push(t("replay.err.whitelist"));
   }
   if (draft.integrityMode === "CHALLENGE" && draft.allowedMutations.length > 0) {
-    errors.push("Challenge 模式必须锁定全部规则变更");
+    errors.push(t("replay.err.challengeLock"));
   }
   if (draft.integrityMode === "PRACTICE" && draft.allowedMutations.length === 0) {
-    errors.push("Practice 模式必须显式选择至少一项可审计变更");
+    errors.push(t("replay.err.practiceNeed"));
   }
   return {
     canSubmit: errors.length === 0,
@@ -534,7 +537,7 @@ export function evaluateTrainingRunSetupDraft(
     accountHistoryRef: null,
     hedgePublicHistoryRef: null,
     simulationManifestRef: null,
-    unsupported: PHASE_6_BOUNDARIES,
+    unsupported: getPhase6Boundaries(),
   };
 }
 

@@ -11,6 +11,8 @@ import type {
   PluginPlatformRuntime,
   PluginSandboxViewContribution,
 } from "./pluginPlatformTypes.js";
+import { t } from "../../i18n/index.js";
+import { useLocale } from "../../i18n/useLocale.js";
 
 function hostTheme(): "dark" | "light" {
   const declared = document.documentElement.dataset.theme;
@@ -30,6 +32,7 @@ export default function SandboxPluginFrame({
   runtime: PluginPlatformRuntime;
   contribution: PluginSandboxViewContribution;
 }) {
+  const locale = useLocale();
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const sessionRef = useRef<SandboxBridgeSession | null>(null);
   const loadCountRef = useRef(0);
@@ -52,9 +55,9 @@ export default function SandboxPluginFrame({
   );
   const snapshot = useMemo<SandboxHostSnapshot>(() => ({
     theme: hostTheme(),
-    locale: hostLocale(),
+    locale,
     market: runtime.view.marketIdentity,
-  }), [runtime.view.marketIdentity]);
+  }), [locale, runtime.view.marketIdentity]);
 
   const connect = useCallback(() => {
     const target = iframeRef.current?.contentWindow;
@@ -76,7 +79,7 @@ export default function SandboxPluginFrame({
         snapshot,
         {
           onReady: () => {
-            setAnnouncement("Sandbox bridge connected");
+            setAnnouncement(t("plugin.host.sandboxConnected", {}, locale));
             if (document.visibilityState === "hidden") sessionRef.current?.suspend();
           },
           onResize: (nextHeight) => setHeight(nextHeight),
@@ -92,7 +95,7 @@ export default function SandboxPluginFrame({
       sessionRef.current = null;
       setFailure("PLUGIN_SANDBOX_CONNECT_FAILED");
     }
-  }, [contribution.id, contribution.pluginId, failure, generation, instanceId, snapshot]);
+  }, [contribution.id, contribution.pluginId, failure, generation, instanceId, locale, snapshot]);
 
   useEffect(() => {
     sessionRef.current?.updateSnapshot(snapshot);
@@ -167,14 +170,14 @@ export default function SandboxPluginFrame({
       data-plugin-sandbox-active={state === "ready" ? "true" : "false"}
     >
       <div className="plugin-sandbox-meta" aria-live="polite">
-        <span>Opaque-origin sandbox</span>
+        <span>{t("plugin.host.sandboxOpaque", {}, locale)}</span>
         <span>{state}</span>
       </div>
       {failure ? (
         <div className="plugin-sandbox-failure" role="alert">
-          <strong>Sandbox view failed safely</strong>
+          <strong>{t("plugin.host.sandboxFailed", {}, locale)}</strong>
           <span>{failure}</span>
-          <button type="button" onClick={reload}>Reload isolated view</button>
+          <button type="button" onClick={reload}>{t("plugin.host.sandboxReload", {}, locale)}</button>
         </div>
       ) : (
         <iframe

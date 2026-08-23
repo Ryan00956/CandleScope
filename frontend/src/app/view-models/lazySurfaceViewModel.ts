@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import type { AppShellViewModelContext } from "../appShellContracts.js";
 import type { LazyFeatureSurfaceModels } from "../LazyFeatureSurfaces.js";
 import type { IndicatorPanelMarketStudyStatus } from "../../features/indicators/IndicatorPanel.js";
@@ -74,10 +75,10 @@ export function buildLazySurfaceViewModel({
             : marketStudyStatus(study.status),
           statusText: study.status === "hidden"
             ? study.id === "market:liquidations"
-              ? "已隐藏，仍在后台采集观测爆仓"
-              : "已隐藏，实时订阅已暂停"
+              ? t("study.hiddenLiq")
+              : t("study.hiddenPaused")
             : study.status === "loading"
-              ? "正在加载市场数据"
+              ? t("study.loading")
               : study.status === "unavailable"
                 ? study.supportReason
                 : null,
@@ -87,8 +88,8 @@ export function buildLazySurfaceViewModel({
           const selection = tradeFlowView.preferences.indicators[definition.key];
           return {
             id: definition.id,
-            name: definition.name,
-            description: definition.description,
+            name: t(definition.nameKey),
+            description: t(definition.descriptionKey),
             category: definition.category,
             added: selection.added,
             visible: selection.visible,
@@ -104,9 +105,9 @@ export function buildLazySurfaceViewModel({
             statusText: !tradeFlowView.supported
               ? tradeFlowView.supportMessage
               : selection.added && !selection.visible
-                ? "已隐藏；右侧成交/分布视图不受影响"
+                ? t("study.hiddenTape")
                 : selection.added
-                  ? "使用 K 线订单流字段；右侧成交/分布视图独立控制"
+                  ? t("study.usingKline")
                   : null,
             error: null,
           };

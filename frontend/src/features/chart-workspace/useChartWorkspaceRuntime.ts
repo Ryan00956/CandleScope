@@ -6,17 +6,20 @@ import {
   useRef,
   useState,
 } from "react";
+import { t } from "../../i18n/index.js";
+import { useLocale } from "../../i18n/useLocale.js";
 import type { ChartSession } from "../chart-session/chartSessionTypes.js";
 import type { ChartSettings } from "../settings/chartAppearanceSettings.js";
 import type { IndicatorDefinition } from "../indicators/indicatorTypes.js";
 import {
-  CHART_WORKSPACE_TEMPLATE_NAMES,
+  chartWorkspaceDisplayName,
   cloneChartWorkspaceDocument,
   createChartWorkspaceId,
   createChartWorkspaceRecord,
   createTemplateChartWorkspaceDocument,
   normalizeChartWorkspaceLibrary,
   normalizeChartWorkspaceName,
+  nextChartWorkspaceTemplateBuiltinName,
   removeChartWorkspace,
   summarizeChartWorkspaces,
   uniqueChartWorkspaceName,
@@ -271,6 +274,7 @@ function activeWorkspace(snapshot: ChartWorkspaceLibrarySnapshot) {
 export function useChartWorkspaceRuntime(
   options: UseChartWorkspaceRuntimeOptions = {},
 ): ChartWorkspaceRuntime {
+  const locale = useLocale();
   const [services] = useState(() => ({
     repository: options.repository ?? createChartWorkspaceRepository(),
     now: options.now ?? Date.now,
@@ -378,7 +382,7 @@ export function useChartWorkspaceRuntime(
         saveState: "error",
         persistenceMode: null,
         lastSavedAt: null,
-        error: error instanceof Error ? error.message : "工作区恢复失败",
+        error: error instanceof Error ? error.message : t("core.error.workspaceRestore"),
       });
     });
     return () => {
@@ -414,7 +418,7 @@ export function useChartWorkspaceRuntime(
       setPersistence((current) => ({
         ...current,
         saveState: "error",
-        error: error instanceof Error ? error.message : "工作区保存失败",
+        error: error instanceof Error ? error.message : t("core.error.workspaceSave"),
       }));
     }
   }, [services]);
@@ -532,34 +536,49 @@ export function useChartWorkspaceRuntime(
     const snapshot = libraryRef.current;
     const source = activeWorkspace(snapshot);
     const createdAt = services.now();
+    const localizedName = nextChartWorkspaceTemplateBuiltinName(
+      templateId,
+      snapshot.workspaces,
+      locale,
+    );
     const record = createChartWorkspaceRecord({
       id: services.createId(),
-      name: uniqueChartWorkspaceName(
-        CHART_WORKSPACE_TEMPLATE_NAMES[templateId],
-        snapshot.workspaces,
-      ),
+      name: localizedName.name,
+      builtinName: localizedName.builtinName,
       document: createTemplateChartWorkspaceDocument(templateId, source.document),
       createdAt,
       updatedAt: createdAt,
     });
     setLibrary((current) => {
       if (current.workspaces.some((workspace) => workspace.id === record.id)) return current;
-      const name = uniqueChartWorkspaceName(record.name, current.workspaces);
+      const currentName = nextChartWorkspaceTemplateBuiltinName(
+        templateId,
+        current.workspaces,
+        locale,
+      );
       return {
         activeWorkspaceId: record.id,
-        workspaces: [...current.workspaces, { ...record, name }],
+        workspaces: [...current.workspaces, {
+          ...record,
+          name: currentName.name,
+          builtinName: currentName.builtinName,
+        }],
       };
     });
-  }, [services, setLibrary]);
+  }, [locale, services, setLibrary]);
 
   const duplicateWorkspace = useCallback((workspaceId?: ChartWorkspaceId) => {
     const snapshot = libraryRef.current;
     const source = snapshot.workspaces.find((workspace) => workspace.id === workspaceId)
       ?? activeWorkspace(snapshot);
     const createdAt = services.now();
+    const sourceName = chartWorkspaceDisplayName(source, locale);
     const record = createChartWorkspaceRecord({
       id: services.createId(),
-      name: uniqueChartWorkspaceName(`${source.name} 副本`, snapshot.workspaces),
+      name: uniqueChartWorkspaceName(
+        t("workspace.name.copy", { name: sourceName }, locale),
+        snapshot.workspaces,
+      ),
       document: cloneChartWorkspaceDocument(source.document),
       createdAt,
       updatedAt: createdAt,
@@ -572,7 +591,7 @@ export function useChartWorkspaceRuntime(
         workspaces: [...current.workspaces, { ...record, name }],
       };
     });
-  }, [services, setLibrary]);
+  }, [locale, services, setLibrary]);
 
   const renameWorkspace = useCallback((workspaceId: ChartWorkspaceId, requestedName: string) => {
     if (!requestedName.trim()) return;
@@ -586,11 +605,13 @@ export function useChartWorkspaceRuntime(
         workspaceId,
       );
       if (name === workspace.name) return current;
+      const renamedWorkspace = { ...workspace };
+      delete renamedWorkspace.builtinName;
       return {
         ...current,
         workspaces: current.workspaces.map((candidate) => candidate.id === workspaceId
           ? {
-            ...candidate,
+            ...renamedWorkspace,
             name,
             updatedAt,
             document: advanceChartWorkspaceRevision(candidate.document, {
@@ -753,7 +774,7 @@ export function useChartWorkspaceRuntime(
       const index = Object.keys(current.linkGroups).length;
       const group: ChartLinkGroup = {
         id,
-        name: `联动组 ${index + 1}`,
+        name: t("workspace.linkGroup.numbered", { count: index + 1 }),
         color: CHART_LINK_GROUP_COLORS[index % CHART_LINK_GROUP_COLORS.length]!,
         parentId: normalizedParentId,
         peerPolicy: cloneChartLinkSettings(DEFAULT_CHART_LINK_GROUP_SETTINGS),
@@ -1001,8 +1022,8 @@ export function useChartWorkspaceRuntime(
     [activeWindow.layoutTree, activeWindow.maximizedCellId],
   );
   const workspaceSummaries = useMemo(
-    () => summarizeChartWorkspaces(library.workspaces),
-    [library.workspaces],
+    () => summarizeChartWorkspaces(library.workspaces, locale),
+    [library.workspaces, locale],
   );
   const layoutHistory = runtimeState.layoutHistoryByWorkspace[workspace.id]
     ?? createEmptyChartWorkspaceLayoutHistory();
@@ -1012,7 +1033,7 @@ export function useChartWorkspaceRuntime(
       document,
       window: activeWindow,
       activeWorkspaceId: workspace.id,
-      activeWorkspaceName: workspace.name,
+      activeWorkspaceName: chartWorkspaceDisplayName(workspace, locale),
       // The bootstrap journal and hydrated repository record describe the
       // same Workspace identity. Keep Cell keys stable across hydration so a
       // 16-Cell window does not tear down and recreate every chart, request,

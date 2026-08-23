@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { t } from "../../i18n/index.js";
 import SingleChartPanes from "../../components/SingleChartPanes.js";
 import type {
   ExternalMarkerSource,
@@ -29,16 +30,16 @@ function markerSource(
           const side = String(fill.side || "").toUpperCase();
           const action = String(fill.action || side);
           const actionLabel: Record<string, string> = {
-            OPEN_LONG: "开多",
-            CLOSE_LONG: "平多",
-            OPEN_SHORT: "开空",
-            CLOSE_SHORT: "平空",
-            ADD_LONG: "加多",
-            ADD_SHORT: "加空",
-            REDUCE_LONG: "减多",
-            REDUCE_SHORT: "减空",
-            REVERSE_TO_LONG: "反手多",
-            REVERSE_TO_SHORT: "反手空",
+            OPEN_LONG: t("backtest.openLong"),
+            CLOSE_LONG: t("backtest.closeLong"),
+            OPEN_SHORT: t("backtest.openShort"),
+            CLOSE_SHORT: t("backtest.closeShort"),
+            ADD_LONG: t("backtest.addLong"),
+            ADD_SHORT: t("backtest.addShort"),
+            REDUCE_LONG: t("backtest.reduceLong"),
+            REDUCE_SHORT: t("backtest.reduceShort"),
+            REVERSE_TO_LONG: t("backtest.reverseLong"),
+            REVERSE_TO_SHORT: t("backtest.reverseShort"),
           };
           return [{
             id: `backtest:${String(fill.order_id || index)}:${index}`,
@@ -62,7 +63,7 @@ function markerSource(
             shape: "square",
             // Keep dense rejection periods legible on the K-line. The adjacent
             // rejection table owns the full reason code and input snapshot.
-            text: "拒",
+            text: t("backtest.reject"),
             size: 1,
           } satisfies ExternalSeriesMarker];
         });
@@ -118,9 +119,9 @@ export function EquityCurve({
       return `${x.toFixed(2)},${y.toFixed(2)}`;
     }).join(" ");
   }, [boundedDrawdown]);
-  if (!points) return <p className="backtest-empty">权益曲线数据不足。</p>;
+  if (!points) return <p className="backtest-empty">{t("backtest.equityEmpty")}</p>;
   return (
-    <svg className="backtest-equity-svg" viewBox="0 0 1000 210" preserveAspectRatio="none" aria-label="账户资金曲线">
+    <svg className="backtest-equity-svg" viewBox="0 0 1000 210" preserveAspectRatio="none" aria-label={t("backtest.equityAria")}>
       <defs>
         <linearGradient id="backtest-equity-fill" x1="0" y1="0" x2="0" y2="1">
           <stop offset="0" stopColor="#22d3ee" stopOpacity="0.35" />
@@ -173,7 +174,7 @@ export default function BacktestResultChart({ chart, focusTimeMs }: { chart: Bac
         canLoadMoreLeft={false}
         followLatest={false}
       />
-      {chart.truncated && <span className="backtest-chart-warning">图表只显示最后 50,000 根 K 线。</span>}
+      {chart.truncated && <span className="backtest-chart-warning">{t("backtest.chartTruncated")}</span>}
     </div>
   );
 }

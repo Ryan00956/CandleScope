@@ -1,4 +1,6 @@
 import { Suspense, lazy, useCallback, useEffect, useState } from "react";
+import { t, translateMarketType } from "../../i18n/index.js";
+import { useLocale } from "../../i18n/useLocale.js";
 import { markPerf } from "../../runtime/performance/perfMarks";
 import type { UseSymbolSearchRuntimeOptions, SymbolSelection } from "./useSymbolSearchRuntime.js";
 
@@ -22,6 +24,7 @@ export default function SymbolSearch({
   watchlists,
   onAddToWatchlist,
 }: SymbolSearchProps) {
+  useLocale();
   const [open, setOpen] = useState(false);
 
   const handleOpen = useCallback(() => {
@@ -71,11 +74,11 @@ export default function SymbolSearch({
         onMouseEnter={loadSymbolSearchModal}
         onFocus={loadSymbolSearchModal}
         onClick={handleOpen}
-        title="搜索交易对 (Ctrl+K)"
+        title={t("search.title")}
       >
         <span className="symbol-name">{currentSymbol}</span>
         {currentMarketType === "futures" && (
-          <span className="symbol-market-badge futures">合约</span>
+          <span className="symbol-market-badge futures">{translateMarketType("futures")}</span>
         )}
         <span className="symbol-exchange">
           {currentExchange.charAt(0).toUpperCase() + currentExchange.slice(1)}

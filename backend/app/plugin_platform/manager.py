@@ -216,6 +216,7 @@ class PluginManager:
         *,
         user_action: bool,
         trace_id: str,
+        locale: str | None = None,
     ) -> dict[str, Any]:
         registration = self.contributions.resolve(full_contribution_id)
         supervisor = self._supervisor(registration.owner_key)
@@ -240,6 +241,7 @@ class PluginManager:
                 input_value,
                 user_action=user_action,
                 trace_id=trace_id,
+                locale=locale,
             )
         finally:
             if (

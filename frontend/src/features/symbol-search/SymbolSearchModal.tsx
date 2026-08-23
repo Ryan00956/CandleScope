@@ -1,10 +1,19 @@
+import { t, translateMarketType } from "../../i18n/index.js";
+import { useLocale } from "../../i18n/useLocale.js";
 import { QUOTE_CHIPS } from "./symbolSearchFilter";
 import { useSymbolSearchRuntime } from "./useSymbolSearchRuntime";
 import type { UseSymbolSearchRuntimeOptions } from "./useSymbolSearchRuntime.js";
 
 export type SymbolSearchModalProps = UseSymbolSearchRuntimeOptions;
 
+function marketTabLabel(key: string, fallback: string): string {
+  if (key === "favorites") return t("search.tab.favorites");
+  if (key === "spot" || key === "futures") return translateMarketType(key);
+  return fallback;
+}
+
 export default function SymbolSearchModal(props: SymbolSearchModalProps) {
+  const locale = useLocale();
   const runtime = useSymbolSearchRuntime(props);
   const { view, actions, status, refs } = runtime;
   const { inputRef, listRef, modalRef } = refs;
@@ -67,7 +76,7 @@ export default function SymbolSearchModal(props: SymbolSearchModalProps) {
               ref={inputRef}
               className="sym-modal-search-input"
               type="text"
-              placeholder="搜索交易对... (Ctrl+K)"
+              placeholder={t("search.placeholder")}
               value={search}
               onChange={(event) => setSearch(event.target.value)}
               spellCheck={false}
@@ -78,7 +87,7 @@ export default function SymbolSearchModal(props: SymbolSearchModalProps) {
                 ✕
               </button>
             )}
-            <button className="sym-modal-close-btn" onClick={onClose} title="关闭 (Esc)">
+            <button className="sym-modal-close-btn" onClick={onClose} title={t("search.close")}>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
                 <line x1="18" y1="6" x2="6" y2="18" />
                 <line x1="6" y1="6" x2="18" y2="18" />
@@ -97,7 +106,7 @@ export default function SymbolSearchModal(props: SymbolSearchModalProps) {
                   onClick={() => setMarketType(tab.key)}
                 >
                   <span className="sym-modal-tab-icon">{tab.icon}</span>
-                  {tab.label}
+                  {marketTabLabel(tab.key, tab.label)}
                   {tab.key === "favorites" && favorites.length > 0 && (
                     <span className="sym-modal-tab-badge">{favorites.length}</span>
                   )}
@@ -108,7 +117,7 @@ export default function SymbolSearchModal(props: SymbolSearchModalProps) {
 
           <div className="sym-modal-filter-row sym-modal-filter-row-chips">
             <div className="sym-modal-chip-group">
-              <label className="sym-modal-chip-label" htmlFor="sym-modal-exchange-select">交易所</label>
+              <label className="sym-modal-chip-label" htmlFor="sym-modal-exchange-select">{t("search.exchange")}</label>
               <select
                 id="sym-modal-exchange-select"
                 className="sym-modal-exchange-select"
@@ -121,7 +130,7 @@ export default function SymbolSearchModal(props: SymbolSearchModalProps) {
                     value={exchange.key}
                     disabled={exchange.disabled}
                   >
-                    {exchange.label}{exchange.disabled ? "（无可路由公共行情）" : ""}
+                    {exchange.label}{exchange.disabled ? t("search.unroutable") : ""}
                   </option>
                 ))}
               </select>
@@ -130,7 +139,7 @@ export default function SymbolSearchModal(props: SymbolSearchModalProps) {
             <div className="sym-modal-chip-divider" />
 
             <div className="sym-modal-chip-group">
-              <span className="sym-modal-chip-label">计价</span>
+              <span className="sym-modal-chip-label">{t("search.quote")}</span>
               {QUOTE_CHIPS.map((quote) => (
                 <button
                   key={quote}
@@ -146,11 +155,11 @@ export default function SymbolSearchModal(props: SymbolSearchModalProps) {
 
         <div className="sym-modal-table-header">
           <span className="sym-modal-col-fav" />
-          <span className="sym-modal-col-pair">交易对</span>
-          <span className="sym-modal-col-base">基础资产</span>
-          <span className="sym-modal-col-quote">计价资产</span>
-          <span className="sym-modal-col-type">类型</span>
-          <span className="sym-modal-col-exchange">交易所</span>
+          <span className="sym-modal-col-pair">{t("search.pair")}</span>
+          <span className="sym-modal-col-base">{t("search.base")}</span>
+          <span className="sym-modal-col-quote">{t("search.quoteAsset")}</span>
+          <span className="sym-modal-col-type">{t("search.type")}</span>
+          <span className="sym-modal-col-exchange">{t("search.colExchange")}</span>
         </div>
 
         <div
@@ -162,7 +171,7 @@ export default function SymbolSearchModal(props: SymbolSearchModalProps) {
           {status.loading ? (
             <div className="sym-modal-empty">
               <div className="sym-modal-spinner" />
-              <span>加载交易对数据...</span>
+              <span>{t("search.loading")}</span>
             </div>
           ) : filteredSymbols.length === 0 ? (
             <div className="sym-modal-empty">
@@ -171,8 +180,8 @@ export default function SymbolSearchModal(props: SymbolSearchModalProps) {
               </span>
               <span>
                 {marketType === "favorites"
-                  ? "暂无收藏，点击 ★ 添加收藏"
-                  : "无匹配结果"}
+                  ? t("search.noFavorites")
+                  : t("search.noResults")}
               </span>
             </div>
           ) : (
@@ -208,13 +217,13 @@ export default function SymbolSearchModal(props: SymbolSearchModalProps) {
                       <button
                         className={`sym-modal-fav-btn ${isFavorite ? "active" : ""}`}
                         onClick={(event) => toggleFavorite(symbol._key, event)}
-                        title={isFavorite ? "取消收藏" : "添加收藏"}
+                        title={isFavorite ? t("search.unfavorite") : t("search.favorite")}
                       >
                         {isFavorite ? "★" : "☆"}
                       </button>
                       <span className="sym-modal-col-pair sym-modal-row-pair">
                         {symbol.symbol}
-                        {isCurrent && <span className="sym-modal-current-tag">当前</span>}
+                        {isCurrent && <span className="sym-modal-current-tag">{t("search.current")}</span>}
                         {hasWatchlists && inWatchlists.length > 0 && (
                           <span className="sym-modal-wl-indicators">
                             {inWatchlists.map((watchlist) => (
@@ -222,7 +231,7 @@ export default function SymbolSearchModal(props: SymbolSearchModalProps) {
                                 key={watchlist.id}
                                 className="sym-modal-wl-dot"
                                 style={{ background: watchlist.color || "#3b82f6" }}
-                                title={`在列表: ${watchlist.name}`}
+                                title={t("search.inList", { name: watchlist.name })}
                               />
                             ))}
                           </span>
@@ -232,7 +241,7 @@ export default function SymbolSearchModal(props: SymbolSearchModalProps) {
                       <span className="sym-modal-col-quote sym-modal-row-quote">{symbol.quoteAsset}</span>
                       <span className="sym-modal-col-type sym-modal-row-type">
                         <span className={`sym-modal-type-badge ${symbol.marketType}`}>
-                          {symbol.marketType === "spot" ? "现货" : "合约"}
+                          {translateMarketType(symbol.marketType === "spot" ? "spot" : "futures")}
                         </span>
                       </span>
                       <span className="sym-modal-col-exchange sym-modal-row-exchange">
@@ -249,21 +258,21 @@ export default function SymbolSearchModal(props: SymbolSearchModalProps) {
         <div className="sym-modal-footer">
           <div className="sym-modal-footer-left">
             <span className="sym-modal-result-count">
-              {filteredSymbols.length.toLocaleString()} 个交易对
+              {t("search.pairCount", { count: filteredSymbols.length.toLocaleString(locale) })}
             </span>
             <span className="sym-modal-shortcut-hint">
-              <kbd>↑</kbd><kbd>↓</kbd> 导航 · <kbd>Enter</kbd> 选择 · <kbd>Esc</kbd> 关闭
-              {hasWatchlists && " · 右键添加到自选列表"}
+              <kbd>↑</kbd><kbd>↓</kbd> · <kbd>Enter</kbd> · <kbd>Esc</kbd> {t("search.shortcuts")}
+              {hasWatchlists && t("search.shortcutsWatchlist")}
             </span>
           </div>
           <button
             className="sym-modal-refresh-btn"
             onClick={refreshSymbols}
             disabled={status.refreshing}
-            title="刷新交易所数据"
+            title={t("search.refreshTitle")}
           >
             <span className={`sym-modal-refresh-icon ${status.refreshing ? "spinning" : ""}`}>⟳</span>
-            {status.refreshing ? "刷新中..." : "刷新数据"}
+            {status.refreshing ? t("search.refreshing") : t("search.refresh")}
           </button>
         </div>
       </div>
@@ -276,7 +285,7 @@ export default function SymbolSearchModal(props: SymbolSearchModalProps) {
         >
           <div className="sym-ctx-header">
             <span className="sym-ctx-header-symbol">{contextMenu.symbol}</span>
-            <span className="sym-ctx-header-label">添加到自选列表</span>
+            <span className="sym-ctx-header-label">{t("search.addToWatchlist")}</span>
           </div>
           <div className="sym-ctx-items">
             {(watchlists || []).map((watchlist) => {

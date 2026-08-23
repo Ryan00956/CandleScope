@@ -740,8 +740,8 @@ test("replay watchlist searches the Run catalog and adds products through track 
   assert.match(watchlist, /data-replay-watchlist-source="run-archive"/);
   assert.match(watchlist, /marketCatalog\(runId/);
   assert.match(watchlist, /start_compatibility\?\.state === "READY"/);
-  assert.match(watchlist, /搜索当前 Run 可用商品/);
-  assert.match(watchlist, /Run 不绑定单一商品/);
+  assert.match(watchlist, /replay\.watchlist\.search/);
+  assert.match(watchlist, /replay\.watchlist\.hint/);
   assert.match(watchlist, /selectTrack|addAndSelectTrack/);
   const runtime = readFileSync(
     resolve(testDirectory, "../useReplayViewerRuntime.ts"),
@@ -774,20 +774,20 @@ test("replay watchlist searches the Run catalog and adds products through track 
   assert.match(paper, /readonly viewer: ReplayViewerRuntime/);
   assert.doesNotMatch(paper, /viewer === undefined|viewer !== undefined|runtime\.actions\.submitCommand/);
   assert.match(paper, /portfolioPositions|marketTracks\?\.portfolio/);
-  assert.match(paper, /模拟账户强平/);
-  assert.match(paper, /历史市场爆仓/);
+  assert.match(paper, /replay\.wb\.simLiq/);
+  assert.match(paper, /replay\.wb\.mktLiq/);
   assert.match(paper, /simulated-account-liquidation/);
   assert.match(paper, /reconciliation_delta/);
-  assert.match(paper, /不含盘口排队/);
+  assert.match(paper, /replay\.wb\.modelNoQueue|replay\.dock\.bookOffHint|不含盘口排队/);
   assert.match(paper, /data-replay-rail-tab/);
   assert.doesNotMatch(paper, /BAR v1 不支持/);
   const integrity = readFileSync(
     resolve(testDirectory, "../components/ReplayIntegrityReviewPanel.tsx"),
     "utf8",
   );
-  assert.match(integrity, /服务端校验 · 只读证据/);
-  assert.match(integrity, /训练规则/);
-  assert.match(integrity, /只读复盘/);
+  assert.match(integrity, /replay\.integrity\.kicker/);
+  assert.match(integrity, /replay\.integrity\.rules/);
+  assert.match(integrity, /replay\.integrity\.review/);
   assert.doesNotMatch(integrity, /REPLAY_POLICY_UNSUPPORTED/);
   const controls = readFileSync(
     resolve(testDirectory, "../components/ReplayControlBar.tsx"),

@@ -1,3 +1,5 @@
+import { t, type LocaleId } from "../../i18n/index.js";
+
 export function isBacktestEntryEnabled(
   env: Record<string, string | boolean | undefined> = import.meta.env as Record<
     string,
@@ -19,8 +21,9 @@ export function isPythonStrategyEntryEnabled(
   return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
 }
 
-export const PYTHON_HOST_OWNS_COPY =
-  "Python 只做决策；订单、成交、费用、资金费、账户、报告和 Study 由 CandleScope Host 生成。";
+export function pythonHostOwnsCopy(locale?: LocaleId): string {
+  return t("python.hostOwns", {}, locale);
+}
 
 export function isPythonTrustedLocalEnabled(
   env: Record<string, string | boolean | undefined> = import.meta.env as Record<

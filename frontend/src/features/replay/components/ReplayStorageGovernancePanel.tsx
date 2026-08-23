@@ -1,5 +1,7 @@
 import { useState } from "react";
 
+import { t } from "../../../i18n/index.js";
+import { useLocale } from "../../../i18n/useLocale.js";
 import type {
   ReplayStorageCategoryName,
   ReplayStorageGcProtocol,
@@ -12,12 +14,25 @@ import type { TrainingHubRuntime } from "../useTrainingHub.js";
 const GIB = 1024 * 1024 * 1024;
 const MIB = 1024 * 1024;
 
-const CATEGORY_LABELS: Readonly<Record<ReplayStorageCategoryName, string>> = {
-  segments: "BAR / AGG segments",
-  historical_books: "历史 BOOK",
-  account_history: "Exact account history",
-  review_evidence: "Review / Fork 证据",
-};
+const CATEGORY_NAMES = [
+  "segments",
+  "historical_books",
+  "account_history",
+  "review_evidence",
+] as const satisfies readonly ReplayStorageCategoryName[];
+
+function categoryLabel(name: ReplayStorageCategoryName): string {
+  switch (name) {
+    case "segments":
+      return t("replay.storage.segments");
+    case "historical_books":
+      return t("replay.storage.books");
+    case "account_history":
+      return t("replay.storage.accountHistory");
+    case "review_evidence":
+      return t("replay.storage.reviewEvidence");
+  }
+}
 
 const GC_CATEGORIES = [
   "segments",
@@ -50,7 +65,8 @@ function StorageObjectRows({
   readonly protocol: ReplayStorageGcProtocol;
   readonly runtime: TrainingHubRuntime;
 }) {
-  if (category.items.length === 0) return <p>当前没有已登记对象。</p>;
+  useLocale();
+  if (category.items.length === 0) return <p>{t("replay.storage.empty")}</p>;
   return (
     <div className="replay-storage-object-list">
       {category.items.map((item) => (
@@ -60,15 +76,15 @@ function StorageObjectRows({
             <span data-storage-health={item.health}>{item.health}</span>
           </header>
           <dl>
-            <div><dt>对象</dt><dd><code>{item.object_id}</code></dd></div>
-            <div><dt>占用</dt><dd>{formatBytes(item.byte_size)}</dd></div>
-            <div><dt>引用</dt><dd>{item.active_ref_count}</dd></div>
-            <div><dt>恢复</dt><dd>{item.recoverability}</dd></div>
+            <div><dt>{t("replay.storage.objects")}</dt><dd><code>{item.object_id}</code></dd></div>
+            <div><dt>{t("replay.storage.size")}</dt><dd>{formatBytes(item.byte_size)}</dd></div>
+            <div><dt>{t("replay.storage.refs")}</dt><dd>{item.active_ref_count}</dd></div>
+            <div><dt>{t("replay.storage.recover")}</dt><dd>{item.recoverability}</dd></div>
           </dl>
           <p>
             {item.protection_reasons.length === 0
-              ? "当前无保护理由；仍须先生成 dry-run。"
-              : `保护：${item.protection_reasons.join(" · ")}`}
+              ? t("replay.storage.noProtect")
+              : t("replay.storage.protect", { reasons: item.protection_reasons.join(" · ") })}
           </p>
           {item.health !== "READY" && item.rehydration_available && (
             <button
@@ -79,7 +95,7 @@ function StorageObjectRows({
                 item.object_id,
               )}
             >
-              按 checksum 重新水化
+              {t("replay.storage.rehydrate")}
             </button>
           )}
         </article>
@@ -93,6 +109,7 @@ export default function ReplayStorageGovernancePanel({
 }: {
   readonly runtime: TrainingHubRuntime;
 }) {
+  useLocale();
   const [gcCategory, setGcCategory] = useState<(typeof GC_CATEGORIES)[number]>(
     "segments",
   );
@@ -115,27 +132,27 @@ export default function ReplayStorageGovernancePanel({
   return (
     <section
       className="replay-storage-governance"
-      aria-label="Replay 存储管理"
+      aria-label={t("replay.storage.aria")}
       data-replay-storage-phase={runtime.operation ?? "ready"}
     >
       <header className="replay-storage-heading">
         <div>
-          <span className="training-hub-kicker">DRY-RUN FIRST · HASH-BOUND GC</span>
-          <h2>存储管理</h2>
-          <p>路径、真实时间范围和 checksum 不进入此页面；Review/Fork 证据不提供 GC。</p>
+          <span className="training-hub-kicker">{t("replay.kicker.gc")}</span>
+          <h2>{t("replay.storage.title")}</h2>
+          <p>{t("replay.storage.hint")}</p>
         </div>
         <div>
           <button type="button" disabled={busy} onClick={() => void runtime.actions.refreshStorage()}>
-            刷新库存
+            {t("replay.storage.refresh")}
           </button>
-          <button type="button" onClick={runtime.actions.closeStorage}>关闭</button>
+          <button type="button" onClick={runtime.actions.closeStorage}>{t("replay.hub.close")}</button>
         </div>
       </header>
 
       {inventory === null ? (
         <div className="training-hub-empty">
           <div className="replay-loading-spinner" />
-          正在按需读取脱敏库存…
+          {t("replay.storage.loading")}
         </div>
       ) : (
         <>
@@ -143,12 +160,12 @@ export default function ReplayStorageGovernancePanel({
             className="replay-storage-decision"
             data-release-decision={inventory.decision.state}
           >
-            <strong>生产决策：{inventory.decision.state}</strong>
-            <span>默认开关：{inventory.decision.default_flags_enabled ? "ON" : "OFF"}</span>
+            <strong>{t("replay.storage.decision", { state: inventory.decision.state })}</strong>
+            <span>{t("replay.storage.defaultFlags", { value: inventory.decision.default_flags_enabled ? "ON" : "OFF" })}</span>
             <p>{inventory.decision.reason_codes.join(" · ")}</p>
           </section>
 
-          <section className="replay-storage-alerts" aria-label="存储告警">
+          <section className="replay-storage-alerts" aria-label={t("replay.storage.alerts")}>
             {inventory.alerts.map((alert) => (
               <p
                 key={`${alert.category}:${alert.code}`}
@@ -161,36 +178,36 @@ export default function ReplayStorageGovernancePanel({
           </section>
 
           <div className="replay-storage-category-grid">
-            {(Object.keys(CATEGORY_LABELS) as ReplayStorageCategoryName[]).map((name) => {
+            {CATEGORY_NAMES.map((name) => {
               const category = inventory.categories[name];
               return (
                 <article key={name} data-storage-category={name}>
                   <header>
-                    <h3>{CATEGORY_LABELS[name]}</h3>
+                    <h3>{categoryLabel(name)}</h3>
                     <strong>{(category.summary.pressure_bps / 100).toFixed(1)}%</strong>
                   </header>
                   <p>
                     {formatBytes(category.summary.local_bytes)} / {formatBytes(category.summary.max_bytes)}
                   </p>
                   <dl>
-                    <div><dt>对象</dt><dd>{category.summary.object_count}</dd></div>
-                    <div><dt>READY</dt><dd>{category.summary.ready_count}</dd></div>
-                    <div><dt>EVICTED</dt><dd>{category.summary.evicted_count}</dd></div>
-                    <div><dt>隔离</dt><dd>{category.summary.quarantined_count}</dd></div>
-                    <div><dt>受保护</dt><dd>{category.summary.pinned_count}</dd></div>
+                    <div><dt>{t("replay.storage.objects")}</dt><dd>{category.summary.object_count}</dd></div>
+                    <div><dt>{t("replay.storage.ready")}</dt><dd>{category.summary.ready_count}</dd></div>
+                    <div><dt>{t("replay.storage.evicted")}</dt><dd>{category.summary.evicted_count}</dd></div>
+                    <div><dt>{t("replay.storage.isolated")}</dt><dd>{category.summary.quarantined_count}</dd></div>
+                    <div><dt>{t("replay.storage.protected")}</dt><dd>{category.summary.pinned_count}</dd></div>
                   </dl>
                   {name === "review_evidence" ? (
                     <>
-                      <p>Run archive evidence 永久受保护；本阶段没有删除入口。</p>
+                      <p>{t("replay.storage.archivePinned")}</p>
                       <div className="replay-storage-object-list">
                         {inventory.categories.review_evidence.items.map((item) => (
                           <article key={item.run_id} data-review-storage-run={item.run_id}>
                             <strong>{item.run_id} · {item.run_state}</strong>
                             <span>
-                              anchor {formatBytes(item.anchor_bytes)} / {formatBytes(item.anchor_limit_bytes)}
+                              {t("replay.storage.anchorBytes", { used: formatBytes(item.anchor_bytes), limit: formatBytes(item.anchor_limit_bytes) })}
                             </span>
                             <span>
-                              artifact {formatBytes(item.artifact_bytes)} / {formatBytes(item.artifact_limit_bytes)}
+                              {t("replay.storage.artifactBytes", { used: formatBytes(item.artifact_bytes), limit: formatBytes(item.artifact_limit_bytes) })}
                             </span>
                             <span>{item.protection_reasons.join(" · ")}</span>
                           </article>
@@ -211,14 +228,14 @@ export default function ReplayStorageGovernancePanel({
             })}
           </div>
 
-          <section className="replay-storage-gc" aria-label="存储 GC 预演">
+          <section className="replay-storage-gc" aria-label={t("replay.storage.gc")}>
             <header>
-              <h3>GC 预演与执行</h3>
-              <p>每个类别单独执行；任何库存、pin 或 generation 漂移都会使旧 plan hash 失效。</p>
+              <h3>{t("replay.storage.gcTitle")}</h3>
+              <p>{t("replay.storage.gcHint")}</p>
             </header>
             <div className="replay-storage-gc-form">
               <label>
-                类别
+                {t("replay.storage.category")}
                 <select
                   value={gcCategory}
                   disabled={busy}
@@ -227,12 +244,12 @@ export default function ReplayStorageGovernancePanel({
                   )}
                 >
                   {GC_CATEGORIES.map((name) => (
-                    <option key={name} value={name}>{CATEGORY_LABELS[name]}</option>
+                    <option key={name} value={name}>{categoryLabel(name)}</option>
                   ))}
                 </select>
               </label>
               <label>
-                目标回收 MiB
+                {t("replay.storage.targetMib")}
                 <input
                   type="number"
                   min={1}
@@ -243,7 +260,7 @@ export default function ReplayStorageGovernancePanel({
                 />
               </label>
               <label>
-                最多对象
+                {t("replay.storage.maxObjects")}
                 <input
                   type="number"
                   min={1}
@@ -265,7 +282,7 @@ export default function ReplayStorageGovernancePanel({
                   );
                 }}
               >
-                {runtime.operation === "storage-plan" ? "正在预演…" : "生成 dry-run"}
+                {runtime.operation === "storage-plan" ? t("replay.storage.planning") : t("replay.storage.plan")}
               </button>
             </div>
 
@@ -275,12 +292,14 @@ export default function ReplayStorageGovernancePanel({
                 data-storage-plan-hash={runtime.storagePlan.plan_hash}
               >
                 <p>
-                  <strong>计划</strong> <code>{runtime.storagePlan.plan_hash}</code>
+                  <strong>{t("replay.storage.planLabel")}</strong> <code>{runtime.storagePlan.plan_hash}</code>
                 </p>
                 <p>
-                  候选 {runtime.storagePlan.candidates.length} 个，预计回收{" "}
-                  {formatBytes(runtime.storagePlan.estimated_reclaim_bytes)}；
-                  protected {runtime.storagePlan.protected.length} 个。
+                  {t("replay.storage.candidatesPlan", {
+                    count: runtime.storagePlan.candidates.length,
+                    bytes: formatBytes(runtime.storagePlan.estimated_reclaim_bytes),
+                    protected: runtime.storagePlan.protected.length,
+                  })}
                 </p>
                 <ul>
                   {runtime.storagePlan.candidates.map((item) => (
@@ -290,7 +309,10 @@ export default function ReplayStorageGovernancePanel({
                   ))}
                   {runtime.storagePlan.protected.map((item) => (
                     <li key={`protected:${item.object_id}`}>
-                      {item.object_id} · 不删除 · {item.protection_reasons.join(" / ")}
+                      {t("replay.storage.keep", {
+                        id: item.object_id,
+                        reasons: item.protection_reasons.join(" / "),
+                      })}
                     </li>
                   ))}
                 </ul>
@@ -303,7 +325,7 @@ export default function ReplayStorageGovernancePanel({
                       event.target.checked,
                     )}
                   />
-                  我已核对上述 exact plan hash；执行前服务端仍须重新计算并完全匹配。
+                  {t("replay.storage.confirmHash")}
                 </label>
                 <button
                   type="button"
@@ -312,22 +334,24 @@ export default function ReplayStorageGovernancePanel({
                     || runtime.storagePlan.candidates.length === 0}
                   onClick={() => void runtime.actions.runStorageGc()}
                 >
-                  {runtime.operation === "storage-run" ? "正在执行…" : "执行此计划"}
+                  {runtime.operation === "storage-run" ? t("replay.storage.running") : t("replay.storage.run")}
                 </button>
               </div>
             )}
 
             {runtime.storageResult !== null && (
               <p className="replay-storage-result" role="status">
-                已回收 {formatBytes(runtime.storageResult.reclaimed_bytes)}；
-                reclaimed {runtime.storageResult.reclaimed.length}，
-                skipped {runtime.storageResult.skipped.length}。
+                {t("replay.storage.reclaimed", {
+                  bytes: formatBytes(runtime.storageResult.reclaimed_bytes),
+                  reclaimed: runtime.storageResult.reclaimed.length,
+                  skipped: runtime.storageResult.skipped.length,
+                })}
               </p>
             )}
           </section>
 
-          <section className="replay-storage-support" aria-label="真实来源支持清单">
-            <h3>真实来源与 fidelity</h3>
+          <section className="replay-storage-support" aria-label={t("replay.storage.support")}>
+            <h3>{t("replay.storage.supportTitle")}</h3>
             <div>
               {inventory.support_matrix.map((support) => (
                 <article key={support.mode} data-storage-support={support.mode}>
@@ -338,8 +362,8 @@ export default function ReplayStorageGovernancePanel({
                   <p>{support.source_contract}</p>
                   <p>{support.declared_scope}</p>
                   <p>{support.fidelity}</p>
-                  <p>queue exact：否</p>
-                  <p>已观察 identity：{support.observed_identities.length}</p>
+                  <p>{t("replay.storage.queueExact")}</p>
+                  <p>{t("replay.storage.identities", { count: support.observed_identities.length })}</p>
                   <p>{support.reason_codes.join(" · ")}</p>
                 </article>
               ))}

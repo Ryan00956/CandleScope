@@ -7,6 +7,8 @@
  */
 import { useState } from "react";
 import type { SyntheticEvent } from "react";
+import { t } from "../i18n/index.js";
+import { useLocale } from "../i18n/useLocale.js";
 import type { TextDrawingPatch } from "../features/drawings/drawingTypes.js";
 import type { SelectedTextSnapshot } from "../features/drawings/drawingSelectionController.js";
 
@@ -26,6 +28,7 @@ interface ColorSwatchProps {
 }
 
 function ColorSwatch({ value, onChange, allowNone = false, title }: ColorSwatchProps) {
+  useLocale();
   const [open, setOpen] = useState(false);
   const isNone = !value || value === "transparent";
 
@@ -58,7 +61,7 @@ function ColorSwatch({ value, onChange, allowNone = false, title }: ColorSwatchP
                 type="button"
                 className="tfb-color-cell tfb-color-cell-none"
                 onClick={() => { onChange(null); setOpen(false); }}
-                title="无 / None"
+                title={t("format.none")}
               />
             )}
             {PRESET_COLORS.map((c) => (
@@ -98,6 +101,7 @@ export default function TextFormatBar({
   onDelete,            // () => void
   containerWidth = 0,  // chart container CSS width — used to clamp position
 }: TextFormatBarProps) {
+  useLocale();
   // Local string state for the font-size input so the user can freely clear
   // and retype without the controlled value snapping back mid-edit.
   const snapshotFontSize = snapshot?.fontSize ?? 14;
@@ -142,7 +146,7 @@ export default function TextFormatBar({
         <button
           type="button"
           className="tfb-btn tfb-btn-icon"
-          title="缩小字号"
+          title={t("format.smaller")}
           onMouseDown={(e) => e.preventDefault()}
           onClick={() => onPatch({ fontSize: Math.max(8, (snapshot.fontSize || 14) - 2) })}
         >A−</button>
@@ -177,7 +181,7 @@ export default function TextFormatBar({
         <button
           type="button"
           className="tfb-btn tfb-btn-icon"
-          title="放大字号"
+          title={t("format.larger")}
           onMouseDown={(e) => e.preventDefault()}
           onClick={() => onPatch({ fontSize: Math.min(200, (snapshot.fontSize || 14) + 2) })}
         >A+</button>
@@ -190,21 +194,21 @@ export default function TextFormatBar({
         <button
           type="button"
           className={`tfb-btn tfb-btn-toggle ${snapshot.bold ? "active" : ""}`}
-          title="粗体 (B)"
+          title={t("format.bold")}
           onMouseDown={(e) => e.preventDefault()}
           onClick={() => onPatch({ bold: !snapshot.bold })}
         ><b>B</b></button>
         <button
           type="button"
           className={`tfb-btn tfb-btn-toggle ${snapshot.italic ? "active" : ""}`}
-          title="斜体 (I)"
+          title={t("format.italic")}
           onMouseDown={(e) => e.preventDefault()}
           onClick={() => onPatch({ italic: !snapshot.italic })}
         ><i>I</i></button>
         <button
           type="button"
           className={`tfb-btn tfb-btn-toggle ${snapshot.underline ? "active" : ""}`}
-          title="下划线 (U)"
+          title={t("format.underline")}
           onMouseDown={(e) => e.preventDefault()}
           onClick={() => onPatch({ underline: !snapshot.underline })}
         ><u>U</u></button>
@@ -223,7 +227,7 @@ export default function TextFormatBar({
             key={a.id}
             type="button"
             className={`tfb-btn tfb-btn-toggle ${snapshot.align === a.id ? "active" : ""}`}
-            title={`对齐: ${a.id}`}
+            title={t("format.align", { id: a.id })}
             onMouseDown={(e) => e.preventDefault()}
             onClick={() => onPatch({ align: a.id })}
           >{a.label}</button>
@@ -234,25 +238,25 @@ export default function TextFormatBar({
 
       {/* Text color / Background / Border */}
       <div className="tfb-group">
-        <span className="tfb-label" title="文字颜色">A</span>
+        <span className="tfb-label" title={t("format.textColor")}>A</span>
         <ColorSwatch
           value={snapshot.color}
           onChange={(c) => c && onPatch({ color: c })}
-          title="文字颜色"
+          title={t("format.textColor")}
         />
-        <span className="tfb-label" title="背景色">▣</span>
+        <span className="tfb-label" title={t("format.bgColor")}>▣</span>
         <ColorSwatch
           value={snapshot.bgColor}
           onChange={(c) => onPatch({ bgColor: c })}
           allowNone
-          title="背景色"
+          title={t("format.bgColor")}
         />
-        <span className="tfb-label" title="边框">□</span>
+        <span className="tfb-label" title={t("format.border")}>□</span>
         <ColorSwatch
           value={snapshot.borderColor}
           onChange={(c) => onPatch({ borderColor: c })}
           allowNone
-          title="边框颜色"
+          title={t("format.borderColor")}
         />
       </div>
 
@@ -261,10 +265,10 @@ export default function TextFormatBar({
       <button
         type="button"
         className="tfb-btn tfb-btn-danger"
-        title="删除"
+        title={t("format.delete")}
         onMouseDown={(e) => e.preventDefault()}
         onClick={() => onDelete?.()}
-      >Del</button>
+      >{t("format.delete")}</button>
     </div>
   );
 }

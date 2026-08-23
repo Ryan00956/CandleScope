@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import { parseIntervalSeconds } from "../../utils/intervals.js";
 import type { LiquidationCapability } from "./liquidationTypes.js";
 
@@ -16,13 +17,13 @@ export function resolveLiquidationCapability({
 }): LiquidationCapability {
   const normalizedMarketType = marketType.trim().toLowerCase();
   if (normalizedMarketType === "spot") {
-    return { supported: false, reason: "仅合约市场支持" };
+    return { supported: false, reason: t("market.cap.futuresOnly") };
   }
   const intervalSeconds = parseIntervalSeconds(interval);
   if (intervalSeconds === null || intervalSeconds < 60) {
-    return { supported: false, reason: "观测爆仓额仅支持 1 分钟及以上周期" };
+    return { supported: false, reason: t("liq.cap.minInterval") };
   }
-  if (!raw) return { supported: false, reason: "交易所能力信息尚未就绪" };
+  if (!raw) return { supported: false, reason: t("market.cap.notReady") };
   const channels = Array.isArray(raw.channels) ? raw.channels : [];
   for (const item of channels) {
     if (!isRecord(item) || String(item.channel || "").trim().toLowerCase() !== "liquidation") {
@@ -34,5 +35,5 @@ export function resolveLiquidationCapability({
     if (!marketTypes.includes(normalizedMarketType)) continue;
     if (item.realtime === true) return { supported: true, reason: null };
   }
-  return { supported: false, reason: "当前交易所或市场不支持公开爆仓实时流" };
+  return { supported: false, reason: t("liq.cap.noStream") };
 }

@@ -1,4 +1,5 @@
 import { canonicalizeIntervalValue } from "../../utils/intervals.js";
+import { t } from "../../i18n/index.js";
 import type { ExchangeId, MarketType, SymbolCode } from "../../utils/symbolKey.js";
 import { loadInitialChartSession } from "../chart-session/chartSessionModel.js";
 import type { ChartSession } from "../chart-session/chartSessionTypes.js";
@@ -238,7 +239,7 @@ export function createDefaultChartWorkspace(): ChartWorkspaceDocument {
     linkGroups: {
       [DEFAULT_CHART_LINK_GROUP_ID]: {
         id: DEFAULT_CHART_LINK_GROUP_ID,
-        name: "主控组",
+        name: t("workspace.linkGroup.controller"),
         color: CHART_LINK_GROUP_COLORS[0],
         parentId: null,
         peerPolicy: cloneDefaultLinkGroupSettings(),

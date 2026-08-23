@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import {
   LOCAL_ANALYSIS_EVENT_KINDS,
   type LocalAnalysisEvent,
@@ -110,7 +111,7 @@ function parseDocument(
   try {
     parsed = JSON.parse(raw);
   } catch {
-    throw new LocalAnalysisStorageError("本地分析标记文件不是有效 JSON");
+    throw new LocalAnalysisStorageError(t("local.err.invalidJson"));
   }
   const record = asRecord(parsed);
   if (record === null
@@ -119,16 +120,16 @@ function parseDocument(
     || record.data_epoch !== identity.dataEpoch
     || !Array.isArray(record.events)
     || record.events.length > MAX_EVENTS) {
-    throw new LocalAnalysisStorageError("本地分析标记文件的版本或数据集身份无效");
+    throw new LocalAnalysisStorageError(t("local.err.invalidIdentity"));
   }
   const events = record.events.map((event) => parseEvent(event, identity));
   if (events.some((event) => event === null)) {
-    throw new LocalAnalysisStorageError("本地分析标记文件包含无效事件，已停止读取以避免静默丢失");
+    throw new LocalAnalysisStorageError(t("local.err.invalidEvents"));
   }
   const ids = new Set<string>();
   for (const event of events) {
     if (event === null || ids.has(event.id)) {
-      throw new LocalAnalysisStorageError("本地分析标记文件包含重复事件 ID");
+      throw new LocalAnalysisStorageError(t("local.err.dupEventId"));
     }
     ids.add(event.id);
   }
@@ -199,7 +200,7 @@ export class LocalAnalysisEventStore {
   create(draft: LocalAnalysisEventDraft): LocalAnalysisEvent {
     this.ensureWritable();
     if (this.snapshot.events.length >= MAX_EVENTS) {
-      throw new LocalAnalysisStorageError(`每个分析项目最多保存 ${MAX_EVENTS} 个标记`);
+      throw new LocalAnalysisStorageError(t("local.err.maxEvents", { count: MAX_EVENTS }));
     }
     const normalized = this.normalizeDraft(draft);
     const timestamp = this.now().toISOString();
@@ -223,13 +224,13 @@ export class LocalAnalysisEventStore {
     const batchIds = new Set<string>();
     const pending = drafts.filter((draft) => {
       if (draft.id.length < 1 || draft.id.length > 200 || batchIds.has(draft.id)) {
-        throw new LocalAnalysisStorageError("事件 CSV 包含无效或重复的导入 ID");
+        throw new LocalAnalysisStorageError(t("local.err.dupImportId"));
       }
       batchIds.add(draft.id);
       return !currentIds.has(draft.id);
     });
     if (this.snapshot.events.length + pending.length > MAX_EVENTS) {
-      throw new LocalAnalysisStorageError(`每个分析项目最多保存 ${MAX_EVENTS} 个标记`);
+      throw new LocalAnalysisStorageError(t("local.err.maxEvents", { count: MAX_EVENTS }));
     }
     if (pending.length === 0) return { imported: 0, skipped: drafts.length };
     const timestamp = this.now().toISOString();
@@ -252,7 +253,7 @@ export class LocalAnalysisEventStore {
     const index = this.snapshot.events.findIndex((event) => event.id === eventId);
     const current = this.snapshot.events[index];
     if (index < 0 || current === undefined) {
-      throw new LocalAnalysisStorageError("要编辑的标记不存在或已被删除");
+      throw new LocalAnalysisStorageError(t("local.err.missingEvent"));
     }
     const updated = Object.freeze({
       ...current,
@@ -278,7 +279,7 @@ export class LocalAnalysisEventStore {
       this.storage?.removeItem(this.storageKey);
     } catch (reason) {
       throw new LocalAnalysisStorageError(
-        reason instanceof Error ? reason.message : "无法重置损坏的本地分析标记",
+        reason instanceof Error ? reason.message : t("local.err.resetCorrupt"),
       );
     }
     this.snapshot = Object.freeze({
@@ -294,7 +295,7 @@ export class LocalAnalysisEventStore {
       return Object.freeze({
         events: Object.freeze([]),
         revision: 0,
-        storage_error: "浏览器本地存储不可用，无法可靠保存分析标记",
+        storage_error: t("local.err.storageUnavailableSave"),
       });
     }
     let raw: string | null;
@@ -304,7 +305,7 @@ export class LocalAnalysisEventStore {
       return Object.freeze({
         events: Object.freeze([]),
         revision: 0,
-        storage_error: reason instanceof Error ? reason.message : "无法读取本地分析标记",
+        storage_error: reason instanceof Error ? reason.message : t("local.err.readMarkers"),
       });
     }
     if (raw === null) return EMPTY_LOCAL_ANALYSIS_SNAPSHOT;
@@ -314,7 +315,7 @@ export class LocalAnalysisEventStore {
       return Object.freeze({
         events: Object.freeze([]),
         revision: 0,
-        storage_error: reason instanceof Error ? reason.message : "无法读取本地分析标记",
+        storage_error: reason instanceof Error ? reason.message : t("local.err.readMarkers"),
       });
     }
   }
@@ -326,16 +327,16 @@ export class LocalAnalysisEventStore {
     const label = normalizedText(draft.label, MAX_LABEL_LENGTH);
     const note = normalizedText(draft.note, MAX_NOTE_LENGTH);
     if (!Number.isFinite(draft.time) || draft.time <= 0) {
-      throw new LocalAnalysisStorageError("标记时间无效");
+      throw new LocalAnalysisStorageError(t("local.err.badTime"));
     }
     if (draft.price !== null && !Number.isFinite(draft.price)) {
-      throw new LocalAnalysisStorageError("标记价格无效");
+      throw new LocalAnalysisStorageError(t("local.err.badPrice"));
     }
     if (!isEventKind(draft.kind) || label === null || note === null) {
-      throw new LocalAnalysisStorageError("标记类型、标题或备注无效");
+      throw new LocalAnalysisStorageError(t("local.err.badFields"));
     }
     if (!COLOR_PATTERN.test(draft.color)) {
-      throw new LocalAnalysisStorageError("标记颜色必须是六位十六进制颜色");
+      throw new LocalAnalysisStorageError(t("local.err.badColor"));
     }
     return {
       time: draft.time,
@@ -352,7 +353,7 @@ export class LocalAnalysisEventStore {
       throw new LocalAnalysisStorageError(this.snapshot.storage_error);
     }
     if (this.storage === null) {
-      throw new LocalAnalysisStorageError("浏览器本地存储不可用");
+      throw new LocalAnalysisStorageError(t("local.err.storageUnavailable"));
     }
   }
 
@@ -370,7 +371,7 @@ export class LocalAnalysisEventStore {
       this.storage?.setItem(this.storageKey, JSON.stringify(document));
     } catch (reason) {
       throw new LocalAnalysisStorageError(
-        reason instanceof Error ? reason.message : "本地分析标记保存失败",
+        reason instanceof Error ? reason.message : t("local.err.saveFailed"),
       );
     }
     this.snapshot = Object.freeze({

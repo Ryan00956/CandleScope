@@ -13,6 +13,8 @@ import {
   SegmentIcon,
   SHAPE_VARIANTS,
 } from "./drawingToolbarDefinitions.js";
+import { drawingVariantLabel } from "./drawingToolbarI18n.js";
+import { t } from "../../i18n/index.js";
 import type { LineToolbarToolId, ToolbarVariant } from "./drawingToolbarDefinitions.js";
 import type {
   DrawingToolId,
@@ -358,21 +360,33 @@ export function useDrawingToolbarController({
     currentChartType,
     currentCursorIcon: currentCursor?.icon || MouseDefaultIcon,
     currentCursorId,
-    currentCursorLabel: currentCursor?.label || "Default cursor",
+    currentCursorLabel: currentCursor
+      ? drawingVariantLabel(currentCursor)
+      : t("drawing.variant.cursor-default"),
     currentFreehandIcon: currentFreehand?.icon || PenIcon,
     currentFreehandId,
-    currentFreehandLabel: currentFreehand?.label || "Pen",
+    currentFreehandLabel: currentFreehand
+      ? drawingVariantLabel(currentFreehand)
+      : t("drawing.variant.pen"),
     currentLineIcon: currentLine?.icon || SegmentIcon,
-    currentLineLabel: currentLine?.label || "Segment",
+    currentLineLabel: currentLine
+      ? drawingVariantLabel(currentLine)
+      : t("drawing.variant.line-segment"),
     currentPosIcon: currentPosition?.icon || LongPositionIcon,
-    currentPosLabel: currentPosition?.label || "Long position",
+    currentPosLabel: currentPosition
+      ? drawingVariantLabel(currentPosition)
+      : t("drawing.variant.position-long"),
     currentShapeIcon: currentShape?.icon || RectangleIcon,
-    currentShapeLabel: currentShape?.label || "Rectangle",
+    currentShapeLabel: currentShape
+      ? drawingVariantLabel(currentShape)
+      : t("drawing.variant.shape-rectangle"),
     cursorBtnRef,
     fibBtnRef,
     flyoutOpen,
     freehandBtnRef,
-    freehandOptionLabel: currentFreehand?.label || "Pen",
+    freehandOptionLabel: currentFreehand
+      ? drawingVariantLabel(currentFreehand)
+      : t("drawing.variant.pen"),
     handleChartTypeClick,
     handleCursorClick,
     handleCursorContextMenu,

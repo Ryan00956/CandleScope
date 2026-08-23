@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import { snapshotIndicatorResultCacheDiagnostics } from "../indicators/indicatorResultCacheStore.js";
 import { snapshotWatchlistFullCacheDiagnostics } from "../watchlist-full-cache/watchlistFullCacheStore.js";
 import { snapshotCacheRegistry } from "./cacheRegistry.js";
@@ -63,7 +64,7 @@ function normalizeChartSnapshot(snapshotValue: unknown = {}) {
   const totalBars = Number(snapshot.totalBars || 0);
   return {
     owner: "chart-data-cache",
-    label: "主图 K 线缓存",
+    label: t("settings.diag.chartCache"),
     seriesCount: Number(snapshot.seriesCount || 0),
     totalBars,
     estimatedBytes: finiteNonNegative(snapshot.estimatedBytes, estimateKlineBytes(totalBars)),
@@ -77,7 +78,7 @@ function normalizeWatchlistSnapshot(snapshotValue: unknown = {}) {
   const totalBars = Number(snapshot.totalBars || 0);
   return {
     owner: "watchlist-full-cache",
-    label: "自选 Full 后台缓存",
+    label: t("settings.diag.watchlistFullCache"),
     seriesCount: Number(snapshot.seriesCount || 0),
     totalBars,
     estimatedBytes: finiteNonNegative(snapshot.estimatedBytes, estimateKlineBytes(totalBars)),
@@ -92,7 +93,7 @@ function normalizeIndicatorSnapshot(snapshotValue: unknown = {}) {
   const totalItems = Number(snapshot.totalItems || 0);
   return {
     owner: "indicator-result-cache",
-    label: "指标结果缓存",
+    label: t("settings.diag.indicatorCache"),
     entryCount: Number(snapshot.entryCount || 0),
     totalPoints,
     totalItems,

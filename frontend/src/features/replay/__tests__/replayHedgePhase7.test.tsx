@@ -4,6 +4,7 @@ import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
+import { getLocale, setLocale } from "../../../i18n/index.js";
 import ReplayLiquidationTimeline from "../components/ReplayLiquidationTimeline.js";
 import { parseReplayLiquidationCases } from "../replayV2Types.js";
 
@@ -143,14 +144,21 @@ function liquidationCase() {
 
 test("Phase 7 parses and renders the complete liquidation, insurance and ADL timeline", () => {
   const parsed = parseReplayLiquidationCases([liquidationCase()]);
-  const html = renderToStaticMarkup(<ReplayLiquidationTimeline cases={parsed} />);
+  const previousLocale = getLocale();
+  let html = "";
+  try {
+    setLocale("en");
+    html = renderToStaticMarkup(<ReplayLiquidationTimeline cases={parsed} />);
+  } finally {
+    setLocale(previousLocale);
+  }
 
   assert.match(html, /Case #1/);
   assert.match(html, /FULL_LIQUIDATION/);
   assert.match(html, /queue exact: false/);
   assert.match(html, /Insurance/);
   assert.match(html, /ADL · COMPLETED/);
-  assert.match(html, /确定性模拟，不代表历史交易所私有队列/);
+  assert.match(html, /deterministic simulation, not a historical exchange private queue/);
   assert.doesNotMatch(html, /actual_time|archive_path|private_queue_position/);
 });
 

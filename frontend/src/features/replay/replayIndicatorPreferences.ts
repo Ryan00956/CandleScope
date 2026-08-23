@@ -34,21 +34,29 @@ const REPLAY_INDICATORS_SCHEMA_VERSION = 1;
 
 export const REPLAY_LOCAL_INDICATOR_CATALOG: ReadonlyArray<{
   readonly id: ReplayLocalIndicatorId;
-  readonly name: string;
-  readonly description: string;
+  readonly nameKey: MessageKey;
+  readonly descriptionKey: MessageKey;
   readonly pane: "main" | "sub";
   readonly defaultPeriod: number;
 }> = Object.freeze([
-  { id: "sma", name: "Simple Moving Average", description: "简单移动平均线", pane: "main", defaultPeriod: 20 },
-  { id: "ema", name: "Exponential Moving Average", description: "指数移动平均线", pane: "main", defaultPeriod: 20 },
-  { id: "boll", name: "Bollinger Bands", description: "布林带（2 标准差）", pane: "main", defaultPeriod: 20 },
-  { id: "rsi", name: "Relative Strength Index", description: "相对强弱指标", pane: "sub", defaultPeriod: 14 },
-  { id: "macd", name: "MACD", description: "12 / 26 / 9", pane: "sub", defaultPeriod: 12 },
-  { id: "atr", name: "Average True Range", description: "平均真实波幅", pane: "sub", defaultPeriod: 14 },
-  { id: "vol", name: "成交量", description: "已揭示 K 线成交量", pane: "sub", defaultPeriod: 1 },
-  { id: "cvd", name: "CVD", description: "K 线 taker volume 连续前缀和", pane: "sub", defaultPeriod: 1 },
-  { id: "delta", name: "Volume Delta", description: "主动买量减主动卖量", pane: "sub", defaultPeriod: 1 },
+  { id: "sma", nameKey: "replay.indicator.sma.name", descriptionKey: "replay.indicator.sma.desc", pane: "main", defaultPeriod: 20 },
+  { id: "ema", nameKey: "replay.indicator.ema.name", descriptionKey: "replay.indicator.ema.desc", pane: "main", defaultPeriod: 20 },
+  { id: "boll", nameKey: "replay.indicator.boll.name", descriptionKey: "replay.indicator.boll.desc", pane: "main", defaultPeriod: 20 },
+  { id: "rsi", nameKey: "replay.indicator.rsi.name", descriptionKey: "replay.indicator.rsi.desc", pane: "sub", defaultPeriod: 14 },
+  { id: "macd", nameKey: "replay.indicator.macd.name", descriptionKey: "replay.indicator.macd.desc", pane: "sub", defaultPeriod: 12 },
+  { id: "atr", nameKey: "replay.indicator.atr.name", descriptionKey: "replay.indicator.atr.desc", pane: "sub", defaultPeriod: 14 },
+  { id: "vol", nameKey: "replay.indicator.vol.name", descriptionKey: "replay.indicator.vol.desc", pane: "sub", defaultPeriod: 1 },
+  { id: "cvd", nameKey: "replay.indicator.cvd.name", descriptionKey: "replay.indicator.cvd.desc", pane: "sub", defaultPeriod: 1 },
+  { id: "delta", nameKey: "replay.indicator.delta.name", descriptionKey: "replay.indicator.delta.desc", pane: "sub", defaultPeriod: 1 },
 ]);
+
+export function replayLocalIndicatorCatalog(locale: LocaleId = getLocale()) {
+  return REPLAY_LOCAL_INDICATOR_CATALOG.map((item) => ({
+    ...item,
+    name: t(item.nameKey, {}, locale),
+    description: t(item.descriptionKey, {}, locale),
+  }));
+}
 
 const catalogById = new Map(REPLAY_LOCAL_INDICATOR_CATALOG.map((item) => [item.id, item]));
 
@@ -117,7 +125,7 @@ function deriveFromLiveWorkspace(storage: StorageLike): ReplayIndicatorPreferenc
         if (!isRecord(item)) continue;
         const id = liveBuiltinId(item);
         if (id === null) {
-          unsupported.push(safeLabel(item.name, safeLabel(item.id, "未命名指标")));
+          unsupported.push(safeLabel(item.name, safeLabel(item.id, t("replay.indicator.unnamed"))));
           continue;
         }
         indicators.set(id, {
@@ -241,3 +249,4 @@ export function clearReplayIndicatorPreferences(
     }
   }
 }
+import { getLocale, t, type LocaleId, type MessageKey } from "../../i18n/index.js";

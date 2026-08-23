@@ -1,4 +1,5 @@
 import { useCallback, useMemo, useState } from "react";
+import { t } from "../../i18n/index.js";
 import {
   buildExportPresentationKey,
   DEFAULT_EXPORT_OPTIONS,
@@ -150,7 +151,7 @@ export function useExportRuntime({
 
     try {
       if (!previewBlob) {
-        throw new Error("当前配置的预览还未生成完成，请等待右侧预览更新后再保存。 ");
+        throw new Error(t("export.previewNotReady"));
       }
       let blob = previewBlob;
       let filename = preview.filename;
@@ -168,16 +169,16 @@ export function useExportRuntime({
       if (!sameDrawingExportTarget(currentDrawingTarget, preview.drawingTarget)) {
         const refreshed = await preview.refreshPreview();
         if (!refreshed) {
-          throw new Error("绘图已发生变化，最新预览尚未生成完成，请重试。 ");
+          throw new Error(t("export.drawPreviewStale"));
         }
         blob = refreshed.blob;
         filename = refreshed.filename;
       }
 
       downloadBlob(blob, filename);
-      setNotice(`已保存 ${filename}`);
+      setNotice(t("export.saved", { filename }));
     } catch (err: unknown) {
-      setError(errorMessage(err, "保存失败，请稍后重试。 "));
+      setError(errorMessage(err, t("export.saveFailed")));
     } finally {
       setInProgress(false);
     }

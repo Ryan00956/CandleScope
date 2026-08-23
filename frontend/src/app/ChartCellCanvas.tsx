@@ -10,6 +10,8 @@ import { ChartErrorBoundary } from "./AppProviders.js";
 import { drawingToolWhenInteractionReady } from "./drawingInteractionReadiness.js";
 import type { ChartWorkspaceChartModel } from "./ChartWorkspace.js";
 import type { ComponentType, PropsWithChildren } from "react";
+import { t } from "../i18n/index.js";
+import { useLocale } from "../i18n/useLocale.js";
 
 export interface ChartCellCanvasProps {
   chart: ChartWorkspaceChartModel;
@@ -32,6 +34,7 @@ function ChartCellCanvas({
   onDrawingInteractionReadyChange,
   paused = false,
 }: ChartCellCanvasProps) {
+  useLocale();
   const Boundary = errorBoundary;
   const advancedPanes = useAdvancedMarketPanes(chart.advancedMarketData);
   const tradeFlowPanes = useTradeFlowPanes(tradeFlow, chart.chartProps.seriesStore);
@@ -75,16 +78,16 @@ function ChartCellCanvas({
         <div className="error-overlay">
           <div className="error-icon">!</div>
           <div className="error-message">
-            <strong>Data load failed</strong>
+            <strong>{t("chart.dataLoadFailed")}</strong>
             <br />
-            {chart.error}
+            {t("chart.dataLoadDetail")}
             <br />
             <small style={{ color: "var(--text-muted)", marginTop: 8, display: "block" }}>
-              Ensure backend is running: `uvicorn app.main:app --reload`
+              {t("chart.backendHint")}
             </small>
           </div>
           <button className="retry-btn" onClick={chart.onRetryLoad} id="retry-btn">
-            Retry
+            {t("shell.retry")}
           </button>
         </div>
       </div>

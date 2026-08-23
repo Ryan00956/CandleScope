@@ -6,6 +6,7 @@ import {
   useRef,
 } from "react";
 import type { MutableRefObject } from "react";
+import { t } from "../../i18n/index.js";
 
 import {
   stripIndicatorRuntimeFields,
@@ -91,7 +92,7 @@ export function providedBarsIndicatorSupport(
       supported: false,
       reason: resolution.kind === "invalid"
         ? resolution.error
-        : "指标没有可用的显式 bars 本地执行描述",
+        : t("indicator.noLocalBars"),
     };
   }
   if (resolution.execution.mode === "builtin") {
@@ -101,7 +102,7 @@ export function providedBarsIndicatorSupport(
   if (language !== "pyne" && language !== "pine") {
     return {
       supported: false,
-      reason: `回放仅允许内置指标、Pyne safe 与 Pine closed-bars 脚本；${language || "未知运行时"} 未声明为 replay-safe`,
+      reason: t("indicator.replayUnsafe", { language: language || t("indicator.unknownRuntime") }),
     };
   }
   return { supported: true, reason: null };

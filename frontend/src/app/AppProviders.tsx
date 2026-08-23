@@ -1,5 +1,6 @@
 import React from "react";
 import type { ErrorInfo, PropsWithChildren, ReactNode } from "react";
+import { t } from "../i18n/index.js";
 
 export type ChartErrorBoundaryProps = PropsWithChildren;
 
@@ -35,10 +36,10 @@ export class ChartErrorBoundary extends React.Component<
         }}>
           <div style={{ fontSize: 48 }}>!</div>
           <div style={{ fontSize: 16, fontWeight: 600, color: "#e2e8f0" }}>
-            Chart rendering error
+            {t("shell.chartErrorTitle")}
           </div>
           <div style={{ fontSize: 13, maxWidth: 400, textAlign: "center" }}>
-            {this.state.error?.message || "Unknown error"}
+            {t("shell.chartErrorDetail")}
           </div>
           <button
             onClick={() => this.setState({ hasError: false, error: null })}
@@ -47,7 +48,7 @@ export class ChartErrorBoundary extends React.Component<
               border: "none", borderRadius: 6, cursor: "pointer", fontWeight: 600,
             }}
           >
-            Retry
+            {t("shell.retry")}
           </button>
         </div>
       );

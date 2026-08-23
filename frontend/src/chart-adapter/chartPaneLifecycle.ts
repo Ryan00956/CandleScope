@@ -7,6 +7,7 @@ import type {
   TickMarkType,
 } from "lightweight-charts";
 import type { ChartTime } from "./chartAdapterTypes.js";
+import { getLocale } from "../i18n/index.js";
 
 type AdapterTickMarkFormatter = (
   time: ChartTime,
@@ -79,18 +80,28 @@ export function buildLocalizationOptions(
       tooltipFormatOptions.timeZone = timeZoneOpt;
       datePartsOptions.timeZone = timeZoneOpt;
     }
-    const tooltipFormatter = new Intl.DateTimeFormat("en-GB", tooltipFormatOptions);
-    const partsFormatter = new Intl.DateTimeFormat("en-GB", datePartsOptions);
+    let formatterLocale = "";
+    let tooltipFormatter: Intl.DateTimeFormat;
+    let partsFormatter: Intl.DateTimeFormat;
+    const formatters = () => {
+      const locale = getLocale() === "en" ? "en-GB" : "zh-CN";
+      if (locale !== formatterLocale) {
+        formatterLocale = locale;
+        tooltipFormatter = new Intl.DateTimeFormat(locale, tooltipFormatOptions);
+        partsFormatter = new Intl.DateTimeFormat(locale, datePartsOptions);
+      }
+      return { tooltipFormatter, partsFormatter };
+    };
 
     return {
       localization: {
-        timeFormatter: (ts: ChartTime) => tooltipFormatter.format(
+        timeFormatter: (ts: ChartTime) => formatters().tooltipFormatter.format(
           new Date(formatterSourceTime(ts) * 1000),
         ),
       },
       timeScale: {
         tickMarkFormatter: (ts: ChartTime, tickMarkType: TickMarkType) => {
-          const parts = partsFormatter.formatToParts(
+          const parts = formatters().partsFormatter.formatToParts(
             new Date(formatterSourceTime(ts) * 1000),
           );
           const get = (type: Intl.DateTimeFormatPartTypes): string => (

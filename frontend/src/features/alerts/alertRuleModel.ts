@@ -16,6 +16,7 @@ import type {
   AlertHistoryEvent,
 } from "./alertTypes.js";
 import { parseAlertExpression } from "./alertTypes.js";
+import { getLocale, t, type MessageKey } from "../../i18n/index.js";
 
 let nodeCounter = 0;
 
@@ -24,42 +25,93 @@ function createNodeId(prefix = "alert-node"): string {
   return `${prefix}-${Date.now().toString(36)}-${nodeCounter.toString(36)}`;
 }
 
+const SOURCE_FIXED_LABELS: Record<string, string> = {
+  rsi: "RSI(14)",
+  macdHist: "MACD Histogram",
+  ma20: "MA(20)",
+};
+
+const SOURCE_LABEL_KEYS: Record<string, MessageKey> = {
+  close: "alert.field.close",
+  last: "alert.field.last",
+  open: "alert.field.open",
+  high: "alert.field.high",
+  low: "alert.field.low",
+  volume: "alert.field.volume",
+};
+
 export const ALERT_SOURCE_OPTIONS = [
-  { value: "close", label: "收盘价" },
-  { value: "last", label: "最新价" },
-  { value: "open", label: "开盘价" },
-  { value: "high", label: "最高价" },
-  { value: "low", label: "最低价" },
-  { value: "volume", label: "成交量" },
-  { value: "rsi", label: "RSI(14)" },
-  { value: "macdHist", label: "MACD Histogram" },
-  { value: "ma20", label: "MA(20)" },
+  { value: "close" },
+  { value: "last" },
+  { value: "open" },
+  { value: "high" },
+  { value: "low" },
+  { value: "volume" },
+  { value: "rsi" },
+  { value: "macdHist" },
+  { value: "ma20" },
 ] as const;
+
+const COMPARATOR_LABEL_KEYS: Record<string, MessageKey> = {
+  crossesAbove: "alert.cmp.crossesAbove",
+  crossesBelow: "alert.cmp.crossesBelow",
+  ">": "alert.cmp.gt",
+  "<": "alert.cmp.lt",
+  ">=": "alert.cmp.gte",
+  "<=": "alert.cmp.lte",
+  "==": "alert.cmp.eq",
+  "!=": "alert.cmp.neq",
+  between: "alert.cmp.between",
+  outsideRange: "alert.cmp.outside",
+  percentChangeAbove: "alert.cmp.pctAbove",
+  percentChangeBelow: "alert.cmp.pctBelow",
+};
 
 export const ALERT_COMPARATOR_OPTIONS = [
-  { value: "crossesAbove", label: "上穿" },
-  { value: "crossesBelow", label: "下穿" },
-  { value: ">", label: "大于" },
-  { value: "<", label: "小于" },
-  { value: ">=", label: "大于等于" },
-  { value: "<=", label: "小于等于" },
-  { value: "==", label: "等于" },
-  { value: "!=", label: "不等于" },
-  { value: "between", label: "介于区间" },
-  { value: "outsideRange", label: "离开区间" },
-  { value: "percentChangeAbove", label: "涨跌幅大于" },
-  { value: "percentChangeBelow", label: "涨跌幅小于" },
+  { value: "crossesAbove" },
+  { value: "crossesBelow" },
+  { value: ">" },
+  { value: "<" },
+  { value: ">=" },
+  { value: "<=" },
+  { value: "==" },
+  { value: "!=" },
+  { value: "between" },
+  { value: "outsideRange" },
+  { value: "percentChangeAbove" },
+  { value: "percentChangeBelow" },
 ] as const;
+
+const RIGHT_TYPE_LABEL_KEYS: Record<string, MessageKey> = {
+  number: "alert.rightKind.number",
+  field: "alert.rightKind.field",
+  indicator: "alert.rightKind.indicator",
+};
 
 export const ALERT_RIGHT_TYPE_OPTIONS = [
-  { value: "number", label: "固定数值" },
-  { value: "field", label: "价格/成交量字段" },
-  { value: "indicator", label: "另一指标" },
+  { value: "number" },
+  { value: "field" },
+  { value: "indicator" },
 ] as const;
 
-const SOURCE_LABELS = Object.fromEntries(ALERT_SOURCE_OPTIONS.map((item) => [item.value, item.label]));
-const COMPARATOR_LABELS = Object.fromEntries(ALERT_COMPARATOR_OPTIONS.map((item) => [item.value, item.label]));
-const RIGHT_TYPE_LABELS = Object.fromEntries(ALERT_RIGHT_TYPE_OPTIONS.map((item) => [item.value, item.label]));
+export function labelForSource(value: unknown): string {
+  const key = typeof value === "string" ? value : "";
+  const messageKey = SOURCE_LABEL_KEYS[key];
+  if (messageKey) return t(messageKey);
+  return SOURCE_FIXED_LABELS[key] || key || "?";
+}
+
+export function labelForComparator(value: unknown): string {
+  const key = typeof value === "string" ? value : "";
+  const messageKey = COMPARATOR_LABEL_KEYS[key];
+  return messageKey ? t(messageKey) : (key || "?");
+}
+
+export function labelForRightType(value: unknown): string {
+  const key = typeof value === "string" ? value : "";
+  const messageKey = RIGHT_TYPE_LABEL_KEYS[key];
+  return messageKey ? t(messageKey) : (key || "?");
+}
 const RANGE_COMPARATORS = new Set(["between", "outsideRange"]);
 const PERCENT_CHANGE_COMPARATORS = new Set(["percentChangeAbove", "percentChangeBelow"]);
 
@@ -110,8 +162,8 @@ export function createDefaultAlertDraft({
   price,
 }: { symbol?: string; interval?: string; price?: unknown } = {}): AlertDraft {
   return {
-    name: `${symbol || "未选商品"} 价格警报`,
-    description: "由警报面板创建的价格规则；可按需添加已预热指标。",
+    name: t("alert.defaultName", { symbol: symbol || t("alert.unnamedSymbol") }),
+    description: t("alert.defaultDesc"),
     enabled: true,
     triggerOn: "bar_close",
     expression: createDefaultExpressionDraft(price),
@@ -122,7 +174,7 @@ export function createDefaultAlertDraft({
     afterTrigger: "auto-disable",
     cooldownMode: "30s",
     customCooldownSeconds: 60,
-    messageTemplate: "{{symbol}} {{interval}} 命中警报：{{condition}}，当前值 {{value}}",
+    messageTemplate: t("alert.defaultTemplate"),
     webhookUrl: "",
     channels: {
       in_app: true,
@@ -176,7 +228,7 @@ export function buildAlertPayloadFromDraft({
   const exchange = product?.exchange || fallbackExchange || "binance";
 
   return {
-    name: draft.name?.trim() || `${symbol || "未选商品"} 警报`,
+    name: draft.name?.trim() || t("alert.defaultRuleName", { symbol: symbol || t("alert.unnamedSymbol") }),
     description: draft.description?.trim() || "",
     enabled: draft.enabled !== false,
     target: {
@@ -240,7 +292,7 @@ export function createDraftFromRule(rule: AlertRule): AlertDraft {
     cooldownMode: cooldownMs === 0 ? "always" : (cooldownMs === 30_000 ? "30s" : (cooldownMs === 300_000 ? "5m" : "custom")),
     customCooldownSeconds: Number.isFinite(cooldownMs) && cooldownMs > 0 ? Math.round(cooldownMs / 1000) : 60,
     messageTemplate: messageTemplateFromActions(rule.actions)
-      || "{{symbol}} {{interval}} 命中警报：{{condition}}，当前值 {{value}}",
+      || t("alert.defaultTemplate"),
     webhookUrl: webhookUrlFromActions(rule.actions),
     channels: actionsToChannelState(rule?.actions),
   };
@@ -257,18 +309,18 @@ export function describeExpression(expression: AlertExpression | unknown): strin
   try {
     parsed = parseAlertExpression(expression);
   } catch {
-    return "未配置触发条件";
+    return t("alert.noCondition");
   }
   if ("op" in parsed) {
     if (parsed.op === "NOT") {
-      return `非 (${describeExpression(parsed.children[0])})`;
+      return t("alert.notExpr", { expr: describeExpression(parsed.children[0]) });
     }
-    const glue = parsed.op === "AND" ? " 且 " : " 或 ";
+    const glue = parsed.op === "AND" ? t("alert.andGlue") : t("alert.orGlue");
     const text = parsed.children.map(describeExpression).filter(Boolean).join(glue);
-    return parsed.children.length > 1 ? `(${text})` : text || "空条件组";
+    return parsed.children.length > 1 ? `(${text})` : text || t("alert.emptyGroup");
   }
   const left = labelForSource(parsed.left);
-  const comparator = COMPARATOR_LABELS[parsed.comparator] || parsed.comparator;
+  const comparator = labelForComparator(parsed.comparator);
   const right = describeRight(parsed.right);
   return `${left} ${comparator} ${right}`;
 }
@@ -277,22 +329,22 @@ export function describeAlertChannels(rule: AlertRule | null | undefined): strin
   const channels = (rule?.actions || [])
     .filter((action) => action.enabled !== false)
     .map((action) => {
-      if (action.type === "in_app") return "应用内";
-      if (action.type === "browser") return "浏览器";
-      if (action.type === "sound") return "声音";
+      if (action.type === "in_app") return t("alert.channelShort.inApp");
+      if (action.type === "browser") return t("alert.channelShort.browser");
+      if (action.type === "sound") return t("alert.channelShort.sound");
       if (action.type === "webhook") return "Webhook";
       if (action.type === "telegram") return "Telegram";
-      if (action.type === "email") return "邮件";
-      if (action.type === "trading_signal") return "交易信号";
+      if (action.type === "email") return t("alert.channelShort.email");
+      if (action.type === "trading_signal") return t("alert.channelShort.signal");
       return action.type;
     });
-  return channels.length > 0 ? channels.join(" / ") : "无启用渠道";
+  return channels.length > 0 ? channels.join(" / ") : t("alert.noChannels");
 }
 
 export function formatAlertTime(timestampMs: unknown): string {
   const ts = Number(timestampMs);
   if (!Number.isFinite(ts) || ts <= 0) return "--";
-  return new Date(ts).toLocaleString();
+  return new Date(ts).toLocaleString(getLocale());
 }
 
 function buildExpressionPayload(node: AlertExpressionDraft): AlertExpression {
@@ -463,27 +515,27 @@ export function describeAlertDraftExpression(expression: AlertExpressionDraft): 
   try {
     return describeExpression(buildExpressionPayload(expression));
   } catch {
-    return "未配置触发条件";
+    return t("alert.noCondition");
   }
 }
 
 export function describeAlertDispatch(event: AlertHistoryEvent): string {
-  if (!event.dispatch || event.dispatch.length === 0) return "仅记录历史";
+  if (!event.dispatch || event.dispatch.length === 0) return t("alert.historyOnly");
   return event.dispatch.map((outcome) => {
     const channel = outcome.type === "in_app"
-      ? "应用内"
+      ? t("alert.channelShort.inApp")
       : (outcome.type === "browser"
-        ? "浏览器"
-        : (outcome.type === "sound" ? "声音" : (outcome.type === "webhook" ? "Webhook" : outcome.type)));
+        ? t("alert.channelShort.browser")
+        : (outcome.type === "sound" ? t("alert.channelShort.sound") : (outcome.type === "webhook" ? "Webhook" : outcome.type)));
     const status = outcome.status === "delivered"
-      ? "已送达"
+      ? t("alert.dispatch.delivered")
       : (outcome.status === "published"
-        ? "待客户端确认"
+        ? t("alert.dispatch.published")
         : (outcome.status === "queued"
-          ? "已入持久队列"
+          ? t("alert.dispatch.queued")
           : (outcome.status === "retrying"
-            ? "重试中"
-            : (outcome.status === "unavailable" ? "无活动客户端" : outcome.status))));
+            ? t("alert.dispatch.retrying")
+            : (outcome.status === "unavailable" ? t("alert.dispatch.unavailable") : outcome.status))));
     return `${channel}: ${status}`;
   }).join(" / ");
 }
@@ -600,13 +652,8 @@ function cloneExpressionDraftNode(node: AlertExpressionDraft): AlertExpressionDr
 }
 
 function describeRight(right: AlertRight): string {
-  if (right.type === "range") return `${right.min ?? "?"} 到 ${right.max ?? "?"}`;
+  if (right.type === "range") return t("alert.rangeTo", { min: String(right.min ?? "?"), max: String(right.max ?? "?") });
   if (right.type === "percent") return `${right.value ?? "?"}%`;
   if (right.type === "number") return String(right.value ?? "?");
-  return `${RIGHT_TYPE_LABELS[right.type] || right.type}:${labelForSource(right.value)}`;
-}
-
-function labelForSource(value: unknown): string {
-  const key = typeof value === "string" ? value : "";
-  return SOURCE_LABELS[key] || key || "?";
+  return `${labelForRightType(right.type)}:${labelForSource(right.value)}`;
 }

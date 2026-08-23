@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
+import { t } from "../../../i18n/index.js";
+import { getLocale } from "../../../i18n/locale.js";
+import { useLocale } from "../../../i18n/useLocale.js";
 
 import {
   formatReplayPublicTime,
@@ -39,22 +42,41 @@ import ReplayLiquidationTimeline from "./ReplayLiquidationTimeline.js";
 
 const TERMINAL_ORDER_STATES = new Set(["FILLED", "CANCELED", "REJECTED", "EXPIRED"]);
 const REPLAY_ORDER_VALIDATION_TIMEOUT_MS = 15_000;
-const WORKBENCH_TABS = [
-  ["positions", "持仓"],
-  ["open-orders", "当前"],
-  ["order-history", "历史"],
-  ["fills", "成交"],
-  ["assets", "资产"],
-  ["risk", "风险"],
+const WORKBENCH_TAB_IDS = [
+  "positions",
+  "open-orders",
+  "order-history",
+  "fills",
+  "assets",
+  "risk",
 ] as const;
-const MARKET_TABS = [
-  ["book", "盘口"],
-  ["flow", "订单流"],
-  ["indicators", "指标"],
+const MARKET_TAB_IDS = [
+  "book",
+  "flow",
+  "indicators",
 ] as const;
 
-type WorkbenchTab = typeof WORKBENCH_TABS[number][0];
-type MarketTab = typeof MARKET_TABS[number][0];
+type WorkbenchTab = typeof WORKBENCH_TAB_IDS[number];
+type MarketTab = typeof MARKET_TAB_IDS[number];
+
+function workbenchTabLabel(id: WorkbenchTab): string {
+  switch (id) {
+    case "positions": return t("replay.wb.positions");
+    case "open-orders": return t("replay.wb.openOrders");
+    case "order-history": return t("replay.wb.orderHistory");
+    case "fills": return t("replay.wb.fills");
+    case "assets": return t("replay.wb.assets");
+    case "risk": return t("replay.wb.risk");
+  }
+}
+
+function marketTabLabel(id: MarketTab): string {
+  switch (id) {
+    case "book": return t("replay.dock.book");
+    case "flow": return t("replay.dock.flow");
+    case "indicators": return t("replay.dock.indicators");
+  }
+}
 type JsonRecord = Readonly<Record<string, ReplayV2Json>>;
 type TradeType =
   | "place_order"
@@ -185,21 +207,28 @@ function useAccountRecordPages({
   return { ...visible, loadMore };
 }
 
-const ORDER_TYPE_LABELS: Readonly<Record<string, string>> = {
-  MARKET: "市价",
-  LIMIT: "限价",
-  STOP_MARKET: "止损市价",
-  TAKE_PROFIT_MARKET: "止盈市价",
-};
-const ORDER_STATUS_LABELS: Readonly<Record<string, string>> = {
-  OPEN: "等待成交",
-  ACCEPTED: "已受理",
-  PARTIALLY_FILLED: "部分成交",
-  FILLED: "已成交",
-  CANCELED: "已撤销",
-  REJECTED: "已拒绝",
-  EXPIRED: "已失效",
-};
+function orderTypeLabel(value: string): string {
+  switch (value) {
+    case "MARKET": return t("replay.paper.typeMarket");
+    case "LIMIT": return t("replay.paper.typeLimit");
+    case "STOP_MARKET": return t("replay.paper.stopMkt");
+    case "TAKE_PROFIT_MARKET": return t("replay.paper.tpMkt");
+    default: return value;
+  }
+}
+
+function orderStatusLabel(value: string): string {
+  switch (value) {
+    case "OPEN": return t("replay.paper.statusOpen");
+    case "ACCEPTED": return t("replay.paper.statusAccepted");
+    case "PARTIALLY_FILLED": return t("replay.paper.statusPartial");
+    case "FILLED": return t("replay.paper.statusFilled");
+    case "CANCELED": return t("replay.paper.statusCanceled");
+    case "REJECTED": return t("replay.paper.statusRejected");
+    case "EXPIRED": return t("replay.paper.statusExpired");
+    default: return value;
+  }
+}
 
 function orderClientId(): string {
   return `ticket-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.trunc(Math.random() * 1_000_000)}`}`;
@@ -242,7 +271,7 @@ function formatDecimal(value: unknown, maximumFractionDigits = 8): string {
   if (value === null || value === undefined || value === "") return "--";
   const parsed = finiteNumber(value);
   if (parsed === null) return String(value);
-  return new Intl.NumberFormat("zh-CN", {
+  return new Intl.NumberFormat(getLocale() === "en" ? "en-US" : "zh-CN", {
     maximumFractionDigits,
     minimumFractionDigits: 0,
     useGrouping: true,
@@ -263,15 +292,7 @@ function quantityForStep(value: number, stepText: string): string {
 }
 
 function sideLabel(value: string): string {
-  return value === "BUY" ? "买入" : value === "SELL" ? "卖出" : value;
-}
-
-function orderTypeLabel(value: string): string {
-  return ORDER_TYPE_LABELS[value] ?? value;
-}
-
-function orderStatusLabel(value: string): string {
-  return ORDER_STATUS_LABELS[value] ?? value;
+  return value === "BUY" ? t("replay.paper.buy") : value === "SELL" ? t("replay.paper.sell") : value;
 }
 
 function baseAsset(symbol: string, settlementAsset: string): string {
@@ -292,7 +313,7 @@ function orderPrice(order: JsonRecord): string {
   return recordText(
     order,
     "average_fill_price",
-    recordText(order, "limit_price", recordText(order, "stop_price", "市价")),
+    recordText(order, "limit_price", recordText(order, "stop_price", t("replay.paper.typeMarket"))),
   );
 }
 
@@ -305,13 +326,13 @@ function commandErrorMessage(error: unknown): string {
     if (error.code === "RUN_ACCOUNT_MARGIN_EXCEEDED") {
       const available = finiteNumber(error.details.available_equity);
       return available === null
-        ? "下单尺寸超过当前账户可用保证金"
-        : `下单尺寸超过当前可用保证金（可用 ${formatDecimal(available, 4)}）`;
+        ? t("replay.paper.marginExceeded")
+        : t("replay.paper.marginAvail", { available: formatDecimal(available, 4) });
     }
-    if (error.code === "RISK_LIMIT_EXCEEDED") return `当前风控上限不允许此订单：${error.message}`;
-    if (error.code === "ORDER_REJECTED") return `订单参数未通过校验：${error.message}`;
+    if (error.code === "RISK_LIMIT_EXCEEDED") return t("replay.paper.riskLimit", { message: error.message });
+    if (error.code === "ORDER_REJECTED") return t("replay.paper.rejected", { message: error.message });
   }
-  return error instanceof Error ? error.message : "命令提交失败，请等待状态收敛后重试";
+  return error instanceof Error ? error.message : t("replay.paper.submitFailed");
 }
 
 function useTradeNoticeAutoDismiss(
@@ -327,12 +348,12 @@ function useTradeNoticeAutoDismiss(
 
 function handleTabKeyDown<T extends string>(
   event: ReactKeyboardEvent<HTMLButtonElement>,
-  tabs: readonly (readonly [T, string])[],
+  tabs: readonly T[],
   current: T,
   setCurrent: (value: T) => void,
   attribute: string,
 ) {
-  const currentIndex = tabs.findIndex(([tab]) => tab === current);
+  const currentIndex = tabs.indexOf(current);
   let nextIndex: number | null = null;
   if (event.key === "ArrowRight" || event.key === "ArrowDown") nextIndex = (currentIndex + 1) % tabs.length;
   if (event.key === "ArrowLeft" || event.key === "ArrowUp") nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
@@ -340,7 +361,7 @@ function handleTabKeyDown<T extends string>(
   if (event.key === "End") nextIndex = tabs.length - 1;
   if (nextIndex === null) return;
   event.preventDefault();
-  const next = tabs[nextIndex]?.[0];
+  const next = tabs[nextIndex];
   if (next === undefined) return;
   setCurrent(next);
   event.currentTarget
@@ -361,6 +382,7 @@ export interface ReplayRightRailProps {
 }
 
 export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps) {
+  useLocale();
   type SizeMode = "QUANTITY" | "MARGIN" | "NOTIONAL";
   const [side, setSide] = useState<"BUY" | "SELL">("BUY");
   const [orderType, setOrderType] = useState<"MARKET" | "LIMIT" | "STOP_MARKET" | "TAKE_PROFIT_MARKET">("MARKET");
@@ -811,7 +833,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
     ? currentPreviewState.error
     : null;
   const capacityValidationError = quantityExceedsCapacity
-    ? `输入尺寸超过当前上限；最多可下 ${formatDecimal(estimatedMaxQuantity, 8)} ${quantityAsset}`
+    ? t("replay.paper.overCap", { qty: formatDecimal(estimatedMaxQuantity, 8), asset: quantityAsset })
     : null;
   const isSpot = config?.market_type.toLowerCase().includes("spot") ?? false;
   const positionSide: "flat" | "long" | "short" = positionQty > 0
@@ -857,10 +879,10 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
 
   const sizeUnit = sizeMode === "QUANTITY" ? quantityAsset : settlementAsset;
   const sizeModeLabel = sizeMode === "QUANTITY"
-    ? "商品数量"
+    ? t("replay.paper.qtyAsset")
     : sizeMode === "MARGIN"
-      ? "保证金"
-      : "名义金额";
+      ? t("replay.paper.marginAmt")
+      : t("replay.paper.notionalAmt");
 
   const ctaEnabled = (nextSide: "BUY" | "SELL"): { enabled: boolean; title: string } => {
     if (positionMode === "HEDGE") {
@@ -870,39 +892,39 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
         item.track_id === selectedTrackId && item.position_side === targetSide
       ));
       return target === undefined
-        ? { enabled: false, title: targetSide === "LONG" ? "无多仓可平" : "无空仓可平" }
+        ? { enabled: false, title: targetSide === "LONG" ? t("replay.paper.noLong") : t("replay.paper.noShort") }
         : { enabled: true, title: "" };
     }
     if (reduceOnly) {
       if (positionSide === "flat") {
-        return { enabled: false, title: "无持仓可平" };
+        return { enabled: false, title: t("replay.paper.noPos") };
       }
       if (positionSide === "long") {
         return nextSide === "SELL"
           ? { enabled: true, title: "" }
-          : { enabled: false, title: "多仓仅可卖出平多" };
+          : { enabled: false, title: t("replay.paper.longSellOnly") };
       }
       return nextSide === "BUY"
         ? { enabled: true, title: "" }
-        : { enabled: false, title: "空仓仅可买入平空" };
+        : { enabled: false, title: t("replay.paper.shortBuyOnly") };
     }
     if (positionSide === "long" && nextSide === "SELL") {
-      return { enabled: false, title: "已有多仓：反向请用仓位·反手或先平仓" };
+      return { enabled: false, title: t("replay.paper.hasLong") };
     }
     if (positionSide === "short" && nextSide === "BUY") {
-      return { enabled: false, title: "已有空仓：反向请用仓位·反手或先平仓" };
+      return { enabled: false, title: t("replay.paper.hasShort") };
     }
     return { enabled: true, title: "" };
   };
 
   const ctaLabel = (nextSide: "BUY" | "SELL"): string => {
     if (reduceOnly) {
-      return nextSide === "BUY" ? "买入平空" : "卖出平多";
+      return nextSide === "BUY" ? t("replay.paper.buyCloseShort") : t("replay.paper.sellCloseLong");
     }
     if (isSpot) {
-      return nextSide === "BUY" ? `买入 ${quantityAsset}` : `卖出 ${quantityAsset}`;
+      return nextSide === "BUY" ? t("replay.paper.buyAsset", { asset: quantityAsset }) : t("replay.paper.sellAsset", { asset: quantityAsset });
     }
-    return nextSide === "BUY" ? `开多 ${leverage}x` : `开空 ${leverage}x`;
+    return nextSide === "BUY" ? t("replay.paper.openLongX", { lev: leverage }) : t("replay.paper.openShortX", { lev: leverage });
   };
 
   const placeOrderWithSide = async (nextSide: "BUY" | "SELL") => {
@@ -914,11 +936,11 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
       || tradeValidationControllerRef.current !== null
     ) return;
     if (!quantity.trim() || (orderType !== "MARKET" && !price.trim())) {
-      setNotice({ tone: "error", message: "请填写有效尺寸与价格后再提交" });
+      setNotice({ tone: "error", message: t("replay.paper.invalidInput") });
       return;
     }
     if (leverage < 1 || leverage > maxLeverage) {
-      setNotice({ tone: "error", message: `杠杆须在 1–${maxLeverage}x 之间` });
+      setNotice({ tone: "error", message: t("replay.paper.levRange", { max: maxLeverage }) });
       return;
     }
     const targetPositionSide: "LONG" | "SHORT" = reduceOnly
@@ -982,10 +1004,10 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
     setTradeValidationSide(nextSide);
     const validationTimeout = globalThis.setTimeout(() => {
       validationController.abort(
-        new DOMException("下单校验超时，请重试", "TimeoutError"),
+        new DOMException(t("replay.paper.timeout"), "TimeoutError"),
       );
     }, REPLAY_ORDER_VALIDATION_TIMEOUT_MS);
-    setNotice({ tone: "pending", message: "正在获取同侧可下上限…" });
+    setNotice({ tone: "pending", message: t("replay.paper.fetchingCap") });
     try {
       const sideCapacity = await orderCapacity(
         sideContext,
@@ -1016,11 +1038,11 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
       ) {
         setNotice({
           tone: "error",
-          message: `输入尺寸超过当前上限；最多可下 ${formatDecimal(sideCapacity.max_quantity, 8)} ${quantityAsset}`,
+          message: t("replay.paper.overCap", { qty: formatDecimal(sideCapacity.max_quantity, 8), asset: quantityAsset }),
         });
         return;
       }
-      setNotice({ tone: "pending", message: "正在校验同侧预览…" });
+      setNotice({ tone: "pending", message: t("replay.paper.previewing") });
       const sidePreview = await previewOrder(
         order,
         intent,
@@ -1028,7 +1050,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
         validationController.signal,
       );
       if (sidePreview.order.side !== nextSide) {
-        setNotice({ tone: "error", message: "预览方向与提交方向不一致，已取消提交" });
+        setNotice({ tone: "error", message: t("replay.paper.sideMismatch") });
         return;
       }
       if (
@@ -1036,10 +1058,10 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
         || sidePreview.cursor.source_sequence !== store.sourceSequence
         || sidePreview.cursor.virtual_time_ms !== store.virtualTimeMs
       ) {
-        setNotice({ tone: "error", message: "行情游标已变化，请重试提交" });
+        setNotice({ tone: "error", message: t("replay.paper.cursorChanged") });
         return;
       }
-      setNotice({ tone: "pending", message: "正在提交纸面委托…" });
+      setNotice({ tone: "pending", message: t("replay.paper.submittingOrder") });
       const planned = sidePreview.trade_plan;
       if (planned !== null && planForSide !== null) {
         await viewer.actions.submitTrade("place_order", {
@@ -1065,7 +1087,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
         setTradeReason("");
       }
       setPreviewState(null);
-      setNotice({ tone: "success", message: "委托命令已受理，账户与交易记录已刷新" });
+      setNotice({ tone: "success", message: t("replay.paper.accepted") });
     } catch (error) {
       if (tradeValidationMountedRef.current) {
         setNotice({ tone: "error", message: commandErrorMessage(error) });
@@ -1113,17 +1135,17 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
     <div className="replay-order-surface">
       <header className="replay-ticket-account">
         <div>
-          <small>{symbol} · {isSpot ? "现货" : "合约回放"}</small>
+          <small>{symbol} · {isSpot ? t("replay.paper.spot") : t("replay.paper.futures")}</small>
           <strong>{formatDecimal(portfolio?.equity ?? store.account?.equity, 4)} {settlementAsset}</strong>
         </div>
-        <div className="replay-ticket-locks" aria-label="保证金与杠杆">
-          <span>{positionMode === "HEDGE" ? "双向" : "单向"}</span>
-          <span>{contract?.margin_mode === "ISOLATED" ? "逐仓" : "全仓"}</span>
+        <div className="replay-ticket-locks" aria-label={t("replay.paper.marginLev")}>
+          <span>{positionMode === "HEDGE" ? t("replay.paper.hedge") : t("replay.paper.oneWay")}</span>
+          <span>{contract?.margin_mode === "ISOLATED" ? t("replay.wb.isolated") : t("replay.wb.cross")}</span>
           <label className="replay-leverage-control">
-            <span className="sr-only">杠杆</span>
+            <span className="sr-only">{t("replay.paper.leverage")}</span>
             <select
               value={String(leverage)}
-              aria-label={`杠杆，最高 ${maxLeverage}x`}
+              aria-label={t("replay.paper.leverageMax", { max: maxLeverage })}
               onChange={(event) => setLeverage(Math.min(maxLeverage, Math.max(1, Number(event.target.value) || 1)))}
             >
               {leverageOptions.map((value) => (
@@ -1131,49 +1153,49 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
               ))}
             </select>
           </label>
-          <span title="本局最高杠杆上限">≤{maxLeverage}x</span>
+          <span title={t("replay.paper.levCap")}>≤{maxLeverage}x</span>
         </div>
       </header>
 
       <section className="replay-compact-ticket" data-replay-panel="order-ticket">
-        <div className="replay-mode-toggle" role="group" aria-label="开仓或平仓">
+        <div className="replay-mode-toggle" role="group" aria-label={t("replay.paper.openClose")}>
           <button
             type="button"
             data-mode="open"
             className={!reduceOnly ? "active" : ""}
             onClick={() => setReduceOnly(false)}
-          >开仓</button>
+          >{t("replay.paper.open")}</button>
           <button
             type="button"
             data-mode="close"
             className={reduceOnly ? "active" : ""}
             onClick={() => setReduceOnly(true)}
-          >平仓</button>
+          >{t("replay.paper.close")}</button>
         </div>
 
         <div className="replay-order-fidelity-row">
           <span data-fidelity={contract?.execution_fidelity ?? "LOADING"}>
             {contract?.execution_fidelity === "BOOK_ASSISTED_CONTINUITY_GATED_NO_QUEUE"
-              ? "历史 L2 辅助 · 无队列"
-              : "近似成交 · 无盘口排队"}
+              ? t("replay.paper.l2Assist")
+              : t("replay.paper.approxFill")}
           </span>
-          <small>可用 {formatDecimal(portfolio?.available_equity ?? store.account?.available_equity, 4)} {settlementAsset}</small>
+          <small>{t("replay.paper.available", { value: formatDecimal(portfolio?.available_equity ?? store.account?.available_equity, 4), asset: settlementAsset })}</small>
         </div>
 
-        <label className="replay-ticket-type">委托类型
+        <label className="replay-ticket-type">{t("replay.paper.orderType")}
           <select value={orderType} onChange={(event) => setOrderType(event.target.value as typeof orderType)}>
-            <option value="MARKET">市价委托</option>
-            <option value="LIMIT">限价委托</option>
-            <option value="STOP_MARKET">止损市价</option>
-            <option value="TAKE_PROFIT_MARKET">止盈市价</option>
+            <option value="MARKET">{t("replay.paper.market")}</option>
+            <option value="LIMIT">{t("replay.paper.limit")}</option>
+            <option value="STOP_MARKET">{t("replay.paper.stopMkt")}</option>
+            <option value="TAKE_PROFIT_MARKET">{t("replay.paper.tpMkt")}</option>
           </select>
         </label>
 
-        <div className="replay-size-mode" role="group" aria-label="下单尺寸口径">
+        <div className="replay-size-mode" role="group" aria-label={t("replay.paper.sizeMode")}>
           {([
-            ["QUANTITY", "数量"],
-            ["MARGIN", "保证金"],
-            ["NOTIONAL", "名义"],
+            ["QUANTITY", t("replay.paper.qty")],
+            ["MARGIN", t("replay.paper.margin")],
+            ["NOTIONAL", t("replay.paper.notional")],
           ] as const).map(([mode, label]) => (
             <button
               key={mode}
@@ -1186,7 +1208,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
 
         <div className="replay-ticket-fields">
           {orderType !== "MARKET" && (
-            <label>{orderType === "LIMIT" ? "委托价格" : "触发价格"}
+            <label>{orderType === "LIMIT" ? t("replay.paper.limitPrice") : t("replay.paper.triggerPrice")}
               <span><input data-replay-field="order-price" value={price} inputMode="decimal" onChange={(event) => setPrice(event.target.value)} /><b>{settlementAsset}</b></span>
             </label>
           )}
@@ -1209,19 +1231,19 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
         </div>
         {sizeMode !== "QUANTITY" && (
           <small className="replay-size-converted">
-            ≈ 数量 {quantity || "--"} {quantityAsset}
-            {refForSize !== null ? ` · 参考价 ${formatDecimal(refForSize, 6)}` : ""}
+            {t("replay.paper.approxQty", { qty: quantity || "--", asset: quantityAsset })}
+            {refForSize !== null ? t("replay.paper.refPrice", { price: formatDecimal(refForSize, 6) }) : ""}
           </small>
         )}
 
         <div
           className="replay-size-slider"
-          aria-label="仓位比例"
+          aria-label={t("replay.paper.posShare")}
           style={{ ["--replay-size-pct" as string]: `${displaySizeShare}%` }}
         >
           <input
             type="range"
-            aria-label="下单金额快速选择"
+            aria-label={t("replay.paper.sizeQuick")}
             min={0}
             max={100}
             step={1}
@@ -1260,7 +1282,10 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
           </div>
           <div className="replay-size-slider-meta">
             <span>
-              参考可下 {maxSizeValue === null ? "--" : formatDecimal(maxSizeValue, sizeMode === "QUANTITY" ? 8 : 2)} {sizeUnit}
+              {t("replay.paper.refMax", {
+                value: maxSizeValue === null ? "--" : formatDecimal(maxSizeValue, sizeMode === "QUANTITY" ? 8 : 2),
+                unit: sizeUnit,
+              })}
               {sizeMode !== "QUANTITY" && estimatedMaxQuantity !== null
                 ? ` · ${formatDecimal(estimatedMaxQuantity)} ${quantityAsset}`
                 : ""}
@@ -1278,49 +1303,49 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
                 disabled={!tradePlanEligible}
                 onChange={(event) => setTradePlanEnabled(event.target.checked)}
               />
-              按风险计划反算
+              {t("replay.paper.riskPlan")}
             </label>
           </summary>
           {tradePlanEnabled && tradePlanEligible && (
             <div className="replay-trade-plan-fields">
-              <label>风险口径
+              <label>{t("replay.paper.riskMode")}
                 <select
                   value={riskSizingMode}
                   onChange={(event) => setRiskSizingMode(event.target.value as typeof riskSizingMode)}
                 >
-                  <option value="ACCOUNT_RISK_PERCENT">账户风险百分比</option>
-                  <option value="RISK_AMOUNT">最大亏损金额</option>
+                  <option value="ACCOUNT_RISK_PERCENT">{t("replay.paper.accountRiskPct")}</option>
+                  <option value="RISK_AMOUNT">{t("replay.paper.riskAmt")}</option>
                 </select>
               </label>
-              <label>{riskSizingMode === "RISK_AMOUNT" ? "最大亏损" : "账户风险"}
+              <label>{riskSizingMode === "RISK_AMOUNT" ? t("replay.paper.maxLoss") : t("replay.paper.accountRisk")}
                 <span>
                   <input value={riskValue} inputMode="decimal" onChange={(event) => setRiskValue(event.target.value)} />
                   <b>{riskSizingMode === "RISK_AMOUNT" ? settlementAsset : "%"}</b>
                 </span>
               </label>
-              <label>失效价
+              <label>{t("replay.paper.invalidPx")}
                 <span><input value={invalidationPrice} inputMode="decimal" onChange={(event) => setInvalidationPrice(event.target.value)} /><b>{settlementAsset}</b></span>
               </label>
-              <label>目标价
+              <label>{t("replay.paper.targetPx")}
                 <span><input value={targetPrice} inputMode="decimal" onChange={(event) => setTargetPrice(event.target.value)} /><b>{settlementAsset}</b></span>
               </label>
-              <label className="replay-trade-plan-reason">交易理由
-                <textarea value={tradeReason} maxLength={500} onChange={(event) => setTradeReason(event.target.value)} placeholder="入场依据与失效条件" />
+              <label className="replay-trade-plan-reason">{t("replay.paper.reason")}
+                <textarea value={tradeReason} maxLength={500} onChange={(event) => setTradeReason(event.target.value)} placeholder={t("replay.paper.reasonPh")} />
               </label>
-              <dl className="replay-order-preview" aria-label="交易计划预览">
-                <div><dt>反算数量</dt><dd>{preview?.trade_plan?.quantity ?? "--"} {quantityAsset}</dd></div>
-                <div><dt>计划风险</dt><dd>{preview?.trade_plan?.risk_amount ?? "--"} {settlementAsset}</dd></div>
-                <div><dt>预期 R:R</dt><dd>{preview?.trade_plan?.reward_risk_ratio ?? "--"}</dd></div>
+              <dl className="replay-order-preview" aria-label={t("replay.paper.planPreview")}>
+                <div><dt>{t("replay.paper.planQty")}</dt><dd>{preview?.trade_plan?.quantity ?? "--"} {quantityAsset}</dd></div>
+                <div><dt>{t("replay.paper.planRisk")}</dt><dd>{preview?.trade_plan?.risk_amount ?? "--"} {settlementAsset}</dd></div>
+                <div><dt>{t("replay.paper.planRR")}</dt><dd>{preview?.trade_plan?.reward_risk_ratio ?? "--"}</dd></div>
               </dl>
-              <small>订单受理后，计划快照与哈希写入不可变复盘日志。</small>
+              <small>{t("replay.paper.planHint")}</small>
             </div>
           )}
         </details>
 
-        <dl className="replay-order-preview" aria-label="订单参考预览">
-          <div><dt>名义价值</dt><dd>{previewPending ? "校验中…" : `${formatDecimal(preview?.estimated_notional, 2)} ${settlementAsset}`}</dd></div>
-          <div><dt>保证金</dt><dd>{formatDecimal(preview?.reserved_margin, 2)} {settlementAsset}</dd></div>
-          <div><dt>手续费上限</dt><dd>{formatDecimal(preview?.estimated_fee, 4)} {settlementAsset}</dd></div>
+        <dl className="replay-order-preview" aria-label={t("replay.paper.orderPreview")}>
+          <div><dt>{t("replay.paper.notionalVal")}</dt><dd>{previewPending ? t("replay.paper.checking") : `${formatDecimal(preview?.estimated_notional, 2)} ${settlementAsset}`}</dd></div>
+          <div><dt>{t("replay.paper.marginAmt")}</dt><dd>{formatDecimal(preview?.reserved_margin, 2)} {settlementAsset}</dd></div>
+          <div><dt>{t("replay.paper.feeCap")}</dt><dd>{formatDecimal(preview?.estimated_fee, 4)} {settlementAsset}</dd></div>
         </dl>
 
         <div className="replay-dual-cta">
@@ -1334,7 +1359,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
             disabled={buyCtaState.disabled}
             aria-disabled={buyCtaState.ariaDisabled}
             onClick={() => void placeOrderWithSide("BUY")}
-          >{tradeValidationSide === "BUY" ? "提交中…" : ctaLabel("BUY")}</button>
+          >{tradeValidationSide === "BUY" ? t("replay.paper.submitting") : ctaLabel("BUY")}</button>
           <button
             type="button"
             className="replay-submit-order"
@@ -1345,11 +1370,11 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
             disabled={sellCtaState.disabled}
             aria-disabled={sellCtaState.ariaDisabled}
             onClick={() => void placeOrderWithSide("SELL")}
-          >{tradeValidationSide === "SELL" ? "提交中…" : ctaLabel("SELL")}</button>
+          >{tradeValidationSide === "SELL" ? t("replay.paper.submitting") : ctaLabel("SELL")}</button>
         </div>
 
         <div id="replay-order-size-feedback" className="replay-trade-notice" role={notice?.tone === "error" || capacityValidationError !== null || reduceOnlyUnavailableMessage !== null ? "alert" : "status"} aria-live="polite" data-tone={notice?.tone ?? (capacityValidationError !== null || capacityError !== null || reduceOnlyUnavailableMessage !== null ? "error" : "idle")}>
-          {notice?.message ?? reduceOnlyUnavailableMessage ?? capacityValidationError ?? capacityError ?? previewError ?? viewer.error ?? "提交前会按点击方向重新校验游标、保证金与数量上限。"}
+          {notice?.message ?? reduceOnlyUnavailableMessage ?? capacityValidationError ?? capacityError ?? previewError ?? viewer.error ?? t("replay.paper.submitHint")}
         </div>
       </section>
     </div>
@@ -1358,6 +1383,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
 }
 
 export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRightRailProps) {
+  useLocale();
   const [activeTab, setActiveTab] = useState<WorkbenchTab>("positions");
   const [orderSelection, setOrderSelection] = useState<Readonly<{
     trackId: string;
@@ -1496,7 +1522,7 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
     }).catch((error: unknown) => {
       if (controller.signal.aborted) return;
       setReportSnapshot({ runId, state: "error", trades: [] });
-      setNotice({ tone: "error", message: `已平仓记录同步失败：${commandErrorMessage(error)}` });
+      setNotice({ tone: "error", message: t("replay.paper.closedSyncFailed", { error: commandErrorMessage(error) }) });
     });
     return () => controller.abort();
   }, [contract?.history.fills_total, runId, structuredFills.length]);
@@ -1577,8 +1603,8 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
           ? draft.price
           : null,
       },
-      "正在原子替换委托…",
-      "委托已替换；旧单已进入历史",
+      t("replay.paper.replacing"),
+      t("replay.paper.replaced"),
     );
   };
 
@@ -1590,25 +1616,25 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
     fills: contract?.history.fills_total ?? structuredFills.length,
   };
   const handleRailTabKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>, value: WorkbenchTab) => {
-    handleTabKeyDown(event, WORKBENCH_TABS, value, setActiveTab, "data-replay-rail-tab");
+    handleTabKeyDown(event, WORKBENCH_TAB_IDS, value, setActiveTab, "data-replay-rail-tab");
   };
 
   return (
-    <section className="replay-trading-workbench" data-replay-workbench="rail" aria-label="回放交易账户">
+    <section className="replay-trading-workbench" data-replay-workbench="rail" aria-label={t("replay.wb.accountAria")}>
       <header className="replay-workbench-header">
         <div className="replay-workbench-summary">
           <span>
-            <small>账户权益</small>
+            <small>{t("replay.wb.equity")}</small>
             <strong>{formatDecimal(portfolio?.equity ?? store.account?.equity, 2)} {settlementAsset}</strong>
           </span>
           <span>
-            <small>可用</small>
+            <small>{t("replay.wb.available")}</small>
             <strong>{formatDecimal(portfolio?.available_equity ?? store.account?.available_equity, 2)}</strong>
           </span>
-          {warningCount > 0 && <span data-tone="warning">执行警告 {warningCount}</span>}
+          {warningCount > 0 && <span data-tone="warning">{t("replay.wb.execWarnings", { count: warningCount })}</span>}
         </div>
-        <nav className="replay-workbench-tabs" aria-label="训练账户记录" role="tablist">
-          {WORKBENCH_TABS.map(([value, label]) => (
+        <nav className="replay-workbench-tabs" aria-label={t("replay.wb.recordsAria")} role="tablist">
+          {WORKBENCH_TAB_IDS.map((value) => (
             <button
               key={value}
               type="button"
@@ -1622,7 +1648,7 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
               onClick={() => setActiveTab(value)}
               onKeyDown={(event) => handleRailTabKeyDown(event, value)}
             >
-              {label}
+              {workbenchTabLabel(value)}
               {tabCounts[value] !== undefined && <span>{tabCounts[value]}</span>}
             </button>
           ))}
@@ -1646,14 +1672,14 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
                   checked={filterSelectedTrackOnly}
                   onChange={(event) => setFilterSelectedTrackOnly(event.target.checked)}
                 />
-                当前交易品种
+                {t("replay.wb.currentSymbol")}
               </label>
               <small>{selectedSymbol}</small>
             </div>
             {portfolioPositions.length === 0 ? (
-              <div className="replay-account-empty calm"><strong>暂无持仓</strong><small>开仓后会在这里显示方向、盈亏、保证金和快捷平仓。</small></div>
+              <div className="replay-account-empty calm"><strong>{t("replay.wb.noPos")}</strong><small>{t("replay.wb.noPosHint")}</small></div>
             ) : visiblePositions.length === 0 ? (
-              <div className="replay-account-empty calm"><strong>当前品种无持仓</strong><small>取消「当前交易品种」可查看全部组合仓位。</small></div>
+              <div className="replay-account-empty calm"><strong>{t("replay.wb.noPosSymbol")}</strong><small>{t("replay.wb.noPosSymbolHint")}</small></div>
             ) : visiblePositions.map((item) => {
               const quantityValue = finiteNumber(item.position.quantity) ?? 0;
               const positionSide = quantityValue >= 0 ? "long" : "short";
@@ -1671,10 +1697,10 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
                 item.maintenance_margin_proof?.liquidation_tier_extrapolated === true
               );
               const maintenanceProofTitle = item.maintenance_margin_proof === undefined
-                ? "未声明维持保证金档位外推状态。"
+                ? t("replay.wb.mmUndeclaredShort")
                 : maintenanceTierExtrapolated
-                ? `仓位名义价值已超过固定规则的末档上限 ${item.maintenance_margin_proof?.last_tier_notional_cap ?? "--"}；当前维持保证金沿用末档费率和速算扣除数外推，不是交易所发布的额外档位。`
-                : "维持保证金使用固定的版本化档位规则。";
+                ? t("replay.wb.mmOverCap", { cap: item.maintenance_margin_proof?.last_tier_notional_cap ?? "--" })
+                : t("replay.wb.mmVersioned");
               const marginLabel = item.margin_equity ?? item.isolated_margin ?? null;
               const protectionOrders = item.protection?.orders ?? [];
               const itemQtyAsset = baseAsset(item.symbol, settlementAsset);
@@ -1703,42 +1729,42 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
                     <div>
                       <strong>{item.symbol}</strong>
                       <div className="replay-badge-row">
-                        <span className="replay-chip" data-side={positionSide}>{positionSide === "long" ? "多" : "空"}</span>
-                        <span className="replay-chip">{contract?.margin_mode === "ISOLATED" ? "逐仓" : "全仓"}</span>
-                        <span className="replay-chip" title="逐腿有效杠杆">{item.leverage ?? config?.max_leverage ?? "--"}x</span>
+                        <span className="replay-chip" data-side={positionSide}>{positionSide === "long" ? t("replay.wb.long") : t("replay.wb.short")}</span>
+                        <span className="replay-chip">{contract?.margin_mode === "ISOLATED" ? t("replay.wb.isolated") : t("replay.wb.cross")}</span>
+                        <span className="replay-chip" title={t("replay.wb.legLev")}>{item.leverage ?? config?.max_leverage ?? "--"}x</span>
                       </div>
                     </div>
                     <div className="replay-position-pnl">
-                      <small>收益额 ({settlementAsset})</small>
+                      <small>{t("replay.wb.pnl", { asset: settlementAsset })}</small>
                       <b data-value-tone={uPnl >= 0 ? "positive" : "negative"}>{formatDecimal(item.position.unrealized_pnl, 4)}</b>
                     </div>
                   </header>
                   <dl className="replay-metric-flat">
-                     <div><dt>持仓量 ({itemQtyAsset})</dt><dd>{formatDecimal(Math.abs(quantityValue))}</dd></div>
-                     <div><dt>初始保证金</dt><dd>{formatDecimal(item.initial_margin, 4)}</dd></div>
-                     <div title={maintenanceProofTitle}><dt>维持保证金{maintenanceTierExtrapolated ? "（末档外推≈）" : ""}</dt><dd>{formatDecimal(item.maintenance_margin, 4)}</dd></div>
-                     <div><dt>风险覆盖</dt><dd>{item.risk_ratio == null ? "--" : `${formatDecimal(item.risk_ratio, 2)}×`}</dd></div>
-                     <div><dt>开仓均价</dt><dd>{formatDecimal(item.position.entry_price, 6)}</dd></div>
+                     <div><dt>{t("replay.wb.qty", { asset: itemQtyAsset })}</dt><dd>{formatDecimal(Math.abs(quantityValue))}</dd></div>
+                     <div><dt>{t("replay.wb.im")}</dt><dd>{formatDecimal(item.initial_margin, 4)}</dd></div>
+                     <div title={maintenanceProofTitle}><dt>{t("replay.wb.mm")}{maintenanceTierExtrapolated ? t("replay.wb.mmExtrap") : ""}</dt><dd>{formatDecimal(item.maintenance_margin, 4)}</dd></div>
+                     <div><dt>{t("replay.wb.riskCover")}</dt><dd>{item.risk_ratio == null ? "--" : `${formatDecimal(item.risk_ratio, 2)}×`}</dd></div>
+                     <div><dt>{t("replay.wb.entry")}</dt><dd>{formatDecimal(item.position.entry_price, 6)}</dd></div>
                      <div>
-                       <dt title={item.mark_fidelity ?? "未声明标记价格来源"}>标记价格（{replayMarkFidelityLabel(item.mark_fidelity)}）</dt>
+                       <dt title={item.mark_fidelity ?? t("replay.wb.markUndeclared")}>{t("replay.wb.mark", { fidelity: replayMarkFidelityLabel(item.mark_fidelity) })}</dt>
                        <dd>{formatDecimal(replayPositiveModelPrice(item.position.mark_price), 6)}</dd>
                      </div>
-                     <div><dt>逐腿杠杆</dt><dd>{formatDecimal(item.leverage, 2)}x</dd></div>
+                     <div><dt>{t("replay.wb.lev")}</dt><dd>{formatDecimal(item.leverage, 2)}x</dd></div>
                      <div title={liquidationTierExtrapolated
-                       ? `强平价搜索超过固定规则的末档上限 ${item.maintenance_margin_proof?.last_tier_notional_cap ?? "--"}；越界候选价沿用末档费率和速算扣除数外推。`
-                       : "模拟账户风险模型；不是历史交易所精确值"}><dt>强平价格（模拟≈{liquidationTierExtrapolated ? "，末档外推" : ""}）</dt><dd>{formatDecimal(replayPositiveModelPrice(item.liquidation_price), 6)}</dd></div>
-                     <div title="模拟账户风险模型；不是历史交易所精确值"><dt>破产价格（模拟≈）</dt><dd>{formatDecimal(replayPositiveModelPrice(item.bankruptcy_price), 6)}</dd></div>
-                     <div><dt>累计资金费</dt><dd>{formatDecimal(item.accumulated_funding, 8)}</dd></div>
-                     <div className="wide"><dt>保护单</dt><dd>{protectionOrders.length === 0
-                       ? "无"
-                       : protectionOrders.map((order) => `${order.order_type === "STOP_MARKET" ? "止损" : "止盈"} ${formatDecimal(order.stop_price, 6)}`).join(" · ")}</dd></div>
+                       ? t("replay.wb.liqSearchOver", { cap: item.maintenance_margin_proof?.last_tier_notional_cap ?? "--" })
+                       : t("replay.wb.simRisk")}><dt>{t("replay.wb.liqPrice", { extra: liquidationTierExtrapolated ? t("replay.wb.liqExtrap") : "" })}</dt><dd>{formatDecimal(replayPositiveModelPrice(item.liquidation_price), 6)}</dd></div>
+                     <div title={t("replay.wb.simRisk")}><dt>{t("replay.wb.bankruptcy")}</dt><dd>{formatDecimal(replayPositiveModelPrice(item.bankruptcy_price), 6)}</dd></div>
+                     <div><dt>{t("replay.wb.fundingAcc")}</dt><dd>{formatDecimal(item.accumulated_funding, 8)}</dd></div>
+                     <div className="wide"><dt>{t("replay.wb.protection")}</dt><dd>{protectionOrders.length === 0
+                       ? t("replay.wb.none")
+                       : protectionOrders.map((order) => `${order.order_type === "STOP_MARKET" ? t("replay.wb.stop") : t("replay.wb.tp")} ${formatDecimal(order.stop_price, 6)}`).join(" · ")}</dd></div>
                     {marginLabel !== null && (
-                      <div className="wide"><dt>保证金权益</dt><dd>{formatDecimal(marginLabel, 4)} {settlementAsset}</dd></div>
+                      <div className="wide"><dt>{t("replay.wb.marginEquity")}</dt><dd>{formatDecimal(marginLabel, 4)} {settlementAsset}</dd></div>
                     )}
                   </dl>
                   {!selected && (
                     <button type="button" disabled={viewer.viewerPending} onClick={() => void viewer.actions.selectTrack(item.track_id).catch(() => undefined)}>
-                      切换到该轨道管理
+                      {t("replay.wb.switchTrack")}
                     </button>
                   )}
                   {selected && (
@@ -1750,46 +1776,46 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
                             className={`replay-pill-btn${showLeverage ? " active" : ""}`}
                             aria-expanded={showLeverage}
                             onClick={() => togglePositionPanel(item.track_id, "leverage", hedgePositionSide)}
-                          >调杠杆</button>
+                          >{t("replay.wb.setLev")}</button>
                         )}
                         <button
                           type="button"
                           className={`replay-pill-btn${showProtection ? " active" : ""}`}
                           aria-expanded={showProtection}
                           onClick={() => togglePositionPanel(item.track_id, "protection", hedgePositionSide)}
-                        >止盈止损</button>
+                        >{t("replay.wb.setProtect")}</button>
                         <button
                           type="button"
                           className={`replay-pill-btn${showClose ? " active" : ""}`}
                           aria-expanded={showClose}
                           onClick={() => togglePositionPanel(item.track_id, "close", hedgePositionSide)}
-                        >平仓</button>
+                        >{t("replay.wb.close")}</button>
                         <button
                           type="button"
                           className="replay-pill-btn"
                           data-variant="danger"
                           data-replay-action="close-position"
                           disabled={!commandReady}
-                          onClick={() => void runTrade("execute_position_intent", { intent: "CLOSE", side: null, quantity: null, ...legPayload }, "正在提交全部平仓命令…", "全部平仓命令已受理")}
-                        >市价全平</button>
+                          onClick={() => void runTrade("execute_position_intent", { intent: "CLOSE", side: null, quantity: null, ...legPayload }, t("replay.paper.closeAllPending"), t("replay.paper.closeAllOk"))}
+                        >{t("replay.wb.closeAll")}</button>
                       </div>
                       {showClose && (
                         <section className="replay-position-actions">
-                          <header><strong>平仓数量</strong><small>确认后按已揭示参考价提交</small></header>
-                          <label>数量 <span><input ref={closeQtyInputRef} value={itemCloseQuantity} inputMode="decimal" onChange={(event) => setCloseDraft({ trackId: selectedTrackId, ...(hedgePositionSide === undefined ? {} : { positionSide: hedgePositionSide }), value: event.target.value })} aria-label="平仓数量" /><b>{itemQtyAsset}</b></span></label>
+                          <header><strong>{t("replay.wb.closeQty")}</strong><small>{t("replay.wb.closeHint")}</small></header>
+                          <label>{t("replay.wb.qtyLabel")} <span><input ref={closeQtyInputRef} value={itemCloseQuantity} inputMode="decimal" onChange={(event) => setCloseDraft({ trackId: selectedTrackId, ...(hedgePositionSide === undefined ? {} : { positionSide: hedgePositionSide }), value: event.target.value })} aria-label={t("replay.wb.closeQty")} /><b>{itemQtyAsset}</b></span></label>
                           <div>{[0.25, 0.5, 1].map((share) => <button type="button" key={share} onClick={() => setCloseDraft({ trackId: selectedTrackId, ...(hedgePositionSide === undefined ? {} : { positionSide: hedgePositionSide }), value: quantityForStep(Math.abs(quantityValue) * share, quantityStep) })}>{share * 100}%</button>)}</div>
                           <button
                             type="button"
                             data-replay-action="close-partial"
                             disabled={!commandReady || !itemCloseQuantity.trim()}
-                            onClick={() => void runTrade("execute_position_intent", { intent: "CLOSE", side: null, quantity: itemCloseQuantity, ...legPayload }, "正在提交平仓命令…", "平仓命令已受理，组合已刷新")}
-                          >确认平仓</button>
+                            onClick={() => void runTrade("execute_position_intent", { intent: "CLOSE", side: null, quantity: itemCloseQuantity, ...legPayload }, t("replay.paper.closePending"), t("replay.paper.closeOk"))}
+                          >{t("replay.wb.confirmClose")}</button>
                         </section>
                       )}
                       {showLeverage && hedgePositionSide !== undefined && (
                         <section className="replay-position-actions">
-                          <header><strong>逐腿杠杆</strong><small>{hedgePositionSide} 独立生效</small></header>
-                          <label>杠杆 <span><input value={itemLeverage} inputMode="decimal" onChange={(event) => setLeverageDraft({ trackId: item.track_id, positionSide: hedgePositionSide, value: event.target.value })} aria-label="逐腿杠杆" /><b>x</b></span></label>
+                          <header><strong>{t("replay.wb.levHeader")}</strong><small>{t("replay.wb.levIndependent", { side: hedgePositionSide })}</small></header>
+                          <label>{t("replay.paper.leverage")} <span><input value={itemLeverage} inputMode="decimal" onChange={(event) => setLeverageDraft({ trackId: item.track_id, positionSide: hedgePositionSide, value: event.target.value })} aria-label={t("replay.wb.lev")} /><b>x</b></span></label>
                           <button
                             type="button"
                             data-replay-action="set-position-leverage"
@@ -1797,17 +1823,17 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
                             onClick={() => void runTrade(
                               "set_position_leverage",
                               { position_side: hedgePositionSide, leverage: itemLeverage },
-                              `正在调整 ${hedgePositionSide} 杠杆…`,
-                              `${hedgePositionSide} 杠杆已更新`,
+                              t("replay.paper.levPending", { side: hedgePositionSide }),
+                              t("replay.paper.levOk", { side: hedgePositionSide }),
                             )}
-                          >确认调整</button>
+                          >{t("replay.wb.confirmLev")}</button>
                         </section>
                       )}
                       {showProtection && (
                         <section className="replay-position-actions">
-                          <header><strong>仓位保护</strong><small>止盈止损价格</small></header>
-                          <label>止损价 <span><input value={itemStopLossPrice} inputMode="decimal" onChange={(event) => setProtectionDraft({ trackId: selectedTrackId, ...(hedgePositionSide === undefined ? {} : { positionSide: hedgePositionSide }), stopLoss: event.target.value, takeProfit: itemTakeProfitPrice })} aria-label="止损价格" /><b>{settlementAsset}</b></span></label>
-                          <label>止盈价 <span><input value={itemTakeProfitPrice} inputMode="decimal" onChange={(event) => setProtectionDraft({ trackId: selectedTrackId, ...(hedgePositionSide === undefined ? {} : { positionSide: hedgePositionSide }), stopLoss: itemStopLossPrice, takeProfit: event.target.value })} aria-label="止盈价格" /><b>{settlementAsset}</b></span></label>
+                          <header><strong>{t("replay.wb.protectHeader")}</strong><small>{t("replay.wb.protectHint")}</small></header>
+                          <label>{t("replay.wb.slPrice")} <span><input value={itemStopLossPrice} inputMode="decimal" onChange={(event) => setProtectionDraft({ trackId: selectedTrackId, ...(hedgePositionSide === undefined ? {} : { positionSide: hedgePositionSide }), stopLoss: event.target.value, takeProfit: itemTakeProfitPrice })} aria-label={t("replay.wb.slPrice")} /><b>{settlementAsset}</b></span></label>
+                          <label>{t("replay.wb.tpPrice")} <span><input value={itemTakeProfitPrice} inputMode="decimal" onChange={(event) => setProtectionDraft({ trackId: selectedTrackId, ...(hedgePositionSide === undefined ? {} : { positionSide: hedgePositionSide }), stopLoss: itemStopLossPrice, takeProfit: event.target.value })} aria-label={t("replay.wb.tpPrice")} /><b>{settlementAsset}</b></span></label>
                           <button
                             type="button"
                             data-replay-action="set-position-protection"
@@ -1820,10 +1846,10 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
                                 take_profit_price: itemTakeProfitPrice.trim() || null,
                                 ...legPayload,
                               },
-                              "正在原子替换止盈止损…",
-                              "仓位保护已更新",
+                              t("replay.paper.protectPending"),
+                              t("replay.paper.protectOk"),
                             )}
-                          >设置止盈止损</button>
+                          >{t("replay.wb.setProtectBtn")}</button>
                           <button
                             type="button"
                             data-replay-action="clear-position-protection"
@@ -1831,14 +1857,14 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
                             onClick={() => void runTrade(
                               "set_position_protection",
                               { quantity: null, stop_loss_price: null, take_profit_price: null, ...legPayload },
-                              "正在清除仓位保护…",
-                              "仓位保护已清除",
+                              t("replay.paper.clearPending"),
+                              t("replay.paper.clearOk"),
                             )}
-                          >清除止盈止损</button>
+                          >{t("replay.wb.clearProtect")}</button>
                         </section>
                       )}
                       {contract?.position_mode !== "HEDGE" && <details className="replay-position-disclosure">
-                        <summary>更多操作</summary>
+                        <summary>{t("replay.wb.more")}</summary>
                         <section className="replay-position-actions">
                           <button
                             type="button"
@@ -1851,10 +1877,10 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
                                 side: selectedPositionSignedQuantity > 0 ? "SELL" : "BUY",
                                 quantity: closeQuantity,
                               },
-                              "正在原子平仓并反向开仓…",
-                              "反手命令已完成，组合已刷新",
+                              t("replay.paper.reversePending"),
+                              t("replay.paper.reverseOk"),
                             )}
-                          >反手为{selectedPositionSignedQuantity > 0 ? "空" : "多"}</button>
+                          >{t("replay.wb.reverseTo", { side: selectedPositionSignedQuantity > 0 ? t("replay.wb.short") : t("replay.wb.long") })}</button>
                         </section>
                       </details>}
                     </>
@@ -1863,33 +1889,33 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
               );
             })}
 
-            <section className="replay-asset-strip" data-replay-panel="account-assets" aria-label="账户资产">
+            <section className="replay-asset-strip" data-replay-panel="account-assets" aria-label={t("replay.wb.accountAssets")}>
               <header>
-                <strong><span className="replay-asset-icon" aria-hidden="true">{settlementAsset.slice(0, 1) || "U"}</span>{settlementAsset || "资产"}</strong>
-                <small>训练账户</small>
+                <strong><span className="replay-asset-icon" aria-hidden="true">{settlementAsset.slice(0, 1) || "U"}</span>{settlementAsset || t("replay.wb.assetFallback")}</strong>
+                <small>{t("replay.wb.trainAccount")}</small>
               </header>
               <dl className="replay-metric-flat">
-                <div><dt>币种权益</dt><dd>{formatDecimal(portfolio?.equity ?? store.account?.equity, 4)}</dd></div>
-                <div><dt>占用</dt><dd>{formatDecimal(portfolio?.margin_used, 4)}</dd></div>
-                <div><dt>可用</dt><dd>{formatDecimal(portfolio?.available_equity ?? store.account?.available_equity, 4)}</dd></div>
-                <div><dt>浮动收益</dt><dd data-value-tone={(finiteNumber(portfolio?.unrealized_pnl) ?? 0) >= 0 ? "positive" : "negative"}>{formatDecimal(portfolio?.unrealized_pnl, 4)}</dd></div>
-                <div><dt>风险覆盖</dt><dd>{contract?.risk_ratio == null ? "--" : `${formatDecimal(contract.risk_ratio, 2)}×`}</dd></div>
-                <div><dt>杠杆上限</dt><dd>{config?.max_leverage ?? "--"}x</dd></div>
-                <div className="wide"><dt>余额</dt><dd>{formatDecimal(portfolio?.cash_balance ?? store.account?.cash_balance, 4)} {settlementAsset}</dd></div>
+                <div><dt>{t("replay.wb.coinEquity")}</dt><dd>{formatDecimal(portfolio?.equity ?? store.account?.equity, 4)}</dd></div>
+                <div><dt>{t("replay.wb.used")}</dt><dd>{formatDecimal(portfolio?.margin_used, 4)}</dd></div>
+                <div><dt>{t("replay.wb.available")}</dt><dd>{formatDecimal(portfolio?.available_equity ?? store.account?.available_equity, 4)}</dd></div>
+                <div><dt>{t("replay.wb.floatPnl")}</dt><dd data-value-tone={(finiteNumber(portfolio?.unrealized_pnl) ?? 0) >= 0 ? "positive" : "negative"}>{formatDecimal(portfolio?.unrealized_pnl, 4)}</dd></div>
+                <div><dt>{t("replay.wb.riskCover")}</dt><dd>{contract?.risk_ratio == null ? "--" : `${formatDecimal(contract.risk_ratio, 2)}×`}</dd></div>
+                <div><dt>{t("replay.wb.levCap")}</dt><dd>{config?.max_leverage ?? "--"}x</dd></div>
+                <div className="wide"><dt>{t("replay.wb.balance")}</dt><dd>{formatDecimal(portfolio?.cash_balance ?? store.account?.cash_balance, 4)} {settlementAsset}</dd></div>
               </dl>
             </section>
 
             <details className="replay-closed-trades">
               <summary>
-                <strong>最近已平仓</strong>
+                <strong>{t("replay.wb.recentClosed")}</strong>
                 <span>{closedTrades.length}</span>
-                {reportState === "loading" && <small>同步中…</small>}
+                {reportState === "loading" && <small>{t("replay.wb.syncing")}</small>}
               </summary>
               <div className="replay-rail-record-list">
-                {recentClosedTrades.length === 0 ? <div className="replay-account-empty compact calm">暂无已平仓交易</div> : recentClosedTrades.map((item) => (
+                {recentClosedTrades.length === 0 ? <div className="replay-account-empty compact calm">{t("replay.wb.noClosed")}</div> : recentClosedTrades.map((item) => (
                   <article className="replay-compact-record" key={item.trade_id}>
                     <header><span data-order-side={item.side}>{sideLabel(item.side)} · {formatDecimal(item.quantity)}</span><strong data-value-tone={(finiteNumber(item.realized_pnl) ?? 0) >= 0 ? "positive" : "negative"}>{formatDecimal(item.realized_pnl, 4)} {settlementAsset}</strong></header>
-                    <dl className="replay-metric-flat"><div><dt>开仓</dt><dd>{formatDecimal(item.entry_price, 6)}</dd></div><div><dt>平仓</dt><dd>{formatDecimal(item.exit_price, 6)}</dd></div></dl>
+                    <dl className="replay-metric-flat"><div><dt>{t("replay.wb.openPx")}</dt><dd>{formatDecimal(item.entry_price, 6)}</dd></div><div><dt>{t("replay.wb.closePx")}</dt><dd>{formatDecimal(item.exit_price, 6)}</dd></div></dl>
                   </article>
                 ))}
               </div>
@@ -1905,32 +1931,32 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
           return (
             <div className="replay-rail-account-scroll replay-rail-record-list" data-replay-panel={activeTab}>
               {activeTab === "open-orders" && selectedTrackOpenOrders.length > 0 && (
-                <section className="replay-order-batch-actions" aria-label="批量撤单">
+                <section className="replay-order-batch-actions" aria-label={t("replay.wb.batchCancel")}>
                   <button
                     type="button"
                     disabled={!commandReady || selectedOrderIds.length === 0}
                     onClick={() => void runTrade(
                       "cancel_orders",
                       { scope: "ORDER_IDS", order_ids: [...selectedOrderIds] },
-                      `正在批量撤销 ${selectedOrderIds.length} 笔委托…`,
-                      `${selectedOrderIds.length} 笔委托已原子撤销`,
+                      t("replay.paper.cancelSelectedPending", { count: selectedOrderIds.length }),
+                      t("replay.paper.cancelSelectedOk", { count: selectedOrderIds.length }),
                     )}
-                  >撤销已选（{selectedOrderIds.length}）</button>
+                  >{t("replay.wb.cancelSelected", { count: selectedOrderIds.length })}</button>
                   <button
                     type="button"
                     disabled={!commandReady}
                     onClick={() => void runTrade(
                       "cancel_orders",
                       { scope: "SELECTED_TRACK", order_ids: [] },
-                      `正在撤销 ${selectedSymbol} 全部当前委托…`,
-                      `${selectedSymbol} 当前委托已全部撤销`,
+                      t("replay.paper.cancelSymbolPending", { symbol: selectedSymbol }),
+                      t("replay.paper.cancelSymbolOk", { symbol: selectedSymbol }),
                     )}
-                  >撤销当前品种全部</button>
+                  >{t("replay.wb.cancelSymbol")}</button>
                 </section>
               )}
-              {page?.loading === true && <div className="replay-account-empty calm">正在读取历史委托…</div>}
-              {page?.error !== null && page !== null && <div className="replay-account-empty calm" role="alert">历史委托读取失败：{page.error}</div>}
-              {!page?.loading && orders.length === 0 ? <div className="replay-account-empty calm"><strong>{activeTab === "open-orders" ? "暂无委托" : "暂无历史委托"}</strong><small>{activeTab === "open-orders" ? "限价单提交后会显示在这里。" : "已撤销与已成交委托会出现在这里。"}</small></div> : orders.map((order, index) => {
+              {page?.loading === true && <div className="replay-account-empty calm">{t("replay.wb.loadingHistory")}</div>}
+              {page?.error !== null && page !== null && <div className="replay-account-empty calm" role="alert">{t("replay.wb.historyFailed", { error: page.error })}</div>}
+              {!page?.loading && orders.length === 0 ? <div className="replay-account-empty calm"><strong>{activeTab === "open-orders" ? t("replay.wb.noOrders") : t("replay.wb.noHistory")}</strong><small>{activeTab === "open-orders" ? t("replay.wb.noOrdersHint") : t("replay.wb.noHistoryHint")}</small></div> : orders.map((order, index) => {
                 const orderId = recordText(order, "order_id", `order-${index}`);
                 const trackId = recordText(order, "track_id", selectedTrackId);
                 const status = recordText(order, "status", "OPEN");
@@ -1943,12 +1969,12 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
                   <article className="replay-compact-record" key={`${trackId}:${orderId}`} data-order-status={status}>
                     <header>
                       <div>
-                        {editable && <input type="checkbox" aria-label={`选择委托 ${orderId}`} checked={selectedOrderIds.includes(orderId)} onChange={(event) => toggleSelectedOrder(orderId, event.target.checked)} />}
+                        {editable && <input type="checkbox" aria-label={t("replay.wb.selectOrder", { id: orderId })} checked={selectedOrderIds.includes(orderId)} onChange={(event) => toggleSelectedOrder(orderId, event.target.checked)} />}
                         <strong>{symbolForTrack(trackId)}</strong>
                         <div className="replay-badge-row">
                           <span className="replay-chip">{orderTypeLabel(orderTypeValue)}</span>
-                          <span className="replay-chip" data-side={orderSide}>{orderSide === "BUY" ? (recordBoolean(order, "reduce_only") ? "平空" : "开多") : (recordBoolean(order, "reduce_only") ? "平多" : "开空")}</span>
-                          <span className="replay-chip">{contract?.margin_mode === "ISOLATED" ? "逐仓" : "全仓"}</span>
+                          <span className="replay-chip" data-side={orderSide}>{orderSide === "BUY" ? (recordBoolean(order, "reduce_only") ? t("replay.wb.closeShort") : t("replay.wb.openLong")) : (recordBoolean(order, "reduce_only") ? t("replay.wb.closeLong") : t("replay.wb.openShort"))}</span>
+                          <span className="replay-chip">{contract?.margin_mode === "ISOLATED" ? t("replay.wb.isolated") : t("replay.wb.cross")}</span>
                           <span className="replay-chip">{config?.max_leverage ?? "--"}x</span>
                           {timestamp !== null && <span className="replay-chip">{time(timestamp)}</span>}
                         </div>
@@ -1956,49 +1982,49 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
                       <span className="replay-order-status" data-status={status}>{orderStatusLabel(status)}</span>
                     </header>
                     <dl className="replay-metric-flat">
-                      <div><dt>委托数量</dt><dd>{formatDecimal(recordText(order, "quantity"))}</dd></div>
-                      <div><dt>已成交</dt><dd>{formatDecimal(recordText(order, "filled_quantity", "0"))}</dd></div>
-                      <div><dt>委托价格</dt><dd>{formatDecimal(orderPrice(order), 6)}</dd></div>
+                      <div><dt>{t("replay.wb.orderQty")}</dt><dd>{formatDecimal(recordText(order, "quantity"))}</dd></div>
+                      <div><dt>{t("replay.wb.filled")}</dt><dd>{formatDecimal(recordText(order, "filled_quantity", "0"))}</dd></div>
+                      <div><dt>{t("replay.wb.orderPrice")}</dt><dd>{formatDecimal(orderPrice(order), 6)}</dd></div>
                     </dl>
                     {editing && replaceDraft !== null && (
                       <div className="replay-order-replace-form">
-                        <label>剩余委托量<input inputMode="decimal" value={replaceDraft.quantity} onChange={(event) => setReplaceDraft({ ...replaceDraft, quantity: event.target.value })} /></label>
-                        {orderTypeValue !== "MARKET" && <label>新委托价<input inputMode="decimal" value={replaceDraft.price} onChange={(event) => setReplaceDraft({ ...replaceDraft, price: event.target.value })} /></label>}
-                        <button type="button" disabled={!commandReady || !replaceDraft.quantity.trim() || (orderTypeValue !== "MARKET" && !replaceDraft.price.trim())} onClick={() => replaceOrder(order)}>确认改单</button>
-                        <button type="button" onClick={() => setReplaceDraft(null)}>取消</button>
+                        <label>{t("replay.wb.remainQty")}<input inputMode="decimal" value={replaceDraft.quantity} onChange={(event) => setReplaceDraft({ ...replaceDraft, quantity: event.target.value })} /></label>
+                        {orderTypeValue !== "MARKET" && <label>{t("replay.wb.newPrice")}<input inputMode="decimal" value={replaceDraft.price} onChange={(event) => setReplaceDraft({ ...replaceDraft, price: event.target.value })} /></label>}
+                        <button type="button" disabled={!commandReady || !replaceDraft.quantity.trim() || (orderTypeValue !== "MARKET" && !replaceDraft.price.trim())} onClick={() => replaceOrder(order)}>{t("replay.wb.confirmReplace")}</button>
+                        <button type="button" onClick={() => setReplaceDraft(null)}>{t("replay.wb.cancel")}</button>
                       </div>
                     )}
                     {editable && (
                       <div className="replay-order-card-actions">
                         {!editing && (
-                          <button type="button" disabled={!commandReady} onClick={() => setReplaceDraft({ trackId, orderId, quantity: recordText(order, "remaining_quantity", recordText(order, "quantity")), price: recordText(order, "limit_price", recordText(order, "stop_price", "")) })}>改单</button>
+                          <button type="button" disabled={!commandReady} onClick={() => setReplaceDraft({ trackId, orderId, quantity: recordText(order, "remaining_quantity", recordText(order, "quantity")), price: recordText(order, "limit_price", recordText(order, "stop_price", "")) })}>{t("replay.wb.replace")}</button>
                         )}
-                        <button type="button" data-variant="danger" disabled={!commandReady} onClick={() => void runTrade("cancel_order", { order_id: orderId }, "正在撤销委托…", "委托已撤销并移入历史")}>撤单</button>
+                        <button type="button" data-variant="danger" disabled={!commandReady} onClick={() => void runTrade("cancel_order", { order_id: orderId }, t("replay.paper.cancelPending"), t("replay.paper.cancelOk"))}>{t("replay.wb.cancelOrder")}</button>
                       </div>
                     )}
                   </article>
                 );
               })}
-              {page?.nextCursor !== null && page !== null && <button type="button" disabled={page.loadingMore} onClick={() => void page.loadMore()}>{page.loadingMore ? "加载中…" : `加载更多（已显示 ${page.items.length}/${page.totalCount}）`}</button>}
+              {page?.nextCursor !== null && page !== null && <button type="button" disabled={page.loadingMore} onClick={() => void page.loadMore()}>{page.loadingMore ? t("replay.wb.loading") : t("replay.wb.loadMore", { shown: page.items.length, total: page.totalCount })}</button>}
             </div>
           );
         })()}
 
         {activeTab === "fills" && (
           <div className="replay-rail-account-scroll replay-rail-record-list" data-replay-panel="fills">
-            {fillPages.loading && contract !== null && <div className="replay-account-empty calm">正在读取成交记录…</div>}
-            {fillPages.error !== null && contract !== null && <div className="replay-account-empty calm" role="alert">成交记录读取失败：{fillPages.error}</div>}
-            {!fillPages.loading && visibleFills.length === 0 ? <div className="replay-account-empty calm"><strong>暂无成交</strong><small>成交后会显示价格、数量与手续费。</small></div> : visibleFills.map((fill, index) => {
+            {fillPages.loading && contract !== null && <div className="replay-account-empty calm">{t("replay.wb.loadingFills")}</div>}
+            {fillPages.error !== null && contract !== null && <div className="replay-account-empty calm" role="alert">{t("replay.wb.fillsFailed", { error: fillPages.error })}</div>}
+            {!fillPages.loading && visibleFills.length === 0 ? <div className="replay-account-empty calm"><strong>{t("replay.wb.noFills")}</strong><small>{t("replay.wb.noFillsHint")}</small></div> : visibleFills.map((fill, index) => {
               const timestamp = eventTime(fill);
               return (
                 <article className="replay-compact-record" key={recordText(fill, "fill_id", `fill-${index}`)}>
                   <header><div><strong>{symbolForTrack(recordText(fill, "track_id", selectedTrackId))}</strong><small title={recordText(fill, "reason")}>{recordText(fill, "fill_id", "--")}</small></div><span data-order-side={recordText(fill, "side")}>{sideLabel(recordText(fill, "side"))}</span></header>
-                  <div className="replay-record-primary"><b>{formatDecimal(recordText(fill, "quantity"))}</b><small>@ {formatDecimal(recordText(fill, "price"), 6)} · {recordText(fill, "liquidity") === "MAKER" ? "挂单" : "吃单"}</small></div>
-                  <dl className="replay-metric-flat"><div><dt>手续费</dt><dd>{formatDecimal(recordText(fill, "configured_fee", recordText(fill, "fee")), 6)} {settlementAsset}</dd></div><div><dt>时间</dt><dd>{timestamp === null ? "--" : time(timestamp)}</dd></div></dl>
+                  <div className="replay-record-primary"><b>{formatDecimal(recordText(fill, "quantity"))}</b><small>@ {formatDecimal(recordText(fill, "price"), 6)} · {recordText(fill, "liquidity") === "MAKER" ? t("replay.wb.maker") : t("replay.wb.taker")}</small></div>
+                  <dl className="replay-metric-flat"><div><dt>{t("replay.wb.fee")}</dt><dd>{formatDecimal(recordText(fill, "configured_fee", recordText(fill, "fee")), 6)} {settlementAsset}</dd></div><div><dt>{t("replay.wb.time")}</dt><dd>{timestamp === null ? "--" : time(timestamp)}</dd></div></dl>
                 </article>
               );
             })}
-            {contract !== null && fillPages.nextCursor !== null && <button type="button" disabled={fillPages.loadingMore} onClick={() => void fillPages.loadMore()}>{fillPages.loadingMore ? "加载中…" : `加载更多（已显示 ${fillPages.items.length}/${fillPages.totalCount}）`}</button>}
+            {contract !== null && fillPages.nextCursor !== null && <button type="button" disabled={fillPages.loadingMore} onClick={() => void fillPages.loadMore()}>{fillPages.loadingMore ? t("replay.wb.loading") : t("replay.wb.loadMore", { shown: fillPages.items.length, total: fillPages.totalCount })}</button>}
           </div>
         )}
 
@@ -2006,19 +2032,19 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
           <div className="replay-rail-account-scroll" data-replay-panel="account-assets">
             <section className="replay-asset-strip">
               <header>
-                <strong><span className="replay-asset-icon" aria-hidden="true">{settlementAsset.slice(0, 1) || "U"}</span>{settlementAsset || "资产"}</strong>
-                <small>初始 {formatDecimal(portfolio?.initial_equity, 2)}</small>
+                <strong><span className="replay-asset-icon" aria-hidden="true">{settlementAsset.slice(0, 1) || "U"}</span>{settlementAsset || t("replay.wb.assetFallback")}</strong>
+                <small>{t("replay.wb.initial", { value: formatDecimal(portfolio?.initial_equity, 2) })}</small>
               </header>
               <dl className="replay-metric-flat">
-                <div><dt>币种权益</dt><dd>{formatDecimal(portfolio?.equity, 4)}</dd></div>
-                <div><dt>占用</dt><dd>{formatDecimal(portfolio?.margin_used, 4)}</dd></div>
-                <div><dt>可用</dt><dd>{formatDecimal(portfolio?.available_equity, 4)}</dd></div>
-                <div><dt>浮动收益</dt><dd data-value-tone={(finiteNumber(portfolio?.unrealized_pnl) ?? 0) >= 0 ? "positive" : "negative"}>{formatDecimal(portfolio?.unrealized_pnl, 4)}</dd></div>
-                <div><dt>已实现</dt><dd>{formatDecimal(portfolio?.realized_pnl, 4)}</dd></div>
-                <div><dt>累计手续费</dt><dd>{formatDecimal(portfolio?.fees_paid, 6)}</dd></div>
-                <div><dt>维持保证金</dt><dd>{formatDecimal(contract?.maintenance_margin, 4)}</dd></div>
-                <div><dt>风险覆盖</dt><dd>{contract?.risk_ratio == null ? "--" : `${formatDecimal(contract.risk_ratio, 2)}×`}</dd></div>
-                <div><dt>资金费</dt><dd>{formatDecimal(contract?.funding_cashflow, 6)}</dd></div>
+                <div><dt>{t("replay.wb.coinEquity")}</dt><dd>{formatDecimal(portfolio?.equity, 4)}</dd></div>
+                <div><dt>{t("replay.wb.used")}</dt><dd>{formatDecimal(portfolio?.margin_used, 4)}</dd></div>
+                <div><dt>{t("replay.wb.available")}</dt><dd>{formatDecimal(portfolio?.available_equity, 4)}</dd></div>
+                <div><dt>{t("replay.wb.floatPnl")}</dt><dd data-value-tone={(finiteNumber(portfolio?.unrealized_pnl) ?? 0) >= 0 ? "positive" : "negative"}>{formatDecimal(portfolio?.unrealized_pnl, 4)}</dd></div>
+                <div><dt>{t("replay.wb.realized")}</dt><dd>{formatDecimal(portfolio?.realized_pnl, 4)}</dd></div>
+                <div><dt>{t("replay.wb.feesPaid")}</dt><dd>{formatDecimal(portfolio?.fees_paid, 6)}</dd></div>
+                <div><dt>{t("replay.wb.mm")}</dt><dd>{formatDecimal(contract?.maintenance_margin, 4)}</dd></div>
+                <div><dt>{t("replay.wb.riskCover")}</dt><dd>{contract?.risk_ratio == null ? "--" : `${formatDecimal(contract.risk_ratio, 2)}×`}</dd></div>
+                <div><dt>{t("replay.hub.funding")}</dt><dd>{formatDecimal(contract?.funding_cashflow, 6)}</dd></div>
               </dl>
             </section>
           </div>
@@ -2027,42 +2053,42 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
         {activeTab === "risk" && (
           <div className="replay-risk-dashboard replay-rail-account-scroll" data-replay-panel="account-risk">
             <section className="replay-risk-card">
-              <header><strong>账户规则</strong><span className="replay-chip">{contract?.status ?? "加载中"}</span></header>
+              <header><strong>{t("replay.wb.rules")}</strong><span className="replay-chip">{contract?.status ?? t("replay.wb.loadingStatus")}</span></header>
               <dl className="replay-metric-flat">
-                <div><dt>保证金模式</dt><dd>{contract?.margin_mode === "ISOLATED" ? "逐仓" : "全仓"}</dd></div>
-                <div><dt>执行模型</dt><dd>{contract?.execution_fidelity === "BOOK_ASSISTED_CONTINUITY_GATED_NO_QUEUE" ? "L2 辅助" : "触价近似"}</dd></div>
-                <div><dt>账本差异</dt><dd>{contract === null ? "--" : recordText(contract.ledger, "reconciliation_delta")}</dd></div>
-                <div className="wide"><dt>历史账户输入</dt><dd>{contract?.account_history.mode === "HISTORICAL_EXACT" ? "已固定历史归档" : "已揭示价格代理"}</dd></div>
+                <div><dt>{t("replay.wb.marginMode")}</dt><dd>{contract?.margin_mode === "ISOLATED" ? t("replay.wb.isolated") : t("replay.wb.cross")}</dd></div>
+                <div><dt>{t("replay.wb.execModel")}</dt><dd>{contract?.execution_fidelity === "BOOK_ASSISTED_CONTINUITY_GATED_NO_QUEUE" ? t("replay.wb.l2Assist") : t("replay.wb.touchApprox")}</dd></div>
+                <div><dt>{t("replay.wb.ledgerDelta")}</dt><dd>{contract === null ? "--" : recordText(contract.ledger, "reconciliation_delta")}</dd></div>
+                <div className="wide"><dt>{t("replay.wb.histAccount")}</dt><dd>{contract?.account_history.mode === "HISTORICAL_EXACT" ? t("replay.wb.histExact") : t("replay.wb.priceProxy")}</dd></div>
               </dl>
             </section>
             <section className="replay-risk-card replay-fidelity-panel">
-              <header><strong>精度边界</strong><span className="replay-chip">{contract?.account_history.auditor.status ?? "NOT_RUN"}</span></header>
-              <p>当前模型{contract?.execution_fidelity === "BOOK_ASSISTED_CONTINUITY_GATED_NO_QUEUE" ? "使用连续历史盘口辅助，但仍不含真实队列位置。" : "不含盘口排队，并按已揭示价格保守模拟成交。"}</p>
-              <p>Mark：{contract === null ? "--" : recordText(contract.fidelity, "mark")}</p>
-              <p>维持保证金：{contract === null
+              <header><strong>{t("replay.wb.fidelityBound")}</strong><span className="replay-chip">{contract?.account_history.auditor.status ?? "NOT_RUN"}</span></header>
+              <p>{contract?.execution_fidelity === "BOOK_ASSISTED_CONTINUITY_GATED_NO_QUEUE" ? t("replay.wb.modelL2") : t("replay.wb.modelNoQueue")}</p>
+              <p>{t("replay.wb.markLabel", { value: contract === null ? "--" : recordText(contract.fidelity, "mark") })}</p>
+              <p>{t("replay.wb.mmLabel", { value: contract === null
                 ? "--"
                 : recordText(contract.fidelity, "maintenance_margin") === "LAST_MAINTENANCE_TIER_RATE_DEDUCTION_EXTRAPOLATED"
-                  ? "存在仓位超过历史末档，按末档费率和速算扣除数外推≈"
+                  ? t("replay.wb.mmLastTier")
                   : recordText(contract.fidelity, "maintenance_margin") === "VERSIONED_MAINTENANCE_TIER_APPLIED"
-                    ? "全部仓位位于固定规则档位内"
-                    : "未声明档位外推状态"}</p>
-              <p>强平投影：{contract === null
+                    ? t("replay.wb.mmInTier")
+                    : t("replay.wb.mmUndeclared") })}</p>
+              <p>{t("replay.wb.liqLabel", { value: contract === null
                 ? "--"
                 : recordText(contract.fidelity, "liquidation_projection") === "LAST_MAINTENANCE_TIER_RATE_DEDUCTION_EXTRAPOLATED"
-                  ? "至少一个候选强平价越过历史末档，末档外推≈"
+                  ? t("replay.wb.liqLastTier")
                   : recordText(contract.fidelity, "liquidation_projection") === "VERSIONED_MAINTENANCE_TIER_APPLIED"
-                    ? "候选强平价位于固定规则档位内"
-                    : "未声明档位外推状态"}</p>
-              <button type="button" className="replay-pill-btn" data-replay-action="audit-account" disabled={viewer.viewerPending} onClick={() => void viewer.actions.auditAccount().catch(() => undefined)}>重新运行独立账户审计</button>
+                    ? t("replay.wb.liqInTier")
+                    : t("replay.wb.mmUndeclared") })}</p>
+              <button type="button" className="replay-pill-btn" data-replay-action="audit-account" disabled={viewer.viewerPending} onClick={() => void viewer.actions.auditAccount().catch(() => undefined)}>{t("replay.wb.audit")}</button>
             </section>
             {contract !== null && (
               <details className="replay-risk-card replay-ledger-records" open={contract.history.ledger_entries_total > 0}>
                 <summary>
-                  <strong>账本记录</strong>
+                  <strong>{t("replay.wb.ledger")}</strong>
                   <span>{contract.history.ledger_entries_total}</span>
                 </summary>
-                {ledgerPages.loading && <p>正在读取账本…</p>}
-                {ledgerPages.error !== null && <p role="alert">账本读取失败：{ledgerPages.error}</p>}
+                {ledgerPages.loading && <p>{t("replay.wb.loadingLedger")}</p>}
+                {ledgerPages.error !== null && <p role="alert">{t("replay.wb.ledgerFailed", { error: ledgerPages.error })}</p>}
                 <div className="replay-rail-record-list">
                   {ledgerPages.items.map((entry, index) => {
                     const timestamp = eventTime(entry) ?? recordNumber(entry, "virtual_time_ms");
@@ -2075,48 +2101,48 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
                     );
                   })}
                 </div>
-                {ledgerPages.nextCursor !== null && <button type="button" className="replay-pill-btn" disabled={ledgerPages.loadingMore} onClick={() => void ledgerPages.loadMore()}>{ledgerPages.loadingMore ? "加载中…" : `加载更多（已显示 ${ledgerPages.items.length}/${ledgerPages.totalCount}）`}</button>}
+                {ledgerPages.nextCursor !== null && <button type="button" className="replay-pill-btn" disabled={ledgerPages.loadingMore} onClick={() => void ledgerPages.loadMore()}>{ledgerPages.loadingMore ? t("replay.wb.loading") : t("replay.wb.loadMore", { shown: ledgerPages.items.length, total: ledgerPages.totalCount })}</button>}
               </details>
             )}
             {contract?.margin_mode === "ISOLATED" && (
               <section className="replay-risk-card replay-isolated-allocation">
-                <header><strong>逐仓分配</strong><small>{selectedSymbol}</small></header>
+                <header><strong>{t("replay.wb.isolatedAlloc")}</strong><small>{selectedSymbol}</small></header>
                 {contract.position_mode === "HEDGE" && (
-                  <label>仓位腿
+                  <label>{t("replay.wb.posLeg")}
                     <select value={isolatedSide} onChange={(event) => setIsolatedSide(event.target.value as "LONG" | "SHORT")}>
                       <option value="LONG">LONG</option>
                       <option value="SHORT">SHORT</option>
                     </select>
                   </label>
                 )}
-                <label>分配金额
+                <label>{t("replay.wb.allocAmt")}
                   <span>
                     <input value={isolatedAmount} inputMode="decimal" onChange={(event) => setIsolatedAmount(event.target.value)} />
                     <b>{settlementAsset}</b>
                   </span>
                 </label>
-                <button type="button" className="replay-pill-btn" disabled={!commandReady || !isolatedAmount.trim()} onClick={() => void viewer.actions.submitTrade("allocate_isolated_margin", { track_id: selectedTrackId, position_side: contract.position_mode === "HEDGE" ? isolatedSide : null, amount: isolatedAmount }).catch(() => undefined)}>设置分配</button>
-                <small>当前：{String(contract.isolated_allocations[contract.position_mode === "HEDGE" ? `${selectedTrackId}:${isolatedSide}` : selectedTrackId] ?? "0")} {settlementAsset}</small>
+                <button type="button" className="replay-pill-btn" disabled={!commandReady || !isolatedAmount.trim()} onClick={() => void viewer.actions.submitTrade("allocate_isolated_margin", { track_id: selectedTrackId, position_side: contract.position_mode === "HEDGE" ? isolatedSide : null, amount: isolatedAmount }).catch(() => undefined)}>{t("replay.wb.setAlloc")}</button>
+                <small>{t("replay.wb.current", { value: String(contract.isolated_allocations[contract.position_mode === "HEDGE" ? `${selectedTrackId}:${isolatedSide}` : selectedTrackId] ?? "0"), asset: settlementAsset })}</small>
               </section>
             )}
             <section className="replay-risk-card replay-capability-boundary" data-replay-panel="historical-market-liquidations" data-replay-domain="historical-market-liquidation">
-              <header><strong>历史市场爆仓</strong><span className="replay-chip">{contract?.liquidation_channels.historical_market.fidelity ?? "UNSUPPORTED_NO_HISTORY"}</span></header>
-              <p>独立市场数据域，不用训练账户事件冒充。</p>
+              <header><strong>{t("replay.wb.mktLiq")}</strong><span className="replay-chip">{contract?.liquidation_channels.historical_market.fidelity ?? "UNSUPPORTED_NO_HISTORY"}</span></header>
+              <p>{t("replay.wb.mktLiqHint")}</p>
             </section>
             <section className="replay-risk-card" data-replay-panel="simulated-liquidations" data-replay-domain="simulated-account-liquidation">
-              <header><strong>模拟账户强平</strong><span className="replay-chip">{contract?.liquidations.length ?? 0}</span></header>
-              <p>交易所规则级确定性模拟，与「历史市场爆仓」严格分域；insurance/ADL 不代表历史交易所私有账本。</p>
+              <header><strong>{t("replay.wb.simLiq")}</strong><span className="replay-chip">{contract?.liquidations.length ?? 0}</span></header>
+              <p>{t("replay.wb.simLiqHint")}</p>
               <ReplayLiquidationTimeline
                 cases={contract?.liquidations ?? []}
                 formatVirtualTime={time}
               />
               {(contract?.liquidation_recoveries.length ?? 0) > 0 && (
                 <details className="replay-liquidation-recoveries">
-                  <summary>撤单后恢复 · {contract?.liquidation_recoveries.length}</summary>
+                  <summary>{t("replay.wb.recoveries", { count: contract?.liquidation_recoveries.length ?? 0 })}</summary>
                   <ReplayLiquidationTimeline
                     cases={contract?.liquidation_recoveries ?? []}
                     formatVirtualTime={time}
-                    emptyLabel="暂无恢复 case"
+                    emptyLabel={t("replay.wb.recoverEmpty")}
                   />
                 </details>
               )}
@@ -2129,6 +2155,7 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
 }
 
 export function ReplayMarketDataDock({ runtime, viewer, indicatorStatus, formatTime }: ReplayRightRailProps) {
+  useLocale();
   const [activeTab, setActiveTab] = useState<MarketTab>("book");
   const store = runtime.store;
   const config = store.sessionConfig;
@@ -2144,35 +2171,36 @@ export function ReplayMarketDataDock({ runtime, viewer, indicatorStatus, formatT
   const time = (value: number) => formatTime?.(value)
     ?? formatReplayPublicTime(value, { blindMode: config?.blind_mode ?? true, originMs: store.replayStartMs });
   const handleMarketTabKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>, value: MarketTab) => {
-    handleTabKeyDown(event, MARKET_TABS, value, setActiveTab, "data-replay-market-tab");
+    handleTabKeyDown(event, MARKET_TAB_IDS, value, setActiveTab, "data-replay-market-tab");
   };
   return (
     <div className="replay-paper-trading replay-market-context" data-replay-paper-surface="market-data">
-      <nav className="replay-market-context-tabs" role="tablist" aria-label="回放市场数据视图">
-        {MARKET_TABS.map(([value, label]) => <button key={value} type="button" role="tab" className={activeTab === value ? "active" : ""} aria-selected={activeTab === value} tabIndex={activeTab === value ? 0 : -1} data-replay-market-tab={value} onClick={() => setActiveTab(value)} onKeyDown={(event) => handleMarketTabKeyDown(event, value)}>{label}</button>)}
+      <nav className="replay-market-context-tabs" role="tablist" aria-label={t("replay.dock.marketAria")}>
+        {MARKET_TAB_IDS.map((value) => <button key={value} type="button" role="tab" className={activeTab === value ? "active" : ""} aria-selected={activeTab === value} tabIndex={activeTab === value ? 0 : -1} data-replay-market-tab={value} onClick={() => setActiveTab(value)} onKeyDown={(event) => handleMarketTabKeyDown(event, value)}>{marketTabLabel(value)}</button>)}
       </nav>
       <div className="replay-market-context-body" role="tabpanel">
         {activeTab === "book" && (
           <section className="replay-rail-section replay-historical-book" data-replay-panel="historical-book" data-replay-book-status={historicalBook?.status ?? "OFF"}>
-            <h2>历史 L2 · {selectedTrack?.symbol ?? "--"}</h2>
-            {historicalBook === null || historicalBook.status === "OFF" ? <div className="replay-capability-boundary" role="status"><strong>未启用历史盘口</strong><p>本 Run 使用 TOUCH_OR_TAPE_V2，明确不含盘口排队。</p></div> : historicalBook.status !== "READY" ? <div className="replay-capability-boundary" role="alert"><strong>{historicalBook.status} · 已清空旧盘口</strong><p>{historicalBook.message}</p><button type="button" data-replay-action="resync-historical-book" disabled={viewer.viewerPending || viewer.marketTracks?.global_clock?.state !== "PAUSED"} onClick={() => void viewer.actions.resyncHistoricalBook().catch(() => undefined)}>重新校验并同步</button></div> : <><small>历史 L2 连续性已验证 · 不含真实队列位置</small><div className="replay-book-columns"><div><h3>买盘</h3>{historicalBook.bids.map(([levelPrice, levelQuantity]) => <span key={`bid:${levelPrice}`} data-book-side="bid"><strong>{formatDecimal(levelPrice, 6)}</strong><small>{formatDecimal(levelQuantity)}</small></span>)}</div><div><h3>卖盘</h3>{historicalBook.asks.map(([levelPrice, levelQuantity]) => <span key={`ask:${levelPrice}`} data-book-side="ask"><strong>{formatDecimal(levelPrice, 6)}</strong><small>{formatDecimal(levelQuantity)}</small></span>)}</div></div></>}
+            <h2>{t("replay.dock.histL2", { symbol: selectedTrack?.symbol ?? "--" })}</h2>
+            {historicalBook === null || historicalBook.status === "OFF" ? <div className="replay-capability-boundary" role="status"><strong>{t("replay.dock.bookOff")}</strong><p>{t("replay.dock.bookOffHint")}</p></div> : historicalBook.status !== "READY" ? <div className="replay-capability-boundary" role="alert"><strong>{t("replay.dock.bookCleared", { status: historicalBook.status })}</strong><p>{historicalBook.message}</p><button type="button" data-replay-action="resync-historical-book" disabled={viewer.viewerPending || viewer.marketTracks?.global_clock?.state !== "PAUSED"} onClick={() => void viewer.actions.resyncHistoricalBook().catch(() => undefined)}>{t("replay.dock.resync")}</button></div> : <><small>{t("replay.dock.l2Ready")}</small><div className="replay-book-columns"><div><h3>{t("replay.dock.bids")}</h3>{historicalBook.bids.map(([levelPrice, levelQuantity]) => <span key={`bid:${levelPrice}`} data-book-side="bid"><strong>{formatDecimal(levelPrice, 6)}</strong><small>{formatDecimal(levelQuantity)}</small></span>)}</div><div><h3>{t("replay.dock.asks")}</h3>{historicalBook.asks.map(([levelPrice, levelQuantity]) => <span key={`ask:${levelPrice}`} data-book-side="ask"><strong>{formatDecimal(levelPrice, 6)}</strong><small>{formatDecimal(levelQuantity)}</small></span>)}</div></div></>}
           </section>
         )}
         {activeTab === "flow" && (
           <section className="replay-rail-section replay-trade-flow" data-replay-panel="trade-flow" data-replay-trade-flow-state={tradeFlow.state}>
-            <h2>聚合成交与窗口 CVD</h2>
-            {tradeFlow.state === "UNSUPPORTED_SOURCE_MODE" && <div className="replay-capability-boundary" role="status"><strong>当前来源不支持订单流</strong><p>BAR 归档没有聚合成交序列，缺失历史不会显示成 0。</p></div>}
-            {tradeFlow.state === "LOADING" && <p className="replay-empty">正在读取已揭示的有界聚合成交页…</p>}
-            {tradeFlow.state === "DEGRADED" && <div className="replay-capability-boundary" role="alert"><strong>连续性失败 · 已清空</strong><p>{tradeFlow.error ?? "订单流连续性校验失败"}</p></div>}
-            {tradeFlow.state === "CONTIGUOUS" && <><dl className="replay-metrics-grid"><div><dt>窗口 CVD</dt><dd>{formatDecimal(tradeFlow.cvd)}</dd></div><div><dt>本页 Delta</dt><dd>{formatDecimal(tradeFlow.pageDelta)}</dd></div></dl><small>聚合成交精确 · 主动方近似 · {tradeFlow.fidelity}</small><div className="replay-trade-flow-list">{[...tradeFlow.tape].reverse().map((item) => <article key={item.source_sequence} data-aggressor-side={item.aggressor_side}><strong>{sideLabel(item.aggressor_side)} {formatDecimal(item.quantity)} @ {formatDecimal(item.price, 6)}</strong><span>Δ {formatDecimal(item.cvd_delta)} · agg #{item.agg_trade_id}</span><small>{time(item.trade_time_ms)} · {item.raw_trade_count} 笔原始成交聚合</small></article>)}</div></>}
+            <h2>{t("replay.dock.tapeTitle")}</h2>
+            {tradeFlow.state === "UNSUPPORTED_SOURCE_MODE" && <div className="replay-capability-boundary" role="status"><strong>{t("replay.dock.flowOff")}</strong><p>{t("replay.dock.flowOffHint")}</p></div>}
+            {tradeFlow.state === "LOADING" && <p className="replay-empty">{t("replay.dock.flowLoading")}</p>}
+            {tradeFlow.state === "DEGRADED" && <div className="replay-capability-boundary" role="alert"><strong>{t("replay.dock.flowDegraded")}</strong><p>{tradeFlow.error ?? t("replay.dock.flowFail")}</p></div>}
+            {tradeFlow.state === "CONTIGUOUS" && <><dl className="replay-metrics-grid"><div><dt>{t("replay.dock.windowCvd")}</dt><dd>{formatDecimal(tradeFlow.cvd)}</dd></div><div><dt>{t("replay.dock.pageDelta")}</dt><dd>{formatDecimal(tradeFlow.pageDelta)}</dd></div></dl><small>{t("replay.dock.tapeHint", { fidelity: tradeFlow.fidelity })}</small><div className="replay-trade-flow-list">{[...tradeFlow.tape].reverse().map((item) => <article key={item.source_sequence} data-aggressor-side={item.aggressor_side}><strong>{sideLabel(item.aggressor_side)} {formatDecimal(item.quantity)} @ {formatDecimal(item.price, 6)}</strong><span>Δ {formatDecimal(item.cvd_delta)} · agg #{item.agg_trade_id}</span><small>{time(item.trade_time_ms)} · {t("replay.dock.rawAgg", { count: item.raw_trade_count })}</small></article>)}</div></>}
           </section>
         )}
-        {activeTab === "indicators" && <section className="replay-rail-section replay-indicator-boundary" data-replay-panel="indicators"><h2>本地指标</h2><p>SMA 20 · 仅 {indicatorStatus.sourceBarCount} 根已揭示 K 线。</p><p>Hosted、range 与 security 指标保持禁用，不请求未来窗口。</p></section>}
+        {activeTab === "indicators" && <section className="replay-rail-section replay-indicator-boundary" data-replay-panel="indicators"><h2>{t("replay.dock.localInd")}</h2><p>{t("replay.dock.localIndHint", { count: indicatorStatus.sourceBarCount })}</p><p>{t("replay.dock.hostedOff")}</p></section>}
       </div>
     </div>
   );
 }
 
 export default function ReplayRightRail(props: ReplayRightRailProps) {
-  return <aside className="replay-right-rail" aria-label="回放纸面下单"><ReplayPaperTradingDock {...props} /></aside>;
+  useLocale();
+  return <aside className="replay-right-rail" aria-label={t("replay.dock.paperAria")}><ReplayPaperTradingDock {...props} /></aside>;
 }

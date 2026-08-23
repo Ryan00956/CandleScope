@@ -1,3 +1,5 @@
+import { t } from "../i18n/index.js";
+
 let snapshotMs = Date.now();
 let scheduledTick: ReturnType<typeof globalThis.setTimeout> | null = null;
 const listeners = new Set<() => void>();
@@ -50,5 +52,5 @@ export function formatLiveCountdown(
   const clock = [hours, minutes, seconds]
     .map((value) => String(value).padStart(2, "0"))
     .join(":");
-  return days > 0 ? `${days}天 ${clock}` : clock;
+  return days > 0 ? t("countdown.days", { days, clock }) : clock;
 }

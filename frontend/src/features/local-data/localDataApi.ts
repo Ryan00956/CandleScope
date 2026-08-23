@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import type {
   KlineApi,
   KlineBeforeRequestOptions,
@@ -204,7 +205,7 @@ export function createLocalImportJob(
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable) options.onUploadProgress?.(event.loaded / event.total);
     };
-    xhr.onerror = () => reject(new LocalDataApiError("CSV 上传失败", 0, "upload_failed"));
+    xhr.onerror = () => reject(new LocalDataApiError(t("local.err.uploadFailed"), 0, "upload_failed"));
     xhr.onabort = () => reject(new DOMException("Upload aborted", "AbortError"));
     xhr.onload = () => {
       options.signal?.removeEventListener("abort", abort);

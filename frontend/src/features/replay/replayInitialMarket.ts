@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import type { ReplayCatalog, ReplayCatalogEntry } from "./replayTypes.js";
 import { ReplayV2ApiError } from "./replayV2Api.js";
 import type { ReplayV2ApiClient } from "./replayV2Api.js";
@@ -29,7 +30,7 @@ function selectionFromEntry(
   entry: ReplayCatalogEntry,
 ): TrainingRunMarketSelectionPayload {
   if (entry.selected_base_interval === null) {
-    throw new Error("所选商品没有可用基础周期");
+    throw new Error(t("replay.init.noBaseInterval"));
   }
   return {
     catalog_epoch: catalog.catalog_epoch,
@@ -53,12 +54,12 @@ export interface ReplayInitialMarketPreparedSelection {
 function hedgeInputUnavailableMessage(reason: string): string {
   switch (reason) {
     case "NO_COMPLETE_CROSS_VERIFIED_INPUT_SET":
-      return "当前商品缺少可验证的执行价格或所选盘口模式要求连续 L2，无法安全生成双向持仓输入。";
+      return t("replay.init.hedgeNoVerified");
     case "BINANCE_USDM_EXACT_FUNDING_REQUIRED":
     case "BINANCE_USDM_EXACT_L2_AND_FUNDING_REQUIRED":
-      return "双向持仓仅支持 Binance USD-M，并要求固定的 funding、mark、规则、费率与模拟清单；只有盘口辅助模式才要求历史 L2。";
+      return t("replay.init.hedgeBinanceUsdm");
     default:
-      return `双向持仓输入不可用（${reason}）`;
+      return t("replay.init.hedgeUnavailable", { reason });
   }
 }
 
@@ -67,16 +68,18 @@ function selectionWithPreparedInputs(
   plan: Awaited<ReturnType<ReplayInitialMarketApi["planInitialMarket"]>>,
 ): TrainingRunMarketSelectionPayload {
   if (!plan.history_policy.accepted) {
-    throw new Error(`历史策略不可用：${plan.history_policy.blocked_reason ?? "UNKNOWN"}`);
+    throw new Error(t("replay.init.historyPolicy", {
+      reason: plan.history_policy.blocked_reason ?? "UNKNOWN",
+    }));
   }
   if (plan.historical_book.requested_mode === "BOOK_ASSISTED_REQUIRED"
     && plan.historical_book.capability_state !== "AVAILABLE_EXACT") {
-    throw new Error(`历史盘口不可用：${plan.historical_book.reason}`);
+    throw new Error(t("replay.init.historicalBook", { reason: plan.historical_book.reason }));
   }
   if (plan.account_history.requested_mode === "HISTORICAL_EXACT"
     && (plan.account_history.capability_state !== "AVAILABLE_EXACT"
       || plan.account_history.account_history_ref === null)) {
-    throw new Error(`精确账户历史不可用：${plan.account_history.reason}`);
+    throw new Error(t("replay.init.accountHistory", { reason: plan.account_history.reason }));
   }
   if (plan.hedge_inputs.requested_position_mode === "HEDGE"
     && (plan.hedge_inputs.capability_state !== "AVAILABLE_EXACT"
@@ -107,7 +110,7 @@ export function replayInitialMarketDowngradeConfirmation(
     || !plan.hedge_inputs.fallback_applied) {
     return null;
   }
-  return "将使用 HEDGE_HYBRID：mark/index、规则与费率来自已揭示 K 线代理；历史资金费将关闭（OFF）。这不是交易所精确历史。";
+  return t("replay.init.hedgeHybrid");
 }
 
 export async function prepareReplayInitialMarketSelection({
@@ -176,10 +179,10 @@ export async function selectReplayInitialMarketWithEpochRetry({
         sameMarket(candidate, entry)
       ));
       if (refreshedEntry === undefined || refreshedEntry.selected_base_interval === null) {
-        throw new Error("能力目录刷新后所选商品不再可用");
+        throw new Error(t("replay.init.catalogGone"));
       }
       activeEntry = refreshedEntry;
     }
   }
-  throw new Error("商品初始化重试状态不可达");
+  throw new Error(t("replay.init.retryUnreachable"));
 }

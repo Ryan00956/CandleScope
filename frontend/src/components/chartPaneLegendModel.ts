@@ -1,4 +1,5 @@
 import { sourceTimeFromChartTime } from "../chart-adapter/chartTime.js";
+import { t } from "../i18n/index.js";
 import type { IndicatorDataEntry, IndicatorLine } from "../chart-adapter/chartAdapterTypes.js";
 
 export interface ChartPaneLegendValue {
@@ -64,7 +65,7 @@ function legendLineLabel(line: IndicatorLine, index: number): string {
   const candidate = line.title || line.name || line.outputName || line.id || line.localId || line.indicatorId;
   return typeof candidate === "string" && candidate.trim().length > 0
     ? candidate
-    : `线 ${index + 1}`;
+    : t("legend.line", { n: index + 1 });
 }
 
 function legendLineId(line: IndicatorLine, index: number): string {

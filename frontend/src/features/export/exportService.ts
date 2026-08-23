@@ -1,4 +1,5 @@
 import { toCanvas } from "html-to-image";
+import { t } from "../../i18n/index.js";
 import {
   assertExportPixelBudget,
   buildDefaultWatermark,
@@ -84,12 +85,12 @@ export function canvasToBlob(
   return new Promise((resolve, reject) => {
     canvas.toBlob((blob) => {
       if (!blob) {
-        reject(new Error("浏览器未能生成图片 Blob。"));
+        reject(new Error(t("export.blobFailed")));
         return;
       }
       if (blob.type !== mimeType) {
-        const actualType = blob.type || "未知格式";
-        reject(new Error(`浏览器不支持当前导出格式（期望 ${mimeType}，实际 ${actualType}）。`));
+        const actualType = blob.type || t("export.unknownFormat");
+        reject(new Error(t("export.mimeUnsupported", { expected: mimeType, actual: actualType })));
         return;
       }
       resolve(blob);
@@ -163,7 +164,7 @@ function finalizeCanvas(
   canvas.width = sourceCanvas.width;
   canvas.height = sourceCanvas.height;
   const ctx = canvas.getContext("2d");
-  if (!ctx) throw new Error("无法创建图片画布。浏览器可能不支持 Canvas。 ");
+  if (!ctx) throw new Error(t("export.canvasFailed"));
 
   const background = resolveBackgroundColor(targetElement, options.backgroundColor, options.format);
   if (background || options.format === "jpeg") {
@@ -245,7 +246,7 @@ function cropCapturedCanvas(
   canvas.width = plan.sw;
   canvas.height = plan.sh;
   const ctx = canvas.getContext("2d");
-  if (!ctx) throw new Error("无法创建主窗格导出画布。 ");
+  if (!ctx) throw new Error(t("export.mainCanvasFailed"));
   ctx.drawImage(
     sourceCanvas,
     plan.sx,
@@ -272,7 +273,7 @@ function captureCanvasFallback(
   canvas.width = Math.max(1, Math.round(rect.width * scale));
   canvas.height = Math.max(1, Math.round(rect.height * scale));
   const ctx = canvas.getContext("2d");
-  if (!ctx) throw new Error("无法创建备用图片画布。 ");
+  if (!ctx) throw new Error(t("export.fallbackCanvasFailed"));
 
   const background = resolveBackgroundColor(targetElement, options.backgroundColor, options.format);
   if (background || options.format === "jpeg") {
@@ -287,7 +288,7 @@ function captureCanvasFallback(
       && item.offsetParent !== null);
 
   if (canvases.length === 0) {
-    throw new Error("未找到可导出的图表 Canvas。 ");
+    throw new Error(t("export.noCanvas"));
   }
 
   for (const source of canvases) {
@@ -468,7 +469,7 @@ export async function renderExportImage(
   const options = normalizeExportOptions(rawOptions);
   const targetElement = selectTargetElement(snapshot, options);
   if (!targetElement) {
-    throw new Error("图表尚未就绪，无法导出。 ");
+    throw new Error(t("export.chartNotReady"));
   }
 
   const capturedCanvas = await captureElementToCanvas(targetElement, options);

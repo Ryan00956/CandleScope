@@ -1,3 +1,5 @@
+import { t } from "../../i18n/index.js";
+import { useLocale } from "../../i18n/useLocale.js";
 import type {
     ProxyMode,
     ProxySaveMessage,
@@ -7,13 +9,13 @@ import type {
 interface ProxyModeOption {
     value: ProxyMode;
     icon: string;
-    label: string;
+    labelKey: "settings.proxy.system" | "settings.proxy.custom" | "settings.proxy.none";
 }
 
 const PROXY_MODES: ProxyModeOption[] = [
-    { value: 'system', icon: '🖥️', label: '系统代理' },
-    { value: 'custom', icon: '⚙️', label: '自定义' },
-    { value: 'none', icon: '🚫', label: '不使用' },
+    { value: 'system', icon: '🖥️', labelKey: 'settings.proxy.system' },
+    { value: 'custom', icon: '⚙️', labelKey: 'settings.proxy.custom' },
+    { value: 'none', icon: '🚫', labelKey: 'settings.proxy.none' },
 ];
 
 export interface ProxySettingsPanelProps {
@@ -43,10 +45,11 @@ export default function ProxySettingsPanel({
     onProxyTest,
     onProxySave,
 }: ProxySettingsPanelProps) {
+    useLocale();
     return (
         <div className="st-group">
-            <div className="st-group-title">代理模式</div>
-            <div className="st-group-desc">选择访问交易所 API 的网络代理方式</div>
+            <div className="st-group-title">{t("settings.proxy.title")}</div>
+            <div className="st-group-desc">{t("settings.proxy.desc")}</div>
             <div className="st-theme-grid">
                 {PROXY_MODES.map((mode) => (
                     <button
@@ -55,20 +58,20 @@ export default function ProxySettingsPanel({
                         onClick={() => onProxyModeChange(mode.value)}
                     >
                         <span className="st-theme-icon">{mode.icon}</span>
-                        <span className="st-theme-label">{mode.label}</span>
+                        <span className="st-theme-label">{t(mode.labelKey)}</span>
                     </button>
                 ))}
             </div>
 
             {proxyMode === 'system' && systemProxy && (
                 <div className="st-info-box">
-                    <span className="st-info-label">检测到系统代理:</span>
+                    <span className="st-info-label">{t("settings.proxy.detected")}</span>
                     <code className="st-info-value">{systemProxy}</code>
                 </div>
             )}
             {proxyMode === 'system' && !systemProxy && (
                 <div className="st-info-box st-info-warn">
-                    <span>未检测到系统代理环境变量，将直连</span>
+                    <span>{t("settings.proxy.notDetected")}</span>
                 </div>
             )}
 
@@ -77,7 +80,7 @@ export default function ProxySettingsPanel({
                     <input
                         type="text"
                         className="st-input"
-                        placeholder="http://127.0.0.1:7890 或 socks5://..."
+                        placeholder={t("settings.proxy.placeholder")}
                         value={customProxy}
                         onChange={(event) => onCustomProxyChange(event.target.value)}
                     />
@@ -86,7 +89,7 @@ export default function ProxySettingsPanel({
 
             {effectiveProxy && proxyMode !== 'none' && (
                 <div className="st-info-box">
-                    <span className="st-info-label">当前生效:</span>
+                    <span className="st-info-label">{t("settings.proxy.effective")}</span>
                     <code className="st-info-value">{effectiveProxy}</code>
                 </div>
             )}
@@ -97,14 +100,14 @@ export default function ProxySettingsPanel({
                     onClick={onProxyTest}
                     disabled={proxyLoading}
                 >
-                    {proxyLoading ? '⏳ 测试中...' : '🔍 测试连接'}
+                    {proxyLoading ? t("settings.proxy.testing") : t("settings.proxy.test")}
                 </button>
                 <button
                     className="st-btn st-btn-primary"
                     onClick={onProxySave}
                     disabled={proxyLoading}
                 >
-                    {proxyLoading ? '⏳ ...' : '💾 保存代理'}
+                    {proxyLoading ? t("settings.proxy.saving") : t("settings.proxy.save")}
                 </button>
             </div>
 
@@ -112,7 +115,7 @@ export default function ProxySettingsPanel({
                 <div className={`st-result ${proxyTestResult.success ? 'st-result-ok' : proxyTestResult.partial ? 'st-result-warn' : 'st-result-fail'}`}>
                     <span>{proxyTestResult.success ? '✅' : proxyTestResult.partial ? '⚠️' : '❌'} {proxyTestResult.message}</span>
                     {proxyTestResult.proxy_used && (
-                        <div className="st-result-detail">代理: {proxyTestResult.proxy_used}</div>
+                        <div className="st-result-detail">{t("settings.proxy.used", { proxy: proxyTestResult.proxy_used })}</div>
                     )}
                     {Array.isArray(proxyTestResult.results) && proxyTestResult.results.length > 0 && (
                         <div className="st-exchange-results">

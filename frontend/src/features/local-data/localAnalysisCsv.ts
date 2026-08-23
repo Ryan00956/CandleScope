@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import {
   LOCAL_ANALYSIS_KIND_COLORS,
   type LocalAnalysisEventDraft,
@@ -115,10 +116,10 @@ export function parseEventCsvText(input: string): EventCsvDocument {
         quoteClosed = false;
         if (character === "\r" && text[index + 1] === "\n") index += 1;
       } else {
-        throw new Error("CSV 引号字段结束后只能出现分隔符或换行");
+        throw new Error(t("local.err.quoteAfter"));
       }
     } else if (character === "\"") {
-      if (field.length > 0) throw new Error("CSV 未加引号的字段中包含引号");
+      if (field.length > 0) throw new Error(t("local.err.unquotedQuote"));
       quoted = true;
     } else if (character === ",") {
       cells.push(field);
@@ -132,18 +133,18 @@ export function parseEventCsvText(input: string): EventCsvDocument {
       field += character;
     }
   }
-  if (quoted) throw new Error("CSV 存在未闭合的引号字段");
+  if (quoted) throw new Error(t("local.err.unclosedQuote"));
   if (field.length > 0 || cells.length > 0 || quoteClosed) pushRecord(records, cells, field);
-  if (records.length === 0) throw new Error("事件 CSV 为空");
+  if (records.length === 0) throw new Error(t("local.err.empty"));
 
   const first = records[0];
-  if (first === undefined) throw new Error("事件 CSV 缺少表头");
+  if (first === undefined) throw new Error(t("local.err.noHeader"));
   const headers = first.map((header) => header.trim());
-  if (headers.length > 100) throw new Error("事件 CSV 最多支持 100 列");
-  if (headers.some((header) => header.length === 0)) throw new Error("事件 CSV 表头不能为空");
+  if (headers.length > 100) throw new Error(t("local.err.maxCols"));
+  if (headers.some((header) => header.length === 0)) throw new Error(t("local.err.emptyHeader"));
   const normalized = headers.map((header) => header.toLocaleLowerCase());
   if (new Set(normalized).size !== normalized.length) {
-    throw new Error("事件 CSV 表头存在重复列（忽略大小写）");
+    throw new Error(t("local.err.dupHeader"));
   }
 
   const rows: EventCsvRow[] = [];
@@ -151,19 +152,19 @@ export function parseEventCsvText(input: string): EventCsvDocument {
     const record = records[recordIndex];
     if (record === undefined || record.every((value) => value.trim().length === 0)) continue;
     if (record.length > headers.length) {
-      throw new Error(`事件 CSV 第 ${recordIndex + 1} 条记录的字段数超过表头`);
+      throw new Error(t("local.err.rowOverflow", { row: recordIndex + 1 }));
     }
     if (record.some((value) => value.length > 8_000)) {
-      throw new Error(`事件 CSV 第 ${recordIndex + 1} 条记录包含超过 8000 字符的字段`);
+      throw new Error(t("local.err.fieldTooLong", { row: recordIndex + 1 }));
     }
     const values: Record<string, string> = {};
     headers.forEach((header, columnIndex) => { values[header] = record[columnIndex] ?? ""; });
     rows.push({ rowNumber: recordIndex + 1, values: Object.freeze(values) });
     if (rows.length > MAX_EVENT_CSV_ROWS) {
-      throw new Error(`事件 CSV 最多支持 ${MAX_EVENT_CSV_ROWS} 条数据`);
+      throw new Error(t("local.err.maxRows", { count: MAX_EVENT_CSV_ROWS }));
     }
   }
-  if (rows.length === 0) throw new Error("事件 CSV 没有数据行");
+  if (rows.length === 0) throw new Error(t("local.err.noData"));
   return { headers: Object.freeze(headers), rows: Object.freeze(rows) };
 }
 
@@ -180,23 +181,27 @@ export function suggestEventCsvMapping(headers: readonly string[]): EventCsvMapp
 
 function parseTimestamp(value: string, unit: EventCsvTimestampUnit): number {
   const text = value.trim();
-  if (!text) throw new Error("时间为空");
+  if (!text) throw new Error(t("local.err.timeEmpty"));
   const numeric = /^[+-]?\d+(?:\.\d+)?$/.test(text) ? Number(text) : null;
   if (unit !== "iso" && numeric !== null) {
-    if (!Number.isFinite(numeric) || numeric <= 0) throw new Error("时间不是正数");
+    if (!Number.isFinite(numeric) || numeric <= 0) throw new Error(t("local.err.timeNotPositive"));
     const milliseconds = unit === "ms" || (unit === "auto" && numeric >= 100_000_000_000)
       ? numeric
       : numeric * 1_000;
     const rounded = Math.round(milliseconds);
-    if (!Number.isSafeInteger(rounded)) throw new Error("时间超出安全范围");
+    if (!Number.isSafeInteger(rounded)) throw new Error(t("local.err.timeUnsafe"));
     return rounded;
   }
-  if (unit === "s" || unit === "ms") throw new Error(`时间不是有效的${unit === "s" ? "秒" : "毫秒"}时间戳`);
+  if (unit === "s" || unit === "ms") {
+    throw new Error(t("local.err.timeNotUnix", {
+      unit: t(unit === "s" ? "local.err.unitS" : "local.err.unitMs"),
+    }));
+  }
   if (!/(?:z|[+-]\d{2}(?::?\d{2})?)$/i.test(text)) {
-    throw new Error("ISO 时间必须显式包含 Z 或时区偏移，不能使用电脑本地时区猜测");
+    throw new Error(t("local.err.isoNeedTz"));
   }
   const parsed = Date.parse(text);
-  if (!Number.isFinite(parsed) || parsed <= 0) throw new Error("ISO 时间无效");
+  if (!Number.isFinite(parsed) || parsed <= 0) throw new Error(t("local.err.isoInvalid"));
   return parsed;
 }
 
@@ -219,10 +224,10 @@ export function prepareEventCsv(
   defaultKind: LocalAnalysisEventKind,
 ): PreparedEventCsv {
   if (mapping.time === null || !document.headers.includes(mapping.time)) {
-    throw new Error("请选择事件时间列");
+    throw new Error(t("local.err.needTimeCol"));
   }
   const selected = Object.values(mapping).filter((value): value is string => value !== null);
-  if (new Set(selected).size !== selected.length) throw new Error("同一 CSV 列不能映射到多个事件字段");
+  if (new Set(selected).size !== selected.length) throw new Error(t("local.err.dupMapping"));
   const accepted: PreparedEventCsvRow[] = [];
   const rejected: EventCsvRejection[] = [];
   const mappedHeaders = new Set(selected);
@@ -233,14 +238,14 @@ export function prepareEventCsv(
       const resolvedKind = resolveKind(rawKind, defaultKind);
       const rawPrice = mapping.price === null ? "" : row.values[mapping.price] ?? "";
       const price = rawPrice.trim() === "" ? null : Number(rawPrice);
-      if (price !== null && !Number.isFinite(price)) throw new Error("价格不是有限数值");
+      if (price !== null && !Number.isFinite(price)) throw new Error(t("local.err.priceNaN"));
       const label = mapping.label === null ? "" : (row.values[mapping.label] ?? "").trim();
       const note = mapping.note === null ? "" : (row.values[mapping.note] ?? "").trim();
-      if (label.length > 160) throw new Error("标题超过 160 字符");
-      if (note.length > 8_000) throw new Error("备注超过 8000 字符");
+      if (label.length > 160) throw new Error(t("local.err.labelLong"));
+      if (note.length > 8_000) throw new Error(t("local.err.noteLong"));
       const rawColor = mapping.color === null ? "" : (row.values[mapping.color] ?? "").trim();
       const color = rawColor || LOCAL_ANALYSIS_KIND_COLORS[resolvedKind.kind];
-      if (!/^#[0-9a-f]{6}$/i.test(color)) throw new Error("颜色必须是 #RRGGBB");
+      if (!/^#[0-9a-f]{6}$/i.test(color)) throw new Error(t("local.err.colorHex"));
       const originalTime = row.values[mapping.time] ?? "";
       const inputTimeMs = parseTimestamp(originalTime, timestampUnit);
       const extra: Record<string, unknown> = {
@@ -260,7 +265,7 @@ export function prepareEventCsv(
     } catch (reason) {
       rejected.push({
         rowNumber: row.rowNumber,
-        reason: reason instanceof Error ? reason.message : "无法解析该行",
+        reason: reason instanceof Error ? reason.message : t("local.err.rowParse"),
       });
     }
   }
@@ -269,10 +274,10 @@ export function prepareEventCsv(
 
 export async function sha256EventCsv(bytes: ArrayBuffer): Promise<string> {
   if (bytes.byteLength > MAX_EVENT_CSV_BYTES) {
-    throw new Error(`事件 CSV 不能超过 ${MAX_EVENT_CSV_BYTES / 1024 / 1024} MB`);
+    throw new Error(t("local.err.tooLarge", { mb: MAX_EVENT_CSV_BYTES / 1024 / 1024 }));
   }
   if (typeof crypto === "undefined" || crypto.subtle === undefined) {
-    throw new Error("当前浏览器不支持事件 CSV 去重所需的 SHA-256");
+    throw new Error(t("local.err.noSha"));
   }
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   return Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, "0")).join("");

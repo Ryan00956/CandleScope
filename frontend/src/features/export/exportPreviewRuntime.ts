@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { t } from "../../i18n/index.js";
 import {
   buildExportPresentationKey,
   DEFAULT_EXPORT_OPTIONS,
@@ -209,7 +210,7 @@ export function useExportPreviewRuntime({
 
     try {
       if (typeof chartSurfaceActions?.getExportSnapshot !== "function") {
-        throw new Error("图表尚未就绪，无法生成预览。 ");
+        throw new Error(t("export.chartNotReadyPreview"));
       }
 
       if (prepareDrawingExport) {
@@ -220,7 +221,7 @@ export function useExportPreviewRuntime({
             signal: runAbortController.signal,
           }),
           5_250,
-          "绘图导出准备超时，未截取可能处于半更新状态的画面。 ",
+          t("export.drawPrepareTimeout"),
         );
         drawingTarget = drawingLease
           ? Object.freeze({
@@ -253,7 +254,7 @@ export function useExportPreviewRuntime({
               valid,
             );
             if (!valid) {
-              throw new Error("绘图在截图期间发生变化，已丢弃过期预览，请重试。 ");
+              throw new Error(t("export.drawChanged"));
             }
             await captureLease.restore();
             drawingExportInstrumentation?.recordLeaseRestored(exportLifecycleTransaction);
@@ -261,7 +262,7 @@ export function useExportPreviewRuntime({
           },
         }),
         30_000,
-        "预览生成超时，请尝试降低缩放倍率、切换到图表范围，或稍后重试。 ",
+        t("export.previewTimeout"),
       );
       drawingExportInstrumentation?.recordImageEncoded(exportLifecycleTransaction, result);
       const isLatest = requestKey === latestOptionsKeyRef.current;
@@ -291,7 +292,7 @@ export function useExportPreviewRuntime({
     } catch (err: unknown) {
       const isLatest = requestKey === latestOptionsKeyRef.current;
       if (mountedRef.current && openRef.current && isLatest) {
-        setError(errorMessage(err, "预览生成失败，请重试。 "));
+        setError(errorMessage(err, t("export.previewFailedRetry")));
       }
       return null;
     } finally {

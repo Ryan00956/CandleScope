@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { t } from "../../i18n/index.js";
 import { API_BASE, httpBaseToWsBase } from "../../services/apiConfig.js";
 import { useOrderBookPreferences } from "./orderBookPreferencesStore.js";
 import { createOrderBookStore } from "./orderBookStore.js";
@@ -28,11 +29,11 @@ function normalizeIdentity(identity: OrderBookIdentity): OrderBookIdentity {
 }
 
 function supportMessage(identity: OrderBookIdentity): string | null {
-  if (identity.exchange !== "binance") return "订单簿目前仅支持 Binance";
+  if (identity.exchange !== "binance") return t("orderBook.rt.binanceOnly");
   if (identity.marketType !== "spot" && identity.marketType !== "futures") {
-    return "订单簿目前仅支持 Binance 现货与 U 本位合约";
+    return t("orderBook.rt.binanceMarkets");
   }
-  if (!identity.symbol) return "请选择交易品种";
+  if (!identity.symbol) return t("orderBook.rt.pickSymbol");
   return null;
 }
 
@@ -77,7 +78,7 @@ export function useOrderBookRuntime({
       return undefined;
     }
     if (!enabled) {
-      store.reset("idle", orderBookOpen ? "订单簿不可用" : "盘口面板未打开");
+      store.reset("idle", orderBookOpen ? t("orderBook.rt.unavailable") : t("orderBook.rt.panelClosed"));
       return undefined;
     }
     const wsBase = httpBaseToWsBase(API_BASE);

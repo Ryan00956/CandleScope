@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import {
   canResolveIntervalFromNativeValues,
   canonicalizeIntervalValue,
@@ -84,8 +85,8 @@ export function getFullSubscriptionResourceSummary({
     nativeCount: nativeValues.length,
     customCount: customValues.length,
     totalIntervals,
-    shortText: totalIntervals > 0 ? `ticker + ${totalIntervals}周期` : "ticker",
-    tooltip: `完全订阅：ticker + ${nativeValues.length} native + ${customValues.length} custom`,
+    shortText: totalIntervals > 0 ? t("watchlist.fullSummary", { n: totalIntervals }) : "ticker",
+    tooltip: t("watchlist.fullTooltip", { native: nativeValues.length, custom: customValues.length }),
   };
 }
 

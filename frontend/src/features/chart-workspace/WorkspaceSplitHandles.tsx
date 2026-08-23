@@ -1,4 +1,6 @@
 import { useRef, type RefObject } from "react";
+import { t } from "../../i18n/index.js";
+import { useLocale } from "../../i18n/useLocale.js";
 import type { WorkspaceLayoutSplitGeometry } from "./chartWorkspaceGeometry.js";
 import { workspaceLayoutRectStyle } from "./chartWorkspaceGeometry.js";
 import {
@@ -28,6 +30,7 @@ export default function WorkspaceSplitHandle({
   onPreview,
   onCommit,
 }: WorkspaceSplitHandleProps) {
+  useLocale();
   const dragRef = useRef<DragState | null>(null);
   const orientation = split.direction === "columns" ? "vertical" : "horizontal";
   const commitRatio = (nextRatio: number) => {
@@ -40,7 +43,7 @@ export default function WorkspaceSplitHandle({
       data-split-id={split.splitId}
       data-split-direction={split.direction}
       role="separator"
-      aria-label={split.direction === "columns" ? "调整左右图表宽度" : "调整上下图表高度"}
+      aria-label={split.direction === "columns" ? t("workspace.resizeCols") : t("workspace.resizeRows")}
       aria-orientation={orientation}
       aria-valuemin={Math.round(MIN_CHART_SPLIT_RATIO * 100)}
       aria-valuemax={Math.round(MAX_CHART_SPLIT_RATIO * 100)}

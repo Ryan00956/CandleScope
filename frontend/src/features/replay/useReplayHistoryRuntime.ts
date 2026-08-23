@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { t } from "../../i18n/index.js";
 import type { LoadMoreLeft } from "../market-data/useChartLoadMoreLeft.js";
 import type { SurfaceViewportSnapshot } from "../chart-representation/chartRepresentationTypes.js";
 import type { ReplayDigest } from "./replayTypes.js";
@@ -318,12 +319,15 @@ export function useReplayHistoryRuntime(
         pendingViewportBeforeMs,
       );
       const gapNotice = page.excluded_ranges.length > 0
-        ? `已跨过 ${page.excluded_ranges.length} 段交易所无 K 线区间；图表保留空白，没有补造 K 线。`
+        ? t("replay.history.excludedGaps", { count: page.excluded_ranges.length })
         : null;
       const nextNotice = !page.has_more
         ? (page.history_policy.visible_history_lookback.mode === "DURATION"
-          ? `已到旧 Run 的固定历史边界：开始前 ${page.history_policy.visible_history_rows} 根 ${config?.base_interval ?? "基础周期"} K 线。新建 Run 默认可按需翻到数据起点。`
-          : "已到该归档校验过的数据起点；中间的停牌或维护缺口均保持为空白。")
+          ? t("replay.history.oldRunBound", {
+            count: page.history_policy.visible_history_rows,
+            interval: config?.base_interval ?? t("replay.history.baseInterval"),
+          })
+          : t("replay.history.archiveStart"))
         : gapNotice;
       setHistoryState((current) => current.key === historyKey ? {
         ...current,
@@ -338,7 +342,7 @@ export function useReplayHistoryRuntime(
       if (cause instanceof DOMException && cause.name === "AbortError") return;
       setHistoryState((current) => current.key === historyKey ? {
         ...current,
-        error: cause instanceof Error ? cause.message : "回放历史回补失败",
+        error: cause instanceof Error ? cause.message : t("replay.history.loadFailed"),
         hasMore: false,
         viewportTransferUnavailable: pendingViewportBeforeMs !== null,
       } : current);

@@ -12,6 +12,7 @@ import { collectFrontendCacheDiagnostics, collectFrontendCacheDiagnosticsAsync }
 import { drainFrontendCacheAccessEvents } from "../cache-gc/cacheAccessRuntime";
 import { planFrontendGc } from "../cache-gc/cachePolicy";
 import { executeFrontendGcPlan } from "../cache-gc/cacheTrim";
+import { t } from "../../i18n/index.js";
 import type { ChartSettings } from "./chartAppearanceSettings.js";
 import type {
   CacheDiagnostics,
@@ -194,7 +195,7 @@ export function useCacheDiagnosticsRuntime({
       setBackendDiagnostics(isRecord(backend) ? backend : {});
     } catch (err: unknown) {
       if (isRecord(err) && err.name === "AbortError") return;
-      setError(errorMessage(err, "缓存诊断加载失败"));
+      setError(errorMessage(err, t("core.error.cacheDiagnostics")));
       setBackendDiagnostics(null);
     } finally {
       if (!signal?.aborted) setLoading(false);
@@ -224,7 +225,7 @@ export function useCacheDiagnosticsRuntime({
       setBackendMemoryGcResult(null);
       return plan;
     } catch (err: unknown) {
-      setError(errorMessage(err, "后端内存 GC 预估失败"));
+      setError(errorMessage(err, t("core.error.backendGcEstimate")));
       return null;
     } finally {
       setLoading(false);
@@ -242,7 +243,7 @@ export function useCacheDiagnosticsRuntime({
       setBackendDiagnostics(isRecord(backend) ? backend : {});
       return result;
     } catch (err: unknown) {
-      setError(errorMessage(err, "后端内存 GC 执行失败"));
+      setError(errorMessage(err, t("core.error.backendGcRun")));
       return null;
     } finally {
       setLoading(false);
@@ -268,7 +269,7 @@ export function useCacheDiagnosticsRuntime({
       setStorageVacuumResult(null);
       return plan;
     } catch (err: unknown) {
-      setError(errorMessage(err, "数据库 GC 预估失败"));
+      setError(errorMessage(err, t("core.error.storageGcEstimate")));
       return null;
     } finally {
       setLoading(false);
@@ -296,7 +297,7 @@ export function useCacheDiagnosticsRuntime({
       setBackendDiagnostics(isRecord(backend) ? backend : {});
       return result;
     } catch (err: unknown) {
-      setError(errorMessage(err, "数据库 GC 执行失败"));
+      setError(errorMessage(err, t("core.error.storageGcRun")));
       return null;
     } finally {
       setLoading(false);
@@ -314,7 +315,7 @@ export function useCacheDiagnosticsRuntime({
       setBackendDiagnostics(isRecord(backend) ? backend : {});
       return result;
     } catch (err: unknown) {
-      setError(errorMessage(err, "数据库 VACUUM 失败"));
+      setError(errorMessage(err, t("core.error.storageVacuum")));
       return null;
     } finally {
       setLoading(false);

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { t } from "../../i18n/index.js";
 
 import {
   SemanticViewActionSampler,
@@ -181,7 +182,7 @@ export function useReplayIntegrityRuntime(
         setError(null);
       } catch (cause) {
         if (requestGeneration !== generation.current) return;
-        setError(cause instanceof Error ? cause.message : "训练完整性数据加载失败");
+        setError(cause instanceof Error ? cause.message : t("replay.rt.integrityLoad"));
       } finally {
         if (requestGeneration === generation.current) {
           setOperation((current) => current === "refresh" ? null : current);
@@ -282,7 +283,7 @@ export function useReplayIntegrityRuntime(
       await refresh();
       return result;
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "完整性策略命令失败");
+      setError(cause instanceof Error ? cause.message : t("replay.rt.integrityCmd"));
       throw cause;
     } finally {
       pendingPolicy.current = false;
@@ -354,7 +355,7 @@ export function useReplayIntegrityRuntime(
       setDrawingLoaded(true);
       setBudget(hydrated.budget);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "绘图复盘证据提交失败");
+      setError(cause instanceof Error ? cause.message : t("replay.rt.drawingCommit"));
       throw cause;
     } finally {
       setOperation((current) => current === "drawing" ? null : current);
@@ -374,7 +375,7 @@ export function useReplayIntegrityRuntime(
       );
       setBudget(response.budget);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "复盘标记提交失败");
+      setError(cause instanceof Error ? cause.message : t("replay.rt.reviewMark"));
       throw cause;
     } finally {
       setOperation((current) => current === "marker" ? null : current);
@@ -393,7 +394,7 @@ export function useReplayIntegrityRuntime(
       setBudget(response.budget);
       return response;
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "只读 Review 加载失败");
+      setError(cause instanceof Error ? cause.message : t("replay.rt.reviewLoad"));
       throw cause;
     } finally {
       setOperation((current) => current === "review" ? null : current);
@@ -448,7 +449,7 @@ export function useReplayIntegrityRuntime(
       setBudget(response.budget);
       return response;
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Review 游标控制失败");
+      setError(cause instanceof Error ? cause.message : t("replay.rt.reviewCursor"));
       throw cause;
     } finally {
       pendingReviewControl.current = false;
@@ -489,7 +490,7 @@ export function useReplayIntegrityRuntime(
       setForked(response);
       return response;
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Review checkpoint Fork 失败");
+      setError(cause instanceof Error ? cause.message : t("replay.rt.reviewFork"));
       throw cause;
     } finally {
       setOperation((current) => current === "fork" ? null : current);

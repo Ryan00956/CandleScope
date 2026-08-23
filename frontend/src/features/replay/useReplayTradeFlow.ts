@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { t } from "../../i18n/index.js";
 
 import {
   addReplayTradeFlowDecimals,
@@ -102,7 +103,7 @@ export function useReplayTradeFlow({
         cvd: "0",
         pageDelta: "0",
         fidelity: "CLEARED_FAIL_CLOSED",
-        error: cause instanceof Error ? cause.message : "订单流连续性校验失败",
+        error: cause instanceof Error ? cause.message : t("replay.dock.flowFail"),
       });
     });
     return () => abort.abort();

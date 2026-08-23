@@ -1,4 +1,4 @@
-import { PYTHON_HOST_OWNS_COPY } from "./backtestFlags.js";
+import { t, type MessageKey } from "../../i18n/index.js";
 
 export const PYTHON_STUDIO_STORAGE_KEY = "candlescope.python-studio.v1";
 
@@ -11,7 +11,7 @@ export interface PythonBundleFileMap {
 export interface PythonTemplate {
   id: "sma_cross" | "rsi_reversion" | "breakout";
   label: string;
-  description: string;
+  descriptionKey: MessageKey;
   files: PythonBundleFileMap;
 }
 
@@ -75,16 +75,24 @@ export const PYTHON_UNSUPPORTED = [
   "intrabar unique path on BAR_APPROX",
 ] as const;
 
-export const TRUSTED_LOCAL_FACTS = [
-  "本机 Python 进程不经过 AppContainer 隔离。",
-  "策略代码可以访问该进程可见的本地解释器与文件系统。",
-  "必须同时设置 BACKTEST_PYTHON_TRUSTED_LOCAL_ENABLED=1。",
-  "Host 仍拥有订单、成交、费用、资金费、账户、报告和 Study。",
-  "确认表示接受上述权限事实，不是含糊的“继续”。",
-] as const;
+export const TRUSTED_LOCAL_FACT_KEYS = [
+  "python.fact.noSandbox",
+  "python.fact.fsAccess",
+  "python.fact.flagRequired",
+  "python.fact.hostOwns",
+  "python.fact.notContinue",
+] as const satisfies readonly MessageKey[];
 
-export const TRUSTED_LOCAL_CONFIRM_LABEL =
-  "我确认以上 TRUSTED_LOCAL 权限事实，并接受非沙箱本机进程";
+export function trustedLocalFacts(): readonly string[] {
+  return TRUSTED_LOCAL_FACT_KEYS.map((key) => t(key));
+}
+
+export function trustedLocalConfirmLabel(): string {
+  return t("python.confirmTrusted");
+}
+
+export const TRUSTED_LOCAL_FACTS = trustedLocalFacts();
+export const TRUSTED_LOCAL_CONFIRM_LABEL = trustedLocalConfirmLabel();
 
 const LOCK = `# V1 lock: standard library + candlescope-backtest-sdk only.
 candlescope-backtest-sdk==0.1.0
@@ -233,7 +241,7 @@ export const PYTHON_TEMPLATES: readonly PythonTemplate[] = [
   {
     id: "sma_cross",
     label: "SMA Cross",
-    description: "快慢均线交叉，输出 TARGET_POSITION。模板会生成 strategy.json。",
+    descriptionKey: "python.tpl.sma",
     files: {
       "strategy.json": manifest("SMA Cross", {
         outputModes: ["TARGET_POSITION"],
@@ -251,7 +259,7 @@ export const PYTHON_TEMPLATES: readonly PythonTemplate[] = [
   {
     id: "rsi_reversion",
     label: "RSI Reversion",
-    description: "RSI 均值回归，输出 SIGNAL。模板会生成 strategy.json。",
+    descriptionKey: "python.tpl.rsi",
     files: {
       "strategy.json": manifest("RSI Reversion", {
         outputModes: ["SIGNAL"],
@@ -270,7 +278,7 @@ export const PYTHON_TEMPLATES: readonly PythonTemplate[] = [
   {
     id: "breakout",
     label: "Donchian Breakout",
-    description: "Donchian 突破，输出 TARGET_POSITION。模板会生成 strategy.json。",
+    descriptionKey: "python.tpl.breakout",
     files: {
       "strategy.json": manifest("Donchian Breakout", {
         outputModes: ["TARGET_POSITION"],
@@ -295,7 +303,7 @@ export function isPythonRevision(strategy: { provider_kind?: string } | null | u
 }
 
 export function hostOwnsOrdersCopy(): string {
-  return PYTHON_HOST_OWNS_COPY;
+  return t("python.hostOwns");
 }
 
 function crc32(bytes: Uint8Array): number {
@@ -479,11 +487,11 @@ export function mapStudioFailure(error: unknown): StudioFailure {
     }
   } catch {
     if (code === "SANDBOX_UNAVAILABLE") {
-      nextStep = "SANDBOXED_LOCAL 在 AppContainer 不可用时失败关闭。若已启用 TRUSTED_LOCAL flag，请确认权限事实后改用 TRUSTED_LOCAL。";
+      nextStep = t("python.next.sandbox");
     } else if (code === "TRUSTED_LOCAL_DISABLED" || code === "TRUSTED_LOCAL_UNCONFIRMED") {
-      nextStep = "不要使用含糊的继续按钮。先打开 BACKTEST_PYTHON_TRUSTED_LOCAL_ENABLED=1，再确认权限事实。";
+      nextStep = t("python.next.trusted");
     } else if (code === "FLAG_DISABLED") {
-      nextStep = "Python 入口默认关闭；不要为了本机试用打开生产 flags。";
+      nextStep = t("python.next.flag");
     }
   }
   return { code, message, line, column, nextStep };
@@ -514,12 +522,18 @@ export function assessCoverage(input: {
     warmupRows: input.warmupRows,
     snapshotRows: input.snapshotRows,
     reason: !windowOk
-      ? "时间窗口无效，无法判断数据覆盖。"
+      ? t("python.cover.badWindow")
       : input.snapshotRows <= 0
-        ? "还没有已验证的不可变快照。"
+        ? t("python.cover.noSnapshot")
         : input.snapshotRows <= input.warmupRows
-          ? `快照 ${input.snapshotRows} 行不足以覆盖 warmup ${input.warmupRows} 行。`
-          : `数据覆盖 ${input.snapshotRows} 行，warmup ${input.warmupRows} 行，可以首次运行。`,
+          ? t("python.cover.warmup", {
+            snapshot: input.snapshotRows,
+            warmup: input.warmupRows,
+          })
+          : t("python.cover.ok", {
+            snapshot: input.snapshotRows,
+            warmup: input.warmupRows,
+          }),
   };
 }
 

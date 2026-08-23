@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { getLocale, t } from "../../i18n/index.js";
+import { useLocale } from "../../i18n/useLocale.js";
 import type { FormEvent } from "react";
 import { defaultBacktestApi } from "./backtestApi.js";
 import type {
@@ -8,7 +10,6 @@ import type {
 } from "./backtestApi.js";
 import BacktestResultChart, { EquityCurve } from "./BacktestResultChart.js";
 import {
-  PYTHON_HOST_OWNS_COPY,
   isBacktestEntryEnabled,
   isPythonStrategyEntryEnabled,
 } from "./backtestFlags.js";
@@ -16,6 +17,7 @@ import PythonStudioPanel from "./PythonStudioPanel.js";
 import {
   composePythonExport,
   emptyReportIsHidden,
+  hostOwnsOrdersCopy,
   isPythonRevision,
   persistPythonStudioState,
   pythonStudyParameterSpace,
@@ -53,7 +55,7 @@ const DEFAULT_COMMAND_SOURCE = `{
 
 function timestampLabel(value: number | null | undefined): string {
   if (value === null || value === undefined || !Number.isFinite(value)) return "—";
-  return new Date(value).toLocaleString();
+  return new Date(value).toLocaleString(getLocale());
 }
 
 function hashLabel(value: string | null | undefined): string {
@@ -75,12 +77,13 @@ function boundedRows<T>(rows: readonly T[], limit = 1_000): readonly T[] {
 }
 
 function RsiTracePane({ items }: { items: Array<{ payload: Record<string, unknown> }> }) {
+  useLocale();
   const values = items.map((item) => Number(item.payload.rsi)).filter(Number.isFinite).slice(-500);
-  if (values.length < 2) return <p className="backtest-empty">启用 debug trace 后显示 RSI pane。</p>;
+  if (values.length < 2) return <p className="backtest-empty">{t("backtest.rsiEmpty")}</p>;
   const points = values.map((value, index) => `${(index / (values.length - 1)) * 1000},${100 - value}`).join(" ");
   return <div className="backtest-rsi-pane" data-testid="rsi-trace-pane">
-    <span>RSI · 当前页最多 500 点</span>
-    <svg viewBox="0 0 1000 100" preserveAspectRatio="none" aria-label="RSI 指标 pane">
+    <span>{t("backtest.rsiMax")}</span>
+    <svg viewBox="0 0 1000 100" preserveAspectRatio="none" aria-label={t("backtest.rsiAria")}>
       <line x1="0" x2="1000" y1="30" y2="30" /><line x1="0" x2="1000" y1="70" y2="70" />
       <polyline points={points} fill="none" stroke="#a78bfa" strokeWidth="2" vectorEffect="non-scaling-stroke" />
     </svg>
@@ -88,6 +91,7 @@ function RsiTracePane({ items }: { items: Array<{ payload: Record<string, unknow
 }
 
 export default function BacktestApp() {
+  const locale = useLocale();
   const enabled = useMemo(() => isBacktestEntryEnabled(), []);
   const pythonEnabled = useMemo(() => isPythonStrategyEntryEnabled(), []);
   const restoredStudio = useMemo(() => restorePythonStudioState(pythonEnabled), [pythonEnabled]);
@@ -105,7 +109,7 @@ export default function BacktestApp() {
   const [rsiOverbought, setRsiOverbought] = useState(70);
   const [schemaParameters, setSchemaParameters] = useState<Record<string, string | number | boolean>>({});
   const [strategyRevisionId, setStrategyRevisionId] = useState(SMA_REVISION);
-  const [revisionName, setRevisionName] = useState("RSI24 研究版");
+  const [revisionName, setRevisionName] = useState(() => t("backtest.defaultRevision"));
   const [revisionLanguage, setRevisionLanguage] = useState("BUILTIN_TEMPLATE");
   const [revisionSource, setRevisionSource] = useState("");
   const [smokePassed, setSmokePassed] = useState(false);
@@ -165,7 +169,7 @@ export default function BacktestApp() {
   const [selectedStudyId, setSelectedStudyId] = useState<string | null>(null);
   const [studyComparison, setStudyComparison] = useState<BacktestStudyComparison | null>(null);
   const [reviewBridge, setReviewBridge] = useState<Record<string, unknown> | null>(null);
-  const [studyHypothesis, setStudyHypothesis] = useState("RSI24 超卖做多、超买做空的参数邻域能在样本外保持稳定");
+  const [studyHypothesis, setStudyHypothesis] = useState(() => t("backtest.defaultHypothesis"));
   const [studyParameterSpace, setStudyParameterSpace] = useState('{"length":[20,24],"oversold":["25","30"],"overbought":["70"]}');
   const [studyTrainDays, setStudyTrainDays] = useState(110);
   const [studyTestDays, setStudyTestDays] = useState(20);
@@ -262,16 +266,16 @@ export default function BacktestApp() {
         base_revision_id: revisionLanguage === "BUILTIN_TEMPLATE" ? RSI_WILDER_LONG_SHORT_REVISION : null,
         source_text: revisionSource,
         parameter_schema: revisionLanguage === "BUILTIN_TEMPLATE" ? [
-          { name: "length", label: "RSI 长度", type: "integer", default: 24, minimum: 2 },
-          { name: "oversold", label: "超卖", type: "number", default: 30 },
-          { name: "overbought", label: "超买", type: "number", default: 70 },
-          { name: "trigger_mode", label: "触发", type: "enum", default: "LEVEL_TARGET_V1", options: ["LEVEL_TARGET_V1"] },
-          { name: "debug_trace", label: "保存分页信号 trace", type: "boolean", default: true },
+          { name: "length", label: t("backtest.rsiLen"), type: "integer", default: 24, minimum: 2 },
+          { name: "oversold", label: t("backtest.oversold"), type: "number", default: 30 },
+          { name: "overbought", label: t("backtest.overbought"), type: "number", default: 70 },
+          { name: "trigger_mode", label: t("backtest.trigger"), type: "enum", default: "LEVEL_TARGET_V1", options: ["LEVEL_TARGET_V1"] },
+          { name: "debug_trace", label: t("backtest.debugTrace"), type: "boolean", default: true },
         ] : [],
       });
       const next = await defaultBacktestApi.capabilities();
       setCapabilities(next); setStrategyRevisionId(revision.revision_id); setSmokePassed(false);
-      setNotice(`已编译并保存 ${revision.revision_id}；源码、依赖、runtime 与 hash 已冻结。`);
+      setNotice(t("backtest.noticeCompiled", { id: revision.revision_id }));
     } catch (reason) { setError(errorMessage(reason)); } finally { setLoading(false); }
   }, [revisionLanguage, revisionName, revisionSource]);
 
@@ -284,7 +288,7 @@ export default function BacktestApp() {
         dataset_id: selectedDataset.dataset_id, snapshot_hash: snapshot.snapshot_hash,
         start_time_ms: startTimeMs, end_time_ms: maxWindow, parameters: schemaParameters,
       });
-      setSmokePassed(true); setNotice("小窗口 smoke 已通过，可以创建长 Run。");
+      setSmokePassed(true); setNotice(t("backtest.noticeSmoke"));
     } catch (reason) { setError(errorMessage(reason)); } finally { setLoading(false); }
   }, [endTimeMs, schemaParameters, selectedDataset, snapshot, startTimeMs, strategyRevisionId]);
 
@@ -300,9 +304,9 @@ export default function BacktestApp() {
   const handleCopyRevision = useCallback(async () => {
     setLoading(true); setError(null);
     try {
-      const copied = await defaultBacktestApi.copyStrategyRevision(strategyRevisionId, `${revisionName} 副本`);
+      const copied = await defaultBacktestApi.copyStrategyRevision(strategyRevisionId, t("backtest.copySuffix", { name: revisionName }));
       await refreshCapabilities(); setStrategyRevisionId(copied.revision_id); setSmokePassed(false);
-      setNotice(`已复制为新的不可变 revision ${copied.revision_id}`);
+      setNotice(t("backtest.noticeCopied", { id: copied.revision_id }));
     } catch (reason) { setError(errorMessage(reason)); } finally { setLoading(false); }
   }, [refreshCapabilities, revisionName, strategyRevisionId]);
 
@@ -311,7 +315,7 @@ export default function BacktestApp() {
     try {
       await defaultBacktestApi.archiveStrategyRevision(strategyRevisionId);
       await refreshCapabilities(); setStrategyRevisionId(RSI_WILDER_LONG_SHORT_REVISION); setSmokePassed(false);
-      setNotice("Revision 已从新建 Run 目录归档；旧 Run 与报告未改变。");
+      setNotice(t("backtest.noticeArchived"));
     } catch (reason) { setError(errorMessage(reason)); } finally { setLoading(false); }
   }, [refreshCapabilities, strategyRevisionId]);
 
@@ -323,7 +327,7 @@ export default function BacktestApp() {
       const cloned = await defaultBacktestApi.cloneRun(selectedRunId, cloneParameter, parsed,
         globalThis.crypto?.randomUUID?.() ?? `clone-${Date.now()}`);
       setRuns(await defaultBacktestApi.listRuns()); setSelectedRunId(cloned.run_id);
-      setNotice(`已仅修改 ${cloneParameter} 并生成新 Run ${cloned.run_id}`);
+      setNotice(t("backtest.noticeCloned", { param: cloneParameter, id: cloned.run_id }));
     } catch (reason) { setError(errorMessage(reason)); } finally { setLoading(false); }
   }, [cloneParameter, cloneValue, selectedRunId]);
 
@@ -333,7 +337,7 @@ export default function BacktestApp() {
     try {
       const bridge = await defaultBacktestApi.createReviewBridge(selectedRunId, startTimeMs, endTimeMs);
       setReviewBridge(bridge);
-      setNotice(`已创建独立盲态研究 handoff ${String(bridge.bridgeId)}；策略结果仍隐藏。`);
+      setNotice(t("backtest.noticeHandoff", { id: String(bridge.bridgeId) }));
     } catch (reason) { setError(errorMessage(reason)); } finally { setLoading(false); }
   }, [endTimeMs, selectedRunId, startTimeMs]);
 
@@ -344,7 +348,7 @@ export default function BacktestApp() {
     try {
       const revealed = await defaultBacktestApi.revealReviewBridge(bridgeId);
       setReviewBridge(revealed);
-      setNotice(`研究 handoff ${bridgeId} 已不可逆揭示，可只读比较人工订单与策略订单。`);
+      setNotice(t("backtest.noticeRevealed", { id: bridgeId }));
     } catch (reason) { setError(errorMessage(reason)); } finally { setLoading(false); }
   }, [reviewBridge]);
 
@@ -577,7 +581,7 @@ export default function BacktestApp() {
         globalThis.crypto?.randomUUID?.() ?? `bt-${Date.now()}`,
       );
       setSelectedRunId(run.run_id);
-      setNotice(`Run ${run.run_id} 已进入后台队列；关闭页面不会取消。`);
+      setNotice(t("backtest.noticeQueued", { id: run.run_id }));
       await refreshRuns();
     } catch (reason) {
       setError(errorMessage(reason));
@@ -674,7 +678,7 @@ export default function BacktestApp() {
     try {
       parameterSpace = JSON.parse(studyParameterSpace) as Record<string, unknown>;
     } catch {
-      setError("RSI24 参数空间必须是合法 JSON 对象。");
+      setError(t("backtest.jsonInvalid"));
       return;
     }
     const dayMs = 86_400_000;
@@ -682,7 +686,7 @@ export default function BacktestApp() {
     setError(null);
     try {
       const created = await defaultBacktestApi.createStudy({
-        name: `RSI24 Study V2 ${new Date().toLocaleString()}`,
+        name: t("backtest.rsiStudyName", { when: new Date().toLocaleString(locale) }),
         hypothesis: studyHypothesis,
         study_protocol_revision: STUDY_V2,
         selection_protocol_revision: "TRAIN_CONSTRAINT_OBJECTIVE_SELECT_ONCE_V2",
@@ -735,7 +739,7 @@ export default function BacktestApp() {
       });
       await defaultBacktestApi.startStudy(created.study_id);
       setSelectedStudyId(created.study_id);
-      setNotice(`Study ${created.study_id} 已交给后台调度器；关闭页面不会中断。`);
+      setNotice(t("backtest.noticeStudyQueued", { id: created.study_id }));
       await refreshWorkspace();
     } catch (reason) {
       setError(errorMessage(reason));
@@ -746,6 +750,7 @@ export default function BacktestApp() {
     endTimeMs,
     fixedQty,
     initialBalance,
+    locale,
     makerFeeBps,
     participationRate,
     refreshWorkspace,
@@ -780,7 +785,7 @@ export default function BacktestApp() {
     setError(null);
     try {
       await defaultBacktestApi.revealStudyHoldout(selectedStudy.study_id);
-      setNotice(`Study ${selectedStudy.study_id} 的 holdout 已冻结并仅揭示一次。`);
+      setNotice(t("backtest.noticeHoldout", { id: selectedStudy.study_id }));
       await refreshWorkspace();
     } catch (reason) {
       setError(errorMessage(reason));
@@ -854,8 +859,8 @@ export default function BacktestApp() {
   if (!enabled) {
     return (
       <main className="backtest-app backtest-disabled">
-        <h1>策略回测</h1>
-        <p>前端入口保持关闭。设置 VITE_BACKTEST_ENTRY_ENABLED=1，并同时启用后端回测 flags。</p>
+        <h1>{t("backtest.disabledTitle")}</h1>
+        <p>{t("backtest.disabledHint")}</p>
       </main>
     );
   }
@@ -864,32 +869,32 @@ export default function BacktestApp() {
     <main className="backtest-app">
       <header className="backtest-header">
         <div>
-          <span className="backtest-kicker">CANDLESCOPE RESEARCH</span>
-          <h1>策略回测工作台</h1>
-          <p>不可变本地数据 · 后台 Run · 可验证报告</p>
+          <span className="backtest-kicker">{t("backtest.researchKicker")}</span>
+          <h1>{t("backtest.title")}</h1>
+          <p>{t("backtest.subtitle")}</p>
         </div>
-        <div className="backtest-credibility" aria-label="credibility">
+        <div className="backtest-credibility" aria-label={t("backtest.credibilityAria")}>
           <strong>{report?.report_label ?? fidelityMode}</strong>
           <span>{fidelityMode === "BAR_APPROX"
-            ? "BAR 结果不代表 K 线内部唯一顺序，也不是实盘批准。"
-            : "按本地校验成交序列撮合；不包含真实排队位置和完整盘口。"}</span>
+            ? t("backtest.barApprox")
+            : t("backtest.aggApprox")}</span>
         </div>
       </header>
 
       {(error || notice) && (
         <div className={error ? "backtest-message error" : "backtest-message notice"} role="status">
           <span>{error ?? notice}</span>
-          <button type="button" onClick={() => { setError(null); setNotice(null); }}>关闭</button>
+          <button type="button" onClick={() => { setError(null); setNotice(null); }}>{t("backtest.close")}</button>
         </div>
       )}
 
       <div className="backtest-grid">
         <form className="backtest-card backtest-form" onSubmit={handleCreate}>
           <div className="backtest-section-title">
-            <span>01</span><h2>新建 Run</h2>
+            <span>01</span><h2>{t("backtest.newRun")}</h2>
           </div>
           <label>
-            不可变数据集
+            {t("backtest.dataset")}
             <select value={datasetId} onChange={(event) => handleDatasetChange(event.target.value)}>
               {datasets.map((dataset) => (
                 <option key={dataset.dataset_id} value={dataset.dataset_id}>
@@ -900,28 +905,32 @@ export default function BacktestApp() {
           </label>
           {selectedDataset ? (
             <div className="backtest-dataset-meta">
-              <span>{selectedDataset.rows.toLocaleString()} bars</span>
-              <span>source {selectedDataset.source ?? "local_dataset"}</span>
-              <span>checksum {hashLabel(selectedDataset.checksum ?? selectedDataset.data_epoch)}</span>
-              <span>gap {String(selectedDataset.gap?.excluded_range_count ?? 0)}</span>
-              <span>revision {hashLabel(selectedDataset.revision ?? selectedDataset.data_epoch)}</span>
+              <span>{t("backtest.datasetBars", { count: selectedDataset.rows.toLocaleString(locale) })}</span>
+              <span>{t("backtest.datasetSource", { source: selectedDataset.source ?? "local_dataset" })}</span>
+              <span>{t("backtest.datasetChecksum", { checksum: hashLabel(selectedDataset.checksum ?? selectedDataset.data_epoch) })}</span>
+              <span>{t("backtest.datasetGap", {
+                count: typeof selectedDataset.gap?.excluded_range_count === "number"
+                  ? selectedDataset.gap.excluded_range_count
+                  : 0,
+              })}</span>
+              <span>{t("backtest.datasetRevision", { revision: hashLabel(selectedDataset.revision ?? selectedDataset.data_epoch) })}</span>
             </div>
-          ) : <p className="backtest-empty">没有可用本地数据，请先导入 CSV。</p>}
+          ) : <p className="backtest-empty">{t("backtest.noData")}</p>}
           <div className="backtest-form-row">
             <label>
-              回测粒度
+              {t("backtest.fidelity")}
               <select value={fidelityMode} onChange={(event) => setFidelityMode(event.target.value)}>
                 {(capabilities?.fidelity_modes ?? ["BAR_APPROX"]).map((mode) => (
                   <option key={mode} value={mode}>{mode === "BAR_APPROX"
-                    ? "按 K 线（近似）"
+                    ? t("backtest.fidelityBar")
                     : mode === DUAL_CLOCK_MODE
-                      ? "K 线信号 + 后续 aggTrade 执行"
-                      : "按成交（aggTrade）"}</option>
+                      ? t("backtest.fidelityDual")
+                      : t("backtest.fidelityTrade")}</option>
                 ))}
               </select>
             </label>
             <label>
-              策略 / 指标 / 模型
+              {t("backtest.strategy")}
               <select value={strategyRevisionId} onChange={(event) => setStrategyRevisionId(event.target.value)}>
                 {(capabilities?.strategies ?? []).map((strategy) => (
                   <option key={strategy.revision_id} value={strategy.revision_id}>{strategy.label}</option>
@@ -956,36 +965,36 @@ export default function BacktestApp() {
             />
           )}
           <details className="backtest-strategy-workspace" open data-testid="strategy-revision-workspace">
-            <summary>StrategyRevision V2 · 创建 / 静态检查 / 编译 / smoke</summary>
+            <summary>{t("backtest.revisionWorkspace")}</summary>
             <div className="backtest-form-row three">
-              <label>Revision 名称<input value={revisionName} onChange={(event) => setRevisionName(event.target.value)} /></label>
-              <label>受限语言<select value={revisionLanguage} onChange={(event) => setRevisionLanguage(event.target.value)}>
-                <option value="BUILTIN_TEMPLATE">内置 RSI24 模板</option>
-                <option value="PINE_SUBSET">Pine 安全子集</option>
-                <option value="PYNE_ORDER_DSL">Pyne 统一订单 DSL</option>
-                <option value="EXTERNAL_ARTIFACT_REF">冻结外部模型 artifact 引用</option>
+              <label>{t("backtest.revisionName")}<input value={revisionName} onChange={(event) => setRevisionName(event.target.value)} /></label>
+              <label>{t("backtest.language")}<select value={revisionLanguage} onChange={(event) => setRevisionLanguage(event.target.value)}>
+                <option value="BUILTIN_TEMPLATE">{t("backtest.builtin")}</option>
+                <option value="PINE_SUBSET">{t("backtest.pine")}</option>
+                <option value="PYNE_ORDER_DSL">{t("backtest.pyne")}</option>
+                <option value="EXTERNAL_ARTIFACT_REF">{t("backtest.external")}</option>
               </select></label>
-              <button type="button" disabled={loading} onClick={() => void handleCreateRevision()}>静态检查、编译并保存</button>
+              <button type="button" disabled={loading} onClick={() => void handleCreateRevision()}>{t("backtest.compileSave")}</button>
             </div>
-            {revisionLanguage !== "BUILTIN_TEMPLATE" && <label>源码（不会执行任意代码）
+            {revisionLanguage !== "BUILTIN_TEMPLATE" && <label>{t("backtest.sourceNoExec")}
               <textarea rows={6} value={revisionSource} onChange={(event) => setRevisionSource(event.target.value)} />
             </label>}
             {selectedStrategy?.compiled_hash && <div className="backtest-strategy-evidence">
               <strong>{selectedStrategy.runtime_revision}</strong>
-              <span>source {hashLabel(selectedStrategy.source_hash)} · artifact {hashLabel(selectedStrategy.compiled_hash)}</span>
-              <span>输入 {selectedStrategy.input_modes.join(", ")} · clock {selectedStrategy.signal_clock} · 输出 {selectedStrategy.output_modes.join(", ")}</span>
-              <span>明确不支持：{selectedStrategy.unsupported?.join("；")}</span>
+              <span>{t("backtest.sourceArtifact", { source: hashLabel(selectedStrategy.source_hash), artifact: hashLabel(selectedStrategy.compiled_hash) })}</span>
+              <span>{t("backtest.inputClock", { input: selectedStrategy.input_modes.join(", "), clock: selectedStrategy.signal_clock, output: selectedStrategy.output_modes.join(", ") })}</span>
+              <span>{t("backtest.unsupported", { list: selectedStrategy.unsupported?.join("；") ?? "" })}</span>
               <div className="backtest-form-row three">
-                <button type="button" disabled={loading || smokePassed} onClick={() => void handleSmoke()}>{smokePassed ? "smoke 已通过" : "运行 7 天以内 smoke"}</button>
-                <button type="button" disabled={loading} onClick={() => void handleCopyRevision()}>复制 revision</button>
-                <button type="button" disabled={loading} onClick={() => void handleArchiveRevision()}>归档 revision</button>
+                <button type="button" disabled={loading || smokePassed} onClick={() => void handleSmoke()}>{smokePassed ? t("backtest.smokeOk") : t("backtest.smokeRun")}</button>
+                <button type="button" disabled={loading} onClick={() => void handleCopyRevision()}>{t("backtest.copyRev")}</button>
+                <button type="button" disabled={loading} onClick={() => void handleArchiveRevision()}>{t("backtest.archiveRev")}</button>
               </div>
             </div>}
           </details>
           {fidelityMode !== "BAR_APPROX" && (
             <div className="backtest-form-row">
-              <label>交易所<input value={exchange} onChange={(event) => setExchange(event.target.value)} /></label>
-              <label>市场类型<input value={marketType} onChange={(event) => setMarketType(event.target.value)} /></label>
+              <label>{t("backtest.exchange")}<input value={exchange} onChange={(event) => setExchange(event.target.value)} /></label>
+              <label>{t("backtest.marketType")}<input value={marketType} onChange={(event) => setMarketType(event.target.value)} /></label>
             </div>
           )}
           <label className="backtest-checkbox">
@@ -996,11 +1005,11 @@ export default function BacktestApp() {
               onChange={(event) => setHistoricalContractData(event.target.checked)}
             />
             {accountModel === ACCOUNT_V2
-              ? "V2 强制使用历史 mark / rules（不会联网补取）"
-              : "要求历史 mark / index / funding / rules 完整覆盖（M3）"}
+              ? t("backtest.v2Mark")
+              : t("backtest.m3Cover")}
           </label>
           <div className="backtest-form-row three" data-testid="account-v2-config">
-            <label>账户模型<select value={accountModel} onChange={(event) => {
+            <label>{t("backtest.accountModel")}<select value={accountModel} onChange={(event) => {
               setAccountModel(event.target.value);
               if (event.target.value !== ACCOUNT_V2) setFundingMode("OFF");
             }}>
@@ -1008,34 +1017,34 @@ export default function BacktestApp() {
                 <option key={model} value={model}>{model}</option>
               ))}
             </select></label>
-            <label>资金费模式<select value={fundingMode} disabled={accountModel !== ACCOUNT_V2} onChange={(event) => setFundingMode(event.target.value)}>
+            <label>{t("backtest.fundingMode")}<select value={fundingMode} disabled={accountModel !== ACCOUNT_V2} onChange={(event) => setFundingMode(event.target.value)}>
               {(capabilities?.funding_modes_v2 ?? ["OFF"]).map((mode) => <option key={mode} value={mode}>{mode}</option>)}
             </select></label>
-            <label>杠杆<input value={leverage} disabled={accountModel !== ACCOUNT_V2} onChange={(event) => setLeverage(event.target.value)} /></label>
+            <label>{t("backtest.leverage")}<input value={leverage} disabled={accountModel !== ACCOUNT_V2} onChange={(event) => setLeverage(event.target.value)} /></label>
           </div>
           {fidelityMode === DUAL_CLOCK_MODE && selectedDataset && (
             <div className="backtest-strategy-evidence" data-testid="dual-clock-identity">
-              <strong>信号周期 {selectedDataset.interval} · UTC</strong>
-              <span>信号源 DERIVED_BAR_CLOSE</span>
-              <span>执行源 NEXT_AGG_TRADE（聚合成交，不代表 raw trade 或队列真相）</span>
-              <span>TRADE_DERIVED_COMPLETE_BUCKETS_V1 · 尾部未完结桶不可见</span>
+              <strong>{t("backtest.signalInterval", { interval: selectedDataset.interval })}</strong>
+              <span>{t("backtest.signalSrc")}</span>
+              <span>{t("backtest.execSrc")}</span>
+              <span>{t("backtest.buckets")}</span>
             </div>
           )}
           <div className="backtest-form-row">
-            <label>开始时间（ms）<input type="number" value={startTimeMs} onChange={(event) => setStartTimeMs(Number(event.target.value))} /></label>
-            <label>结束时间（ms）<input type="number" value={endTimeMs} onChange={(event) => setEndTimeMs(Number(event.target.value))} /></label>
+            <label>{t("backtest.startMs")}<input type="number" value={startTimeMs} onChange={(event) => setStartTimeMs(Number(event.target.value))} /></label>
+            <label>{t("backtest.endMs")}<input type="number" value={endTimeMs} onChange={(event) => setEndTimeMs(Number(event.target.value))} /></label>
           </div>
           <div className="backtest-time-hint">
             {timestampLabel(startTimeMs)} → {timestampLabel(endTimeMs)}
           </div>
           {strategyRevisionId === SMA_REVISION && <div className="backtest-form-row">
-            <label>Fast SMA<input type="number" min="1" value={fast} onChange={(event) => setFast(Number(event.target.value))} /></label>
-            <label>Slow SMA<input type="number" min="2" value={slow} onChange={(event) => setSlow(Number(event.target.value))} /></label>
+            <label>{t("backtest.fastSma")}<input type="number" min="1" value={fast} onChange={(event) => setFast(Number(event.target.value))} /></label>
+            <label>{t("backtest.slowSma")}<input type="number" min="2" value={slow} onChange={(event) => setSlow(Number(event.target.value))} /></label>
           </div>}
           {strategyRevisionId === RSI_REVISION && <div className="backtest-form-row three">
-            <label>RSI 长度<input type="number" min="2" value={rsiLength} onChange={(event) => setRsiLength(Number(event.target.value))} /></label>
-            <label>超卖<input type="number" value={rsiOversold} onChange={(event) => setRsiOversold(Number(event.target.value))} /></label>
-            <label>超买<input type="number" value={rsiOverbought} onChange={(event) => setRsiOverbought(Number(event.target.value))} /></label>
+            <label>{t("backtest.rsiLen")}<input type="number" min="2" value={rsiLength} onChange={(event) => setRsiLength(Number(event.target.value))} /></label>
+            <label>{t("backtest.oversold")}<input type="number" value={rsiOversold} onChange={(event) => setRsiOversold(Number(event.target.value))} /></label>
+            <label>{t("backtest.overbought")}<input type="number" value={rsiOverbought} onChange={(event) => setRsiOverbought(Number(event.target.value))} /></label>
           </div>}
           {selectedStrategy && selectedStrategy.parameter_schema.length > 0 && strategyRevisionId !== SMA_REVISION && strategyRevisionId !== RSI_REVISION && (
             <div className="backtest-form-row three" data-testid="strategy-schema-fields">
@@ -1070,50 +1079,50 @@ export default function BacktestApp() {
             </div>
           )}
           {strategyRevisionId === EXPRESSION_REVISION && <label>
-            OHLCV 评分表达式
+            {t("backtest.ohlcvExpr")}
             <textarea value={strategySource} onChange={(event) => setStrategySource(event.target.value)} rows={4} />
           </label>}
           {strategyRevisionId === COMMAND_REVISION && <label>
-            统一订单命令 JSON
+            {t("backtest.orderJson")}
             <textarea value={commandSource} onChange={(event) => setCommandSource(event.target.value)} rows={10} spellCheck={false} />
           </label>}
           <div className="backtest-form-row three">
-            <label>初始权益<input value={initialBalance} onChange={(event) => setInitialBalance(event.target.value)} /></label>
-            <label>滑点 bps<input value={slippageBps} onChange={(event) => setSlippageBps(event.target.value)} /></label>
-            <label>Taker 费 bps<input value={takerFeeBps} onChange={(event) => setTakerFeeBps(event.target.value)} /></label>
+            <label>{t("backtest.balance")}<input value={initialBalance} onChange={(event) => setInitialBalance(event.target.value)} /></label>
+            <label>{t("backtest.slipBps")}<input value={slippageBps} onChange={(event) => setSlippageBps(event.target.value)} /></label>
+            <label>{t("backtest.takerBps")}<input value={takerFeeBps} onChange={(event) => setTakerFeeBps(event.target.value)} /></label>
           </div>
           <div className="backtest-form-row three">
-            <label>Maker 费 bps<input value={makerFeeBps} onChange={(event) => setMakerFeeBps(event.target.value)} /></label>
-            <label>资金费率/周期<input value={fundingRate} disabled={accountModel === ACCOUNT_V2 && fundingMode !== "FIXED_SCENARIO"} onChange={(event) => setFundingRate(event.target.value)} /></label>
-            <label>资金费周期（小时）<input type="number" min="1" max="168" value={fundingIntervalHours} disabled={accountModel === ACCOUNT_V2 && fundingMode !== "FIXED_SCENARIO"} onChange={(event) => setFundingIntervalHours(Number(event.target.value))} /></label>
+            <label>{t("backtest.makerBps")}<input value={makerFeeBps} onChange={(event) => setMakerFeeBps(event.target.value)} /></label>
+            <label>{t("backtest.fundingRate")}<input value={fundingRate} disabled={accountModel === ACCOUNT_V2 && fundingMode !== "FIXED_SCENARIO"} onChange={(event) => setFundingRate(event.target.value)} /></label>
+            <label>{t("backtest.fundingHours")}<input type="number" min="1" max="168" value={fundingIntervalHours} disabled={accountModel === ACCOUNT_V2 && fundingMode !== "FIXED_SCENARIO"} onChange={(event) => setFundingIntervalHours(Number(event.target.value))} /></label>
           </div>
           <label className="backtest-checkbox" data-testid="execution-realism-toggle">
             <input type="checkbox" checked={executionRealismV2} onChange={(event) => setExecutionRealismV2(event.target.checked)} />
-            启用成交真实性 V2（默认关闭，形成新的 Run 身份）
+            {t("backtest.execV2")}
           </label>
           <div className="backtest-form-row three" data-testid="execution-realism-config">
-            <label>市场成交参与率
+            <label>{t("backtest.participation")}
               <input value={participationRate} disabled={!executionRealismV2} onChange={(event) => setParticipationRate(event.target.value)} />
             </label>
-            <label>延迟毫秒
+            <label>{t("backtest.latencyMs")}
               <input type="number" min="0" max="60000" value={latencyMs} disabled={!executionRealismV2 || fidelityMode === "BAR_APPROX"} onChange={(event) => setLatencyMs(Number(event.target.value))} />
             </label>
-            <label>延迟事件数
+            <label>{t("backtest.latencyEvents")}
               <input type="number" min="0" max="100000" value={latencyEvents} disabled={!executionRealismV2 || fidelityMode === "BAR_APPROX"} onChange={(event) => setLatencyEvents(Number(event.target.value))} />
             </label>
           </div>
           <div className="backtest-form-row">
-            <label>区间结束残单
+            <label>{t("backtest.leftover")}
               <select value={orderEndPolicy} disabled={!executionRealismV2} onChange={(event) => setOrderEndPolicy(event.target.value)}>
-                <option value="CANCEL_AT_END">结束时取消</option>
-                <option value="KEEP_OPEN">保留 OPEN</option>
+                <option value="CANCEL_AT_END">{t("backtest.cancelEnd")}</option>
+                <option value="KEEP_OPEN">{t("backtest.keepOpen")}</option>
               </select>
             </label>
             <div className="backtest-strategy-evidence">
               <strong>{fidelityMode === "BAR_APPROX" ? BAR_PATH_SCENARIO : "AGG_TRADE_LATENCY_PARTICIPATION_V2"}</strong>
               <small>{fidelityMode === "BAR_APPROX"
-                ? "OHLC 最坏情形是冻结假设，不是 K 线内部历史事实。"
-                : "aggTrade 是聚合成交；不声称 raw trade、盘口深度或 queue exact。"}</small>
+                ? t("backtest.ohlcWorst")
+                : t("backtest.aggNotRaw")}</small>
             </div>
           </div>
           <label className="backtest-checkbox" data-testid="metrics-v2-toggle">
@@ -1130,63 +1139,65 @@ export default function BacktestApp() {
                 }
               }}
             />
-            启用报告与绩效指标 V2（默认关闭，要求账户与成交 V2）
+            {t("backtest.metricsEnable")}
           </label>
           <div className="backtest-form-row" data-testid="metrics-v2-config">
-            <label>年化无风险利率
+            <label>{t("backtest.riskFree")}
               <input value={riskFreeRateAnnual} disabled={!metricsV2} onChange={(event) => setRiskFreeRateAnnual(event.target.value)} />
             </label>
-            <label>样本角色
+            <label>{t("backtest.sampleRole")}
               <select value={sampleRole} disabled={!metricsV2} onChange={(event) => setSampleRole(event.target.value)}>
-                <option value="IN_SAMPLE">样本内</option>
-                <option value="VALIDATION">验证集</option>
-                <option value="OUT_OF_SAMPLE">样本外</option>
+                <option value="IN_SAMPLE">{t("backtest.inSample")}</option>
+                <option value="VALIDATION">{t("backtest.validation")}</option>
+                <option value="OUT_OF_SAMPLE">{t("backtest.oos")}</option>
               </select>
             </label>
           </div>
           {metricsV2 && <div className="backtest-strategy-evidence">
-            <strong>{METRICS_V2} · UTC 日收盘采样 · 365 天年化</strong>
-            <small>少于 30 个日收益、少于 365 天、零波动或零交易时显示 null + reason，不伪造 0 或无穷大。</small>
+            <strong>{t("backtest.metricsUtc", { revision: METRICS_V2 })}</strong>
+            <small>{t("backtest.metricsHint")}</small>
           </div>}
           <div className="backtest-strategy-evidence" data-testid="host-policy-config">
-            <strong>{HOST_POLICY_REVISION} · Host 拥有数量与风控真相</strong>
-            <small>SIGNAL 经 sizing 变为绝对目标数量；TARGET_POSITION 与 ORDER_INTENT 保留原有绝对数量语义，但同样不能绕过风控。</small>
+            <strong>{t("backtest.hostPolicy", { revision: HOST_POLICY_REVISION })}</strong>
+            <small>{t("backtest.hostPolicyHint")}</small>
           </div>
           <div className="backtest-form-row three">
-            <label>仓位计算策略
+            <label>{t("backtest.sizing")}
               <select value={sizingPolicy} onChange={(event) => setSizingPolicy(event.target.value)}>
                 {(capabilities?.sizing_policies ?? ["FIXED_QTY_V1", "FIXED_NOTIONAL_V1", "EQUITY_PERCENT_V1", "RISK_PER_STOP_V1"]).map((item) => <option key={item} value={item}>{item}</option>)}
               </select>
             </label>
-            <label>固定数量<input value={fixedQty} disabled={sizingPolicy !== "FIXED_QTY_V1"} onChange={(event) => setFixedQty(event.target.value)} /></label>
-            <label>固定 USDT 名义<input value={fixedNotional} disabled={sizingPolicy !== "FIXED_NOTIONAL_V1"} onChange={(event) => setFixedNotional(event.target.value)} /></label>
+            <label>{t("backtest.fixedQty")}<input value={fixedQty} disabled={sizingPolicy !== "FIXED_QTY_V1"} onChange={(event) => setFixedQty(event.target.value)} /></label>
+            <label>{t("backtest.fixedNotional")}<input value={fixedNotional} disabled={sizingPolicy !== "FIXED_NOTIONAL_V1"} onChange={(event) => setFixedNotional(event.target.value)} /></label>
           </div>
           <div className="backtest-form-row three">
-            <label>权益百分比 %<input value={equityPercent} disabled={sizingPolicy !== "EQUITY_PERCENT_V1"} onChange={(event) => setEquityPercent(event.target.value)} /></label>
-            <label>每次止损风险 %<input value={riskPerStopPercent} disabled={sizingPolicy !== "RISK_PER_STOP_V1"} onChange={(event) => setRiskPerStopPercent(event.target.value)} /></label>
-            <label>止损距离（价格）<input value={stopDistance} disabled={sizingPolicy !== "RISK_PER_STOP_V1"} onChange={(event) => setStopDistance(event.target.value)} /></label>
+            <label>{t("backtest.equityPct")}<input value={equityPercent} disabled={sizingPolicy !== "EQUITY_PERCENT_V1"} onChange={(event) => setEquityPercent(event.target.value)} /></label>
+            <label>{t("backtest.riskStop")}<input value={riskPerStopPercent} disabled={sizingPolicy !== "RISK_PER_STOP_V1"} onChange={(event) => setRiskPerStopPercent(event.target.value)} /></label>
+            <label>{t("backtest.stopDist")}<input value={stopDistance} disabled={sizingPolicy !== "RISK_PER_STOP_V1"} onChange={(event) => setStopDistance(event.target.value)} /></label>
           </div>
           <div className="backtest-form-row three">
-            <label>最大绝对仓位<input value={maxAbsPositionQty} onChange={(event) => setMaxAbsPositionQty(event.target.value)} /></label>
-            <label>最大名义价值<input value={maxNotional} onChange={(event) => setMaxNotional(event.target.value)} /></label>
-            <label>最大杠杆<input value={maxLeverage} onChange={(event) => setMaxLeverage(event.target.value)} /></label>
+            <label>{t("backtest.maxAbsQty")}<input value={maxAbsPositionQty} onChange={(event) => setMaxAbsPositionQty(event.target.value)} /></label>
+            <label>{t("backtest.maxNotional")}<input value={maxNotional} onChange={(event) => setMaxNotional(event.target.value)} /></label>
+            <label>{t("backtest.maxLev")}<input value={maxLeverage} onChange={(event) => setMaxLeverage(event.target.value)} /></label>
           </div>
           <div className="backtest-form-row three">
-            <label>单笔最大风险<input value={maxOrderRisk} onChange={(event) => setMaxOrderRisk(event.target.value)} /></label>
-            <label>最大活动订单<input type="number" min="1" value={maxActiveOrders} onChange={(event) => setMaxActiveOrders(Number(event.target.value))} /></label>
-            <label>最大累计手续费<input value={maxCumulativeFees} onChange={(event) => setMaxCumulativeFees(event.target.value)} /></label>
+            <label>{t("backtest.maxOrderRisk")}<input value={maxOrderRisk} onChange={(event) => setMaxOrderRisk(event.target.value)} /></label>
+            <label>{t("backtest.maxActive")}<input type="number" min="1" value={maxActiveOrders} onChange={(event) => setMaxActiveOrders(Number(event.target.value))} /></label>
+            <label>{t("backtest.maxFees")}<input value={maxCumulativeFees} onChange={(event) => setMaxCumulativeFees(event.target.value)} /></label>
           </div>
           <div className="backtest-form-row three">
-            <label>最大回撤停止开仓 %<input value={maxDrawdownPercent} onChange={(event) => setMaxDrawdownPercent(event.target.value)} /></label>
-            <label>日内损失上限（可选）<input value={dailyLossLimit} placeholder="留空关闭" onChange={(event) => setDailyLossLimit(event.target.value)} /></label>
-            <label>冷却事件数<input type="number" min="0" value={cooldownEvents} disabled={!dailyLossLimit} onChange={(event) => setCooldownEvents(Number(event.target.value))} /></label>
+            <label>{t("backtest.maxDdStop")}<input value={maxDrawdownPercent} onChange={(event) => setMaxDrawdownPercent(event.target.value)} /></label>
+            <label>{t("backtest.dailyLoss")}<input value={dailyLossLimit} placeholder={t("backtest.dailyPh")} onChange={(event) => setDailyLossLimit(event.target.value)} /></label>
+            <label>{t("backtest.cooldown")}<input type="number" min="0" value={cooldownEvents} disabled={!dailyLossLimit} onChange={(event) => setCooldownEvents(Number(event.target.value))} /></label>
           </div>
           <div className="backtest-snapshot">
             <span className={snapshot && historicalContractComplete ? "ready" : "pending"}>
-              {snapshot ? (historicalContractComplete ? "已验证" : "合约数据未完整") : "验证中"}
+              {snapshot ? (historicalContractComplete ? t("backtest.verified") : t("backtest.incomplete")) : t("backtest.verifying")}
             </span>
             <div>
-              <strong>{(snapshot?.market_row_count ?? snapshot?.row_count)?.toLocaleString() ?? "—"} {fidelityMode === "BAR_APPROX" ? "bars" : "trades"}</strong>
+              <strong>{fidelityMode === "BAR_APPROX"
+                ? t("backtest.snapshotBars", { count: (snapshot?.market_row_count ?? snapshot?.row_count)?.toLocaleString(locale) ?? "—" })
+                : t("backtest.snapshotTrades", { count: (snapshot?.market_row_count ?? snapshot?.row_count)?.toLocaleString(locale) ?? "—" })}</strong>
               <small>{hashLabel(snapshot?.snapshot_hash)}</small>
             </div>
           </div>
@@ -1196,19 +1207,19 @@ export default function BacktestApp() {
                 <span key={role}>
                   {role}: {contractData?.role_status?.[role]?.status ?? "missing"}
                   {contractData?.role_status?.[role]?.row_count !== undefined
-                    ? ` · ${contractData.role_status[role].row_count} rows` : ""}
+                    ? t("backtest.roleRows", { count: contractData.role_status[role].row_count }) : ""}
                 </span>
               ))}
-              <small>仅使用已导入本地包；不会联网补取。</small>
+              <small>{t("backtest.localOnly")}</small>
             </div>
           )}
           <button className="backtest-primary" type="submit" disabled={loading || !snapshot || !historicalContractComplete || Boolean(selectedStrategy?.compiled_hash && !smokePassed) || (strategyRevisionId === SMA_REVISION && fast >= slow) || (pythonSelected && pythonGate !== null && !pythonGate.canCreateRun)}>
-            {loading ? "处理中…" : "验证并启动后台 Run"}
+            {loading ? t("backtest.processing") : t("backtest.submit")}
           </button>
         </form>
 
         <section className="backtest-card backtest-runs">
-          <div className="backtest-section-title"><span>02</span><h2>Runs</h2></div>
+          <div className="backtest-section-title"><span>02</span><h2>{t("backtest.runsTitle")}</h2></div>
           <div className="backtest-run-list">
             {runs.map((run) => (
               <button
@@ -1222,77 +1233,77 @@ export default function BacktestApp() {
                 <small>{run.fidelity_mode} · {hashLabel(run.config_hash)}</small>
               </button>
             ))}
-            {runs.length === 0 && <p className="backtest-empty">还没有 Run。</p>}
+            {runs.length === 0 && <p className="backtest-empty">{t("backtest.noRuns")}</p>}
           </div>
           {selectedRun && (
             <div className="backtest-run-actions">
               {!TERMINAL_STATES.has(selectedRun.state) && (
-                <button type="button" onClick={handleCancel} disabled={loading}>取消 Run</button>
+                <button type="button" onClick={handleCancel} disabled={loading}>{t("backtest.cancelRun")}</button>
               )}
               {selectedRun.state === "COMPLETED" && (
-                <button type="button" onClick={handleExport}>导出验证包</button>
+                <button type="button" onClick={handleExport}>{t("backtest.export")}</button>
               )}
-              {selectedRun.state === "FAILED" && <span>失败码：{selectedRun.failure_code ?? "UNKNOWN"}</span>}
+              {selectedRun.state === "FAILED" && <span>{t("backtest.failCode", { code: selectedRun.failure_code ?? "UNKNOWN" })}</span>}
               {selectedRun.state === "FAILED" && ["PROVIDER_TIMEOUT", "PROVIDER_CRASH_UNRECOVERABLE", "BACKTEST_STORAGE_TRANSIENT"].includes(selectedRun.failure_code ?? "") && (
-                <button type="button" onClick={handleResume} disabled={loading}>从安全 checkpoint 恢复</button>
+                <button type="button" onClick={handleResume} disabled={loading}>{t("backtest.resume")}</button>
               )}
             </div>
           )}
         </section>
 
         <section className="backtest-card backtest-report">
-          <div className="backtest-section-title"><span>03</span><h2>可信度报告</h2></div>
+          <div className="backtest-section-title"><span>03</span><h2>{t("backtest.report")}</h2></div>
           {pythonSelected && report && (
             <div className="backtest-strategy-evidence" data-testid="python-host-owns-report">
-              <strong>Python 决策 / Host 订单</strong>
-              <p>{PYTHON_HOST_OWNS_COPY}</p>
-              <small>aggTrade 不是 raw trade；普通 L2 也不是 queue exact。</small>
+              <strong>{t("backtest.pythonHost")}</strong>
+              <p>{hostOwnsOrdersCopy()}</p>
+              <small>{t("backtest.aggNotQueue")}</small>
             </div>
           )}
           {report && !emptyReportIsHidden({ error, report }) ? (
             <>
               <div className="backtest-metrics">
-                <div><span>报告标签</span><strong>{report.report_label}</strong></div>
-                <div><span>成交</span><strong>{report.metrics.fill_count}</strong></div>
-                <div><span>完整交易</span><strong>{report.metrics.trade_count ?? 0}</strong></div>
-                <div><span>最终权益</span><strong>{String(report.account?.equity ?? "—")}</strong></div>
+                <div><span>{t("backtest.reportLabel")}</span><strong>{report.report_label}</strong></div>
+                <div><span>{t("backtest.fills")}</span><strong>{report.metrics.fill_count}</strong></div>
+                <div><span>{t("backtest.trades")}</span><strong>{report.metrics.trade_count ?? 0}</strong></div>
+                <div><span>{t("backtest.finalEquity")}</span><strong>{String(report.account?.equity ?? "—")}</strong></div>
               </div>
               {report.performance && <div data-testid="metrics-v2-report">
                 <div className="backtest-strategy-evidence">
                   <strong>{report.performance.metrics_version} · {report.credibility?.level} · {report.credibility?.sample_role}</strong>
-                  <span>总收益 {metricLabel(report.performance.returns.total_return)} · 超额收益 {metricLabel(report.performance.returns.excess_return)}</span>
-                  <span>最大回撤 {metricLabel(report.performance.risk.max_drawdown)} · Sharpe {metricLabel(report.performance.risk.sharpe)}</span>
-                  <span>Metrics hash {hashLabel(report.performance.metrics_hash)} · 对账 {report.performance.reconciliation.passed ? "PASS" : "FAIL"}</span>
-                  <small>账户指标使用 mark-to-market 权益；开放仓位不计入完整交易指标。研究等级不是盈利保证。</small>
+                  <span>{t("backtest.totalRet", { value: metricLabel(report.performance.returns.total_return), excess: metricLabel(report.performance.returns.excess_return) })}</span>
+                  <span>{t("backtest.maxDdSharpe", { dd: metricLabel(report.performance.risk.max_drawdown), sharpe: metricLabel(report.performance.risk.sharpe) })}</span>
+                  <span>{t("backtest.metricsHash", { hash: hashLabel(report.performance.metrics_hash), recon: report.performance.reconciliation.passed ? "PASS" : "FAIL" })}</span>
+                  <small>{t("backtest.perfHint")}</small>
                 </div>
-                <h3 className="backtest-table-title">收益与风险</h3>
+                <h3 className="backtest-table-title">{t("backtest.returnsRisk")}</h3>
                 <div className="backtest-metric-sections">
-                  <div><span>净盈亏</span><strong>{metricLabel(report.performance.returns.net_pnl)}</strong></div>
-                  <div><span>年化收益</span><strong>{metricLabel(report.performance.returns.annualized_return)}</strong></div>
-                  <div><span>波动率</span><strong>{metricLabel(report.performance.risk.volatility)}</strong></div>
+                  <div><span>{t("backtest.netPnl")}</span><strong>{metricLabel(report.performance.returns.net_pnl)}</strong></div>
+                  <div><span>{t("backtest.annRet")}</span><strong>{metricLabel(report.performance.returns.annualized_return)}</strong></div>
+                  <div><span>{t("backtest.vol")}</span><strong>{metricLabel(report.performance.risk.volatility)}</strong></div>
                   <div><span>Sortino</span><strong>{metricLabel(report.performance.risk.sortino)}</strong></div>
                   <div><span>Calmar</span><strong>{metricLabel(report.performance.risk.calmar)}</strong></div>
-                  <div><span>回撤时长 ms</span><strong>{metricLabel(report.performance.risk.drawdown_duration_ms)}</strong></div>
+                  <div><span>{t("backtest.ddMs")}</span><strong>{metricLabel(report.performance.risk.drawdown_duration_ms)}</strong></div>
                 </div>
-                <h3 className="backtest-table-title">交易与成本</h3>
+                <h3 className="backtest-table-title">{t("backtest.tradingCost")}</h3>
                 <div className="backtest-metric-sections">
-                  <div><span>胜率</span><strong>{metricLabel(report.performance.trading.win_rate)}</strong></div>
-                  <div><span>Profit factor</span><strong>{metricLabel(report.performance.trading.profit_factor)}</strong></div>
-                  <div><span>期望</span><strong>{metricLabel(report.performance.trading.expectancy)}</strong></div>
-                  <div><span>平均 MAE / MFE</span><strong>{metricLabel(report.performance.trading.average_mae)} / {metricLabel(report.performance.trading.average_mfe)}</strong></div>
-                  <div><span>费用 / 资金费</span><strong>{metricLabel(report.performance.execution.fees)} / {metricLabel(report.performance.execution.funding)}</strong></div>
-                  <div><span>滑点 / 换手</span><strong>{metricLabel(report.performance.execution.slippage)} / {metricLabel(report.performance.execution.turnover)}</strong></div>
+                  <div><span>{t("backtest.winRate")}</span><strong>{metricLabel(report.performance.trading.win_rate)}</strong></div>
+                  <div><span>{t("backtest.profitFactor")}</span><strong>{metricLabel(report.performance.trading.profit_factor)}</strong></div>
+                  <div><span>{t("backtest.expectancy")}</span><strong>{metricLabel(report.performance.trading.expectancy)}</strong></div>
+                  <div><span>{t("backtest.maeMfe")}</span><strong>{metricLabel(report.performance.trading.average_mae)} / {metricLabel(report.performance.trading.average_mfe)}</strong></div>
+                  <div><span>{t("backtest.feesFunding")}</span><strong>{metricLabel(report.performance.execution.fees)} / {metricLabel(report.performance.execution.funding)}</strong></div>
+                  <div><span>{t("backtest.slipTurnover")}</span><strong>{metricLabel(report.performance.execution.slippage)} / {metricLabel(report.performance.execution.turnover)}</strong></div>
                 </div>
-                <h3 className="backtest-table-title">数据质量与可信度</h3>
+                <h3 className="backtest-table-title">{t("backtest.quality")}</h3>
                 <div className="backtest-metric-sections" data-testid="metrics-v2-quality">
-                  <div><span>缺口 / 重复</span><strong>{String(report.performance.quality.gap_count ?? 0)} / {String(report.performance.quality.duplicate_count ?? 0)}</strong></div>
-                  <div><span>警告 / 路径歧义</span><strong>{String(report.performance.quality.warning_count ?? 0)} / {String(report.performance.quality.ambiguity_count ?? 0)}</strong></div>
-                  <div><span>拒单 / 部分成交</span><strong>{String(report.performance.execution.rejected_order_count ?? 0)} / {String(report.performance.execution.partial_order_count ?? 0)}</strong></div>
-                  <div><span>未成交订单</span><strong>{String(report.performance.execution.unfilled_order_count ?? 0)}</strong></div>
-                  <div><span>样本角色</span><strong>{String(report.performance.quality.sample_role ?? "—")}</strong></div>
-                  <div><span>指标警告</span><strong>{(report.performance.quality.metric_warnings as string[] | undefined)?.join(", ") || "无"}</strong></div>
+                  <div><span>{t("backtest.gapsDups")}</span><strong>{String(report.performance.quality.gap_count ?? 0)} / {String(report.performance.quality.duplicate_count ?? 0)}</strong></div>
+                  <div><span>{t("backtest.warnAmb")}</span><strong>{String(report.performance.quality.warning_count ?? 0)} / {String(report.performance.quality.ambiguity_count ?? 0)}</strong></div>
+                  <div><span>{t("backtest.rejectPartial")}</span><strong>{String(report.performance.execution.rejected_order_count ?? 0)} / {String(report.performance.execution.partial_order_count ?? 0)}</strong></div>
+                  <div><span>{t("backtest.unfilled")}</span><strong>{String(report.performance.execution.unfilled_order_count ?? 0)}</strong></div>
+                  <div><span>{t("backtest.sampleRole")}</span><strong>{String(report.performance.quality.sample_role ?? "—")}</strong></div>
+                  <div><span>{t("backtest.metricWarn")}</span><strong>{(report.performance.quality.metric_warnings as string[] | undefined)?.join(", ") || t("backtest.none")}</strong></div>
                 </div>
-                <h3 className="backtest-table-title">月度收益（报告字段）</h3>
+                <h3 className="backtest-table-title">{t("backtest.monthly")}</h3>
                 <div className="backtest-monthly-heatmap">
                   {report.performance.monthly_returns.map((item) => <div
                     key={item.month}
@@ -1303,37 +1314,37 @@ export default function BacktestApp() {
               </div>}
               {report.account_model === ACCOUNT_V2 && <div className="backtest-strategy-evidence" data-testid="account-v2-report">
                 <strong>{report.account_model} · {report.funding_mode}</strong>
-                <span>钱包 {String(report.account?.wallet_balance ?? "—")} · 未实现 {String(report.account?.unrealized_pnl ?? "—")} · 权益 {String(report.account?.equity ?? "—")}</span>
-                <span>初始保证金 {String(report.account?.initial_margin ?? "—")} · 维持保证金 {String(report.account?.maintenance_margin ?? "—")} · 挂单冻结 {String(report.account?.frozen_order_margin ?? "—")}</span>
-                <span>可用 {String(report.account?.available_balance ?? "—")} · 杠杆 {String(report.account?.leverage ?? "—")} · 档位 {JSON.stringify(report.account?.maintenance_tier ?? null)}</span>
-                <span>已实现 {String(report.account?.cumulative_realized_pnl ?? "—")} · 手续费 {String(report.account?.cumulative_fees ?? "—")} · 资金费 {String(report.account?.cumulative_funding ?? "—")} / {String(report.account?.funding_event_count ?? "0")} periods</span>
-                <span>强平 {String(report.account?.liquidation_state ?? "—")} · 破产 {String(report.account?.insolvency_state ?? "—")} · {report.liquidation_model}</span>
-                <small>保险基金与 ADL 未建模；成交价不代替历史 mark。</small>
+                <span>{t("backtest.acctWallet", { wallet: String(report.account?.wallet_balance ?? "—"), unrealized: String(report.account?.unrealized_pnl ?? "—"), equity: String(report.account?.equity ?? "—") })}</span>
+                <span>{t("backtest.acctMargin", { im: String(report.account?.initial_margin ?? "—"), mm: String(report.account?.maintenance_margin ?? "—"), frozen: String(report.account?.frozen_order_margin ?? "—") })}</span>
+                <span>{t("backtest.acctAvail", { available: String(report.account?.available_balance ?? "—"), leverage: String(report.account?.leverage ?? "—"), tier: JSON.stringify(report.account?.maintenance_tier ?? null) })}</span>
+                <span>{t("backtest.acctRealized", { realized: String(report.account?.cumulative_realized_pnl ?? "—"), fees: String(report.account?.cumulative_fees ?? "—"), funding: String(report.account?.cumulative_funding ?? "—"), periods: String(report.account?.funding_event_count ?? "0") })}</span>
+                <span>{t("backtest.acctLiq", { liq: String(report.account?.liquidation_state ?? "—"), insolvency: String(report.account?.insolvency_state ?? "—"), model: String(report.liquidation_model ?? "—") })}</span>
+                <small>{t("backtest.insAdl")}</small>
               </div>}
               {report.risk_policy && <div className="backtest-strategy-evidence" data-testid="host-policy-report">
                 <strong>{report.risk_policy.policy_revision} · {report.risk_policy.sizing_policy}</strong>
-                <span>最大实际仓位 {report.risk_policy.max_actual_abs_position ?? "—"} · 最大实际名义 {report.risk_policy.max_actual_notional ?? "—"}</span>
-                <span>峰值权益 {report.risk_policy.peak_equity ?? "—"} · 风险拒单 {report.metrics.risk_rejection_count ?? 0}</span>
-                <span>停止原因 {JSON.stringify(report.risk_policy.stop_reasons ?? {})}</span>
+                <span>{t("backtest.maxActual", { pos: String(report.risk_policy.max_actual_abs_position ?? "—"), notional: String(report.risk_policy.max_actual_notional ?? "—") })}</span>
+                <span>{t("backtest.peakEq", { peak: String(report.risk_policy.peak_equity ?? "—"), rejects: report.metrics.risk_rejection_count ?? 0 })}</span>
+                <span>{t("backtest.stopReason", { reasons: JSON.stringify(report.risk_policy.stop_reasons ?? {}) })}</span>
               </div>}
               {report.fidelity_mode === DUAL_CLOCK_MODE && <div className="backtest-strategy-evidence" data-testid="dual-clock-report">
-                <strong>信号周期 {report.identity?.signal_interval} · {report.identity?.timezone}</strong>
+                <strong>{t("backtest.signalInterval", { interval: String(report.identity?.signal_interval ?? "") })} · {report.identity?.timezone}</strong>
                 <span>{report.identity?.signal_clock} → {report.identity?.execution_clock}</span>
-                <span>信号事件 {report.metrics.signal_event_count} · 执行事件 {report.metrics.execution_event_count}</span>
-                <span>{report.identity?.bar_builder} · aggTrade 非 raw trade / queue exact</span>
+                <span>{t("backtest.signalEvents", { signals: report.metrics.signal_event_count ?? 0, execs: report.metrics.execution_event_count ?? 0 })}</span>
+                <span>{t("backtest.aggNotRawShort", { builder: String(report.identity?.bar_builder ?? "") })}</span>
               </div>}
               {report.identity?.execution_model_revision === EXECUTION_REALISM_V2 && <div className="backtest-strategy-evidence" data-testid="execution-realism-report">
                 <strong>{report.identity.execution_model_revision} · {report.identity.fill_policy}</strong>
-                <span>参与率 {String(report.execution_assumptions?.participation_rate ?? "—")} · 延迟 {String(report.execution_assumptions?.latency_ms ?? 0)} ms / {String(report.execution_assumptions?.latency_events ?? 0)} events</span>
-                <span>结束策略 {report.identity.order_end_policy} · 场景 {report.identity.bar_path_scenario ?? "AGG_TRADE_PRINT_SEQUENCE"}</span>
-                <span>权威事件追踪 {report.fill_trace?.authoritative_event_trace_count ?? 0}/{report.fill_trace?.fill_count ?? 0} · {report.fill_trace?.complete ? "完整" : "不完整"}</span>
-                <small>OHLC 路径不是历史事实；aggTrade 不是 raw trade，且不提供 spread、depth 或 queue position 真相。</small>
+                <span>{t("backtest.participationDelay", { rate: String(report.execution_assumptions?.participation_rate ?? "—"), ms: String(report.execution_assumptions?.latency_ms ?? 0), events: String(report.execution_assumptions?.latency_events ?? 0) })}</span>
+                <span>{t("backtest.endPolicy", { policy: String(report.identity.order_end_policy), scenario: String(report.identity.bar_path_scenario ?? "AGG_TRADE_PRINT_SEQUENCE") })}</span>
+                <span>{t("backtest.authTrace", { done: report.fill_trace?.authoritative_event_trace_count ?? 0, total: report.fill_trace?.fill_count ?? 0, status: report.fill_trace?.complete ? t("backtest.complete") : t("backtest.incompleteTrace") })}</span>
+                <small>{t("backtest.ohlcNotFact")}</small>
               </div>}
               {(report.cost_sensitivity?.scenarios?.length ?? 0) > 0 && <>
-                <h3 className="backtest-table-title">成本敏感性（稳健性检查，不参与主 Run hash）</h3>
+                <h3 className="backtest-table-title">{t("backtest.costSens")}</h3>
                 <div className="backtest-table-wrap" data-testid="cost-sensitivity-table">
                   <table>
-                    <thead><tr><th>场景</th><th>状态</th><th>成交</th><th>费用</th><th>最终权益</th><th>残单</th></tr></thead>
+                    <thead><tr><th>{t("backtest.scenario")}</th><th>{t("backtest.status")}</th><th>{t("backtest.fills")}</th><th>{t("backtest.fee")}</th><th>{t("backtest.finalEquity")}</th><th>{t("backtest.leftoverTh")}</th></tr></thead>
                     <tbody>{report.cost_sensitivity?.scenarios?.map((scenario) => <tr key={scenario.name}>
                       <td>{scenario.name}</td><td>{scenario.status}</td>
                       <td>{String(scenario.metrics.fill_count ?? "—")}</td>
@@ -1345,24 +1356,28 @@ export default function BacktestApp() {
                 </div>
               </>}
               <div className="backtest-proof">
-                <span>Report hash</span><code title={report.hashes.report ?? ""}>{report.hashes.report}</code>
+                <span>{t("backtest.reportHash")}</span><code title={report.hashes.report ?? ""}>{report.hashes.report}</code>
               </div>
               {report.strategy && <div className="backtest-strategy-evidence" data-testid="strategy-evidence">
                 <strong>{report.strategy.revision}</strong>
-                <span>指标 {report.strategy.indicatorRevision}</span>
-                <span>参数 {report.strategy.length} / {report.strategy.oversold} / {report.strategy.overbought}</span>
-                <span>{report.strategy.triggerMode} · warmup {report.strategy.warmupRowsObserved}/{report.strategy.warmupRequirementRows}</span>
-                <span>Reason {JSON.stringify(report.strategy.reasonCodes ?? {})}</span>
+                <span>{t("backtest.indicator", { rev: report.strategy.indicatorRevision ?? "—" })}</span>
+                <span>{t("backtest.params", { a: report.strategy.length ?? "—", b: report.strategy.oversold ?? "—", c: report.strategy.overbought ?? "—" })}</span>
+                <span>{t("backtest.warmup", {
+                  mode: report.strategy.triggerMode ?? "—",
+                  observed: report.strategy.warmupRowsObserved ?? "—",
+                  required: report.strategy.warmupRequirementRows ?? "—",
+                })}</span>
+                <span>{t("backtest.reasonCodes", { reasons: JSON.stringify(report.strategy.reasonCodes ?? {}) })}</span>
               </div>}
               <div className="backtest-report-columns">
-                <div><h3>适合解释</h3>{report.suitable_for.map((item) => <p key={item}>✓ {item}</p>)}</div>
-                <div><h3>不能解释</h3>{report.not_suitable_for.map((item) => <p key={item}>× {item}</p>)}</div>
+                <div><h3>{t("backtest.suitable")}</h3>{report.suitable_for.map((item) => <p key={item}>✓ {item}</p>)}</div>
+                <div><h3>{t("backtest.notSuitable")}</h3>{report.not_suitable_for.map((item) => <p key={item}>× {item}</p>)}</div>
               </div>
-              <h3 className="backtest-table-title">逐笔成交</h3>
-              {report.fills.length > 1_000 && <p className="backtest-empty">表格仅渲染最后 1,000 行；完整记录保留在验证包中。</p>}
+              <h3 className="backtest-table-title">{t("backtest.fillTable")}</h3>
+              {report.fills.length > 1_000 && <p className="backtest-empty">{t("backtest.tableTrunc")}</p>}
               <div className="backtest-table-wrap">
                 <table>
-                  <thead><tr><th>订单</th><th>时间</th><th>动作</th><th>方向</th><th>价格</th><th>数量</th><th>费用</th><th>原因</th><th>权威源事件</th></tr></thead>
+                  <thead><tr><th>{t("backtest.order")}</th><th>{t("backtest.time")}</th><th>{t("backtest.action")}</th><th>{t("backtest.side")}</th><th>{t("backtest.price")}</th><th>{t("backtest.qty")}</th><th>{t("backtest.fee")}</th><th>{t("backtest.reason")}</th><th>{t("backtest.authEvent")}</th></tr></thead>
                   <tbody>
                     {boundedRows(report.fills).map((fill, index) => (
                       <tr key={`${String(fill.order_id)}-${index}`}>
@@ -1379,10 +1394,10 @@ export default function BacktestApp() {
                 </table>
               </div>
               {(report.order_events?.length ?? 0) > 0 && <>
-                <h3 className="backtest-table-title">订单生命周期</h3>
+                <h3 className="backtest-table-title">{t("backtest.lifecycle")}</h3>
                 <div className="backtest-table-wrap" data-testid="order-lifecycle-table">
                   <table>
-                    <thead><tr><th>序号</th><th>订单</th><th>状态</th><th>事件</th><th>剩余数量</th><th>原因</th></tr></thead>
+                    <thead><tr><th>{t("backtest.seq")}</th><th>{t("backtest.order")}</th><th>{t("backtest.status")}</th><th>{t("backtest.event")}</th><th>{t("backtest.remaining")}</th><th>{t("backtest.reason")}</th></tr></thead>
                     <tbody>{boundedRows(report.order_events ?? []).map((item, index) => <tr key={`${String(item.order_id ?? "rejected")}-${index}`}>
                       <td>{String(item.ordinal ?? index + 1)}</td><td>{String(item.order_id ?? "—")}</td>
                       <td>{String(item.state ?? "")}</td><td>{String(item.sequence ?? "")}</td>
@@ -1392,10 +1407,10 @@ export default function BacktestApp() {
                 </div>
               </>}
               {(report.rejected_orders?.length ?? 0) > 0 && <>
-                <h3 className="backtest-table-title">Host 风控 / 规则拒单</h3>
+                <h3 className="backtest-table-title">{t("backtest.riskRejects")}</h3>
                 <div className="backtest-table-wrap" data-testid="risk-rejection-table">
                   <table>
-                    <thead><tr><th>时间</th><th>类别</th><th>原因</th><th>规则</th><th>输入快照</th></tr></thead>
+                    <thead><tr><th>{t("backtest.time")}</th><th>{t("backtest.category")}</th><th>{t("backtest.reason")}</th><th>{t("backtest.rule")}</th><th>{t("backtest.snapshot")}</th></tr></thead>
                     <tbody>{boundedRows(report.rejected_orders ?? []).map((rejection, index) => (
                       <tr key={`${String(rejection.sequence ?? "rejected")}-${index}`}>
                         <td>{timestampLabel(Number(rejection.event_time_ms))}</td>
@@ -1408,21 +1423,21 @@ export default function BacktestApp() {
                   </table>
                 </div>
               </>}
-              <h3 className="backtest-table-title">每一笔完整交易（FIFO 配对）</h3>
+              <h3 className="backtest-table-title">{t("backtest.fifoTrades")}</h3>
               {report.performance && <div className="backtest-trade-filters" data-testid="trade-filters">
-                <select aria-label="交易方向" value={tradeSideFilter} onChange={(event) => setTradeSideFilter(event.target.value)}>
-                  <option value="ALL">全部方向</option><option value="LONG">多</option><option value="SHORT">空</option>
+                <select aria-label={t("backtest.sideFilter")} value={tradeSideFilter} onChange={(event) => setTradeSideFilter(event.target.value)}>
+                  <option value="ALL">{t("backtest.allSides")}</option><option value="LONG">{t("backtest.long")}</option><option value="SHORT">{t("backtest.short")}</option>
                 </select>
-                <select aria-label="交易结果" value={tradeOutcomeFilter} onChange={(event) => setTradeOutcomeFilter(event.target.value)}>
-                  <option value="ALL">全部结果</option><option value="WIN">盈利</option><option value="LOSS">亏损</option>
+                <select aria-label={t("backtest.outcomeFilter")} value={tradeOutcomeFilter} onChange={(event) => setTradeOutcomeFilter(event.target.value)}>
+                  <option value="ALL">{t("backtest.allOutcomes")}</option><option value="WIN">{t("backtest.win")}</option><option value="LOSS">{t("backtest.loss")}</option>
                 </select>
-                <input aria-label="起始日期" type="date" value={tradeFromDate} onChange={(event) => setTradeFromDate(event.target.value)} />
-                <input aria-label="结束日期" type="date" value={tradeToDate} onChange={(event) => setTradeToDate(event.target.value)} />
-                <input aria-label="原因筛选" placeholder="reason" value={tradeReasonFilter} onChange={(event) => setTradeReasonFilter(event.target.value)} />
+                <input aria-label={t("backtest.fromDate")} type="date" value={tradeFromDate} onChange={(event) => setTradeFromDate(event.target.value)} />
+                <input aria-label={t("backtest.toDate")} type="date" value={tradeToDate} onChange={(event) => setTradeToDate(event.target.value)} />
+                <input aria-label={t("backtest.reasonFilter")} placeholder={t("backtest.reason")} value={tradeReasonFilter} onChange={(event) => setTradeReasonFilter(event.target.value)} />
               </div>}
               <div className="backtest-table-wrap">
                 <table>
-                  <thead><tr><th>交易</th><th>方向</th><th>开仓时间</th><th>平仓时间</th><th>开仓价</th><th>平仓价</th><th>MAE</th><th>MFE</th><th>原因</th><th>净盈亏</th></tr></thead>
+                  <thead><tr><th>{t("backtest.trade")}</th><th>{t("backtest.side")}</th><th>{t("backtest.openTime")}</th><th>{t("backtest.closeTime")}</th><th>{t("backtest.openPx")}</th><th>{t("backtest.closePx")}</th><th>MAE</th><th>MFE</th><th>{t("backtest.reason")}</th><th>{t("backtest.netPnl")}</th></tr></thead>
                   <tbody>{boundedRows(report.performance ? filteredTrades : report.trades ?? []).map((trade) => (
                     <tr key={trade.trade_id} className={trade.trade_id === focusedTradeId ? "selected" : ""} onClick={() => setFocusedTradeId(trade.trade_id ?? null)}>
                       <td>{trade.trade_id}</td><td>{trade.side}</td>
@@ -1434,110 +1449,126 @@ export default function BacktestApp() {
                 </table>
               </div>
               {focusedTrade && <div className="backtest-strategy-evidence" data-testid="focused-trade">
-                <strong>{focusedTrade.trade_id} 已定位到入场 K 线</strong>
-                <span>入场 {focusedTrade.entry_price} · MAE {focusedTrade.mae || "—"} · MFE {focusedTrade.mfe || "—"} · 退出 {focusedTrade.exit_price}</span>
-                <span>decision {timestampLabel(Number(focusedTrade.decision_time_ms ?? focusedTrade.entry_time_ms))} → accepted {timestampLabel(Number(focusedTrade.order_accepted_time_ms ?? focusedTrade.entry_time_ms))} → fill {timestampLabel(Number(focusedTrade.entry_time_ms))}</span>
-                <span>执行影响：延迟 {latencyMs} ms / {latencyEvents} events · 滑点 {slippageBps} bps · 手续费 {focusedTrade.fees ?? "—"} · 资金费 {focusedTrade.funding ?? "—"}</span>
-                <small>触发输入只来自当时可见的已完结数据；BAR/aggTrade 均不代表 raw trade、真实盘口或 queue exact。</small>
+                <strong>{t("backtest.located", { id: focusedTrade.trade_id ?? "—" })}</strong>
+                <span>{t("backtest.entryExit", { entry: focusedTrade.entry_price ?? "—", mae: focusedTrade.mae || "—", mfe: focusedTrade.mfe || "—", exit: focusedTrade.exit_price ?? "—" })}</span>
+                <span>{t("backtest.decisionTrace", {
+                  decision: timestampLabel(Number(focusedTrade.decision_time_ms ?? focusedTrade.entry_time_ms)),
+                  accepted: timestampLabel(Number(focusedTrade.order_accepted_time_ms ?? focusedTrade.entry_time_ms)),
+                  fill: timestampLabel(Number(focusedTrade.entry_time_ms)),
+                })}</span>
+                <span>{t("backtest.execImpact", { ms: latencyMs, events: latencyEvents, slip: slippageBps, fees: focusedTrade.fees ?? "—", funding: focusedTrade.funding ?? "—" })}</span>
+                <small>{t("backtest.triggerHint")}</small>
               </div>}
             </>
           ) : (
             <p className="backtest-empty">
               {error
-                ? "连接或报告失败，不会显示空报告。"
-                : selectedRun?.state === "COMPLETED" ? "正在加载报告…" : "选择一个已完成 Run 查看报告。"}
+                ? t("backtest.connFail")
+                : selectedRun?.state === "COMPLETED" ? t("backtest.loadingReport") : t("backtest.pickCompleted")}
             </p>
           )}
         </section>
 
         <section className="backtest-card backtest-visuals">
-          <div className="backtest-section-title"><span>04</span><h2>K 线开平仓与账户资金曲线</h2></div>
+          <div className="backtest-section-title"><span>04</span><h2>{t("backtest.chartTitle")}</h2></div>
           {chart ? (
             <>
               <BacktestResultChart chart={chart} focusTimeMs={focusedTrade ? Number(focusedTrade.entry_time_ms) : null} />
               <RsiTracePane items={signalTrace} />
-              <h3 className="backtest-table-title">账户权益</h3>
+              <h3 className="backtest-table-title">{t("backtest.equityTitle")}</h3>
               <EquityCurve data={report?.performance?.equity_daily ?? chart.equity_curve} drawdown={report?.performance?.drawdown_daily} />
             </>
-          ) : <p className="backtest-empty">选择一个已完成 Run 查看开平仓标记和资金曲线。</p>}
+          ) : <p className="backtest-empty">{t("backtest.pickChart")}</p>}
         </section>
 
         <section className="backtest-card backtest-visuals" data-testid="run-compare-workspace">
-          <div className="backtest-section-title"><span>05</span><h2>Run 对比与执行精度解释</h2></div>
+          <div className="backtest-section-title"><span>05</span><h2>{t("backtest.compareTitle")}</h2></div>
           <div className="backtest-form-row">
-            <label>对比 Run<select value={compareRunId} onChange={(event) => setCompareRunId(event.target.value)}>
-              <option value="">选择另一个已完成 Run</option>
+            <label>{t("backtest.compareRun")}<select value={compareRunId} onChange={(event) => setCompareRunId(event.target.value)}>
+              <option value="">{t("backtest.pickOther")}</option>
               {runs.filter((item) => item.state === "COMPLETED" && item.run_id !== selectedRunId).map((item) => <option key={item.run_id} value={item.run_id}>{item.run_id} · {item.fidelity_mode}</option>)}
             </select></label>
-            <button type="button" disabled={!compareRunId || loading} onClick={() => void handleCompareRuns()}>检查兼容并对比</button>
+            <button type="button" disabled={!compareRunId || loading} onClick={() => void handleCompareRuns()}>{t("backtest.checkCompare")}</button>
           </div>
           {runComparison && <div className="backtest-strategy-evidence">
-            <strong>{runComparison.directComparisonAllowed ? "关键身份兼容：允许直接叠加" : "关键身份不兼容：禁止直接叠加"}</strong>
-            <span>差异 {JSON.stringify(runComparison.incompatibleFields ?? [])}</span>
-            <span>参数 {JSON.stringify(runComparison.parameterDiff ?? {})}</span>
-            <span>交易差异 {JSON.stringify(runComparison.tradeDiff ?? {})}</span>
-            <span>成本差异（手续费 / 资金费 / 滑点）{JSON.stringify(runComparison.costDiff ?? {})}</span>
-            <span>净值 / 回撤曲线点：{String(((runComparison.left as Record<string, unknown> | undefined)?.equityDaily as unknown[] | undefined)?.length ?? 0)} / {String(((runComparison.left as Record<string, unknown> | undefined)?.drawdownDaily as unknown[] | undefined)?.length ?? 0)} ↔ {String(((runComparison.right as Record<string, unknown> | undefined)?.equityDaily as unknown[] | undefined)?.length ?? 0)} / {String(((runComparison.right as Record<string, unknown> | undefined)?.drawdownDaily as unknown[] | undefined)?.length ?? 0)}</span>
-            <span>decision / fill：{JSON.stringify((runComparison.left as Record<string, unknown> | undefined)?.hashes ?? {})} ↔ {JSON.stringify((runComparison.right as Record<string, unknown> | undefined)?.hashes ?? {})}</span>
-            <span>{String(runComparison.precisionExplanation ?? "decision/fill hash 共同说明决策与执行差异。")}</span>
+            <strong>{runComparison.directComparisonAllowed ? t("backtest.compatOk") : t("backtest.compatNo")}</strong>
+            <span>{t("backtest.diff", { json: JSON.stringify(runComparison.incompatibleFields ?? []) })}</span>
+            <span>{t("backtest.paramDiff", { json: JSON.stringify(runComparison.parameterDiff ?? {}) })}</span>
+            <span>{t("backtest.tradeDiff")} {JSON.stringify(runComparison.tradeDiff ?? {})}</span>
+            <span>{t("backtest.costDiff")} {JSON.stringify(runComparison.costDiff ?? {})}</span>
+            <span>{t("backtest.curves", {
+              leftEq: String(((runComparison.left as Record<string, unknown> | undefined)?.equityDaily as unknown[] | undefined)?.length ?? 0),
+              leftDd: String(((runComparison.left as Record<string, unknown> | undefined)?.drawdownDaily as unknown[] | undefined)?.length ?? 0),
+              rightEq: String(((runComparison.right as Record<string, unknown> | undefined)?.equityDaily as unknown[] | undefined)?.length ?? 0),
+              rightDd: String(((runComparison.right as Record<string, unknown> | undefined)?.drawdownDaily as unknown[] | undefined)?.length ?? 0),
+            })}</span>
+            <span>{t("backtest.decisionFillHashes", {
+              left: JSON.stringify((runComparison.left as Record<string, unknown> | undefined)?.hashes ?? {}),
+              right: JSON.stringify((runComparison.right as Record<string, unknown> | undefined)?.hashes ?? {}),
+            })}</span>
+            <span>{String(runComparison.precisionExplanation ?? t("backtest.precision"))}</span>
           </div>}
           {selectedRun?.state === "COMPLETED" && <div className="backtest-form-row three">
-            <label>Clone 单一参数<input value={cloneParameter} onChange={(event) => setCloneParameter(event.target.value)} /></label>
-            <label>新值<input value={cloneValue} onChange={(event) => setCloneValue(event.target.value)} /></label>
-            <button type="button" disabled={loading} onClick={() => void handleCloneRun()}>生成新不可变 Run</button>
+            <label>{t("backtest.cloneParam")}<input value={cloneParameter} onChange={(event) => setCloneParameter(event.target.value)} /></label>
+            <label>{t("backtest.newValue")}<input value={cloneValue} onChange={(event) => setCloneValue(event.target.value)} /></label>
+            <button type="button" disabled={loading} onClick={() => void handleCloneRun()}>{t("backtest.newImmutable")}</button>
           </div>}
           <div className="backtest-strategy-evidence">
-            <strong>回放研究桥：{capabilities?.flags.BACKTEST_REPLAY_REVIEW_BRIDGE_ENABLED ? "已显式启用" : "默认关闭"}</strong>
-            <span>桥只传不可变数据引用与只读投影；账户、cursor、checkpoint、UI store 永不共享。</span>
-            <small>训练完成前保持盲态；揭盲后才能比较人工订单与策略订单。</small>
-            {capabilities?.flags.BACKTEST_REPLAY_REVIEW_BRIDGE_ENABLED && <button type="button" disabled={!selectedRunId || loading} onClick={() => void handleReviewBridge()}>从当前窗口创建独立盲态研究 handoff</button>}
-            {reviewBridge && <span>handoff {String(reviewBridge.bridgeId)} · {String(reviewBridge.state)} · 策略投影 {reviewBridge.strategyProjection ? "已揭示" : "隐藏"}</span>}
-            {capabilities?.flags.BACKTEST_REPLAY_REVIEW_BRIDGE_ENABLED && reviewBridge?.state === "BLINDED" && <button type="button" disabled={loading} onClick={() => void handleRevealReviewBridge()}>完成后检查并揭示只读对比</button>}
+            <strong>{t("backtest.bridge", { state: capabilities?.flags.BACKTEST_REPLAY_REVIEW_BRIDGE_ENABLED ? t("backtest.enabled") : t("backtest.disabledFlag") })}</strong>
+            <span>{t("backtest.bridgeHint")}</span>
+            <small>{t("backtest.blindHint")}</small>
+            {capabilities?.flags.BACKTEST_REPLAY_REVIEW_BRIDGE_ENABLED && <button type="button" disabled={!selectedRunId || loading} onClick={() => void handleReviewBridge()}>{t("backtest.createHandoff")}</button>}
+            {reviewBridge && <span>{t("backtest.handoffState", {
+              id: String(reviewBridge.bridgeId),
+              state: String(reviewBridge.state),
+              projection: t("backtest.projection", { state: reviewBridge.strategyProjection ? t("backtest.revealed") : t("backtest.hidden") }),
+            })}</span>}
+            {capabilities?.flags.BACKTEST_REPLAY_REVIEW_BRIDGE_ENABLED && reviewBridge?.state === "BLINDED" && <button type="button" disabled={loading} onClick={() => void handleRevealReviewBridge()}>{t("backtest.revealCompare")}</button>}
             {reviewBridge?.state === "REVEALED" && <small>{JSON.stringify(reviewBridge.comparison ?? {})}</small>}
           </div>
         </section>
 
         <section className="backtest-card backtest-studies">
-          <div className="backtest-section-title"><span>06</span><h2>Study V2 · Train → Select → Test</h2></div>
+          <div className="backtest-section-title"><span>06</span><h2>{t("backtest.studyTitle")}</h2></div>
           <div className="backtest-strategy-evidence" data-testid="study-v2-contract">
-            <strong>BACKTEST_WALK_FORWARD_V2 · RSI24 参数研究</strong>
-            <span>Test 数据不会参与选择；每个 fold 只有一份 append-only selection receipt 和一次 TestRun。</span>
-            <small>OOS 只拼接 TestRun；回测结果不是实盘批准。BAR 仍不代表唯一 K 线内路径。</small>
+            <strong>{t("backtest.studyContract")}</strong>
+            <span>{t("backtest.studyHint")}</span>
+            <small>{t("backtest.studyOos")}</small>
           </div>
           <div className="backtest-form-row two">
-            <label>研究假设
-              <input aria-label="Study hypothesis" value={studyHypothesis} onChange={(event) => setStudyHypothesis(event.target.value)} />
+            <label>{t("backtest.hypothesis")}
+              <input aria-label={t("backtest.hypothesis")} value={studyHypothesis} onChange={(event) => setStudyHypothesis(event.target.value)} />
             </label>
-            <label>RSI24 参数空间 JSON
-              <input aria-label="Study parameter space" value={studyParameterSpace} onChange={(event) => setStudyParameterSpace(event.target.value)} />
+            <label>{t("backtest.paramSpace")}
+              <input aria-label={t("backtest.paramSpace")} value={studyParameterSpace} onChange={(event) => setStudyParameterSpace(event.target.value)} />
             </label>
           </div>
           <div className="backtest-form-row three">
-            <label>Train 天数<input aria-label="Train days" type="number" min="1" value={studyTrainDays} onChange={(event) => setStudyTrainDays(Number(event.target.value))} /></label>
-            <label>Test 天数<input aria-label="Test days" type="number" min="1" value={studyTestDays} onChange={(event) => setStudyTestDays(Number(event.target.value))} /></label>
-            <label>Step 天数<input aria-label="Step days" type="number" min="1" value={studyStepDays} onChange={(event) => setStudyStepDays(Number(event.target.value))} /></label>
+            <label>{t("backtest.trainDays")}<input aria-label={t("backtest.trainDays")} type="number" min="1" value={studyTrainDays} onChange={(event) => setStudyTrainDays(Number(event.target.value))} /></label>
+            <label>{t("backtest.testDays")}<input aria-label={t("backtest.testDays")} type="number" min="1" value={studyTestDays} onChange={(event) => setStudyTestDays(Number(event.target.value))} /></label>
+            <label>{t("backtest.stepDays")}<input aria-label={t("backtest.stepDays")} type="number" min="1" value={studyStepDays} onChange={(event) => setStudyStepDays(Number(event.target.value))} /></label>
           </div>
           <div className="backtest-form-row three">
-            <label>Purge 天数<input aria-label="Purge days" type="number" min="0" value={studyPurgeDays} onChange={(event) => setStudyPurgeDays(Number(event.target.value))} /></label>
-            <label>Embargo 天数<input aria-label="Embargo days" type="number" min="0" value={studyEmbargoDays} onChange={(event) => setStudyEmbargoDays(Number(event.target.value))} /></label>
-            <label>Holdout 天数<input aria-label="Holdout days" type="number" min="0" value={studyHoldoutDays} onChange={(event) => setStudyHoldoutDays(Number(event.target.value))} /></label>
+            <label>{t("backtest.purgeDays")}<input aria-label={t("backtest.purgeDays")} type="number" min="0" value={studyPurgeDays} onChange={(event) => setStudyPurgeDays(Number(event.target.value))} /></label>
+            <label>{t("backtest.embargoDays")}<input aria-label={t("backtest.embargoDays")} type="number" min="0" value={studyEmbargoDays} onChange={(event) => setStudyEmbargoDays(Number(event.target.value))} /></label>
+            <label>{t("backtest.holdoutDays")}<input aria-label={t("backtest.holdoutDays")} type="number" min="0" value={studyHoldoutDays} onChange={(event) => setStudyHoldoutDays(Number(event.target.value))} /></label>
           </div>
           <div className="backtest-form-row three">
-            <label>Objective<select aria-label="Study objective" value={studyObjective} onChange={(event) => setStudyObjective(event.target.value)}>
+            <label>{t("backtest.objective")}<select aria-label={t("backtest.objective")} value={studyObjective} onChange={(event) => setStudyObjective(event.target.value)}>
               <option value="NET_RETURN">NET_RETURN</option><option value="SHARPE">SHARPE</option><option value="CALMAR">CALMAR</option><option value="EXPECTANCY">EXPECTANCY</option>
             </select></label>
-            <label>Candidate budget<input aria-label="Candidate budget" type="number" min="1" max="64" value={studyCandidateBudget} onChange={(event) => setStudyCandidateBudget(Number(event.target.value))} /></label>
-            <label>Sampler seed<input aria-label="Study seed" type="number" value={studySeed} onChange={(event) => setStudySeed(Number(event.target.value))} /></label>
+            <label>{t("backtest.candidateBudget")}<input aria-label={t("backtest.candidateBudget")} type="number" min="1" max="64" value={studyCandidateBudget} onChange={(event) => setStudyCandidateBudget(Number(event.target.value))} /></label>
+            <label>{t("backtest.samplerSeed")}<input aria-label={t("backtest.samplerSeed")} type="number" value={studySeed} onChange={(event) => setStudySeed(Number(event.target.value))} /></label>
           </div>
           <div className="backtest-form-row three">
-            <label>最小完整交易<input aria-label="Minimum closed trades" type="number" min="1" value={studyMinTrades} onChange={(event) => setStudyMinTrades(Number(event.target.value))} /></label>
-            <label>最大回撤（0..1）<input aria-label="Study maximum drawdown" value={studyMaxDrawdown} onChange={(event) => setStudyMaxDrawdown(event.target.value)} /></label>
-            <label className="backtest-checkbox"><input type="checkbox" checked={studyCostGuard} onChange={(event) => setStudyCostGuard(event.target.checked)} />成本 +25% 后仍为正</label>
+            <label>{t("backtest.minTrades")}<input aria-label={t("backtest.minTrades")} type="number" min="1" value={studyMinTrades} onChange={(event) => setStudyMinTrades(Number(event.target.value))} /></label>
+            <label>{t("backtest.maxDd01")}<input aria-label={t("backtest.maxDd01")} value={studyMaxDrawdown} onChange={(event) => setStudyMaxDrawdown(event.target.value)} /></label>
+            <label className="backtest-checkbox"><input type="checkbox" checked={studyCostGuard} onChange={(event) => setStudyCostGuard(event.target.checked)} />{t("backtest.costGuard")}</label>
           </div>
           <div className="backtest-study-toolbar">
-            <p>先冻结 hypothesis、snapshot、fold、预算、objective、constraints 与 tie-break，再交给后台恢复型调度器。</p>
+            <p>{t("backtest.studyFreeze")}</p>
             <button type="button" onClick={handleCreateStudy} disabled={loading || !snapshot || fidelityMode !== "BAR_APPROX" || !studyHypothesis.trim() || (pythonSelected && !smokePassed)}>
-              {pythonSelected ? "创建并启动 Python Study V2" : "创建并启动 RSI24 Study V2"}
+              {pythonSelected ? t("backtest.createPythonStudy") : t("backtest.createRsiStudy")}
             </button>
           </div>
           <div className="backtest-study-grid">
@@ -1551,34 +1582,38 @@ export default function BacktestApp() {
                 >
                   <span className={`backtest-state ${study.state.toLowerCase()}`}>{study.state}</span>
                   <strong>{study.name}</strong>
-                  <small>{study.folds?.length ?? 0} folds · {(study.folds ?? []).reduce((count, fold) => count + fold.train_trials.length, 0) || study.trials.length} train trials · {hashLabel(study.config_hash)}</small>
+                  <small>{t("backtest.studySummary", {
+                    folds: study.folds?.length ?? 0,
+                    trials: (study.folds ?? []).reduce((count, fold) => count + fold.train_trials.length, 0) || study.trials.length,
+                    hash: hashLabel(study.config_hash),
+                  })}</small>
                 </button>
               ))}
-              {studies.length === 0 && <p className="backtest-empty">还没有 Study。</p>}
+              {studies.length === 0 && <p className="backtest-empty">{t("backtest.noStudy")}</p>}
             </div>
             <div className="backtest-study-detail">
               {selectedStudy ? (
                 <>
                   <div className="backtest-run-actions">
                     {!TERMINAL_STATES.has(selectedStudy.state) && (
-                      <button type="button" onClick={handleCancelStudy} disabled={loading}>取消 Study 和子 Runs</button>
+                      <button type="button" onClick={handleCancelStudy} disabled={loading}>{t("backtest.cancelStudy")}</button>
                     )}
                     {selectedStudy.state === "AWAITING_HOLDOUT" && selectedStudy.holdout?.state === "SEALED" && (
-                      <button type="button" onClick={handleRevealHoldout} disabled={loading}>仅揭示一次 Holdout</button>
+                      <button type="button" onClick={handleRevealHoldout} disabled={loading}>{t("backtest.revealHoldout")}</button>
                     )}
                     <span>{selectedStudy.study_protocol_revision ?? "LEGACY_STUDY_V1"} · {selectedStudy.state}</span>
                   </div>
                   <div className="backtest-strategy-evidence">
                     <strong>{selectedStudy.hypothesis}</strong>
-                    <span>Train/Test/Holdout 身份已冻结 · config {hashLabel(selectedStudy.config_hash)}</span>
+                    <span>{t("backtest.studyFrozen", { hash: hashLabel(selectedStudy.config_hash) })}</span>
                   </div>
                   {(selectedStudy.folds?.length ?? 0) > 0 && <div className="backtest-table-wrap" data-testid="study-v2-folds">
                     <table>
-                      <thead><tr><th>Fold</th><th>Train</th><th>Test</th><th>状态</th><th>选中参数</th><th>Receipt</th><th>TestRun</th></tr></thead>
+                      <thead><tr><th>{t("backtest.fold")}</th><th>{t("backtest.train")}</th><th>{t("backtest.test")}</th><th>{t("backtest.status")}</th><th>{t("backtest.selectedParams")}</th><th>{t("backtest.receipt")}</th><th>{t("backtest.testRun")}</th></tr></thead>
                       <tbody>{selectedStudy.folds?.map((fold) => <tr key={fold.fold_id}>
                         <td>{fold.ordinal}</td>
-                        <td>{timestampLabel(fold.train_start_ms)} → {timestampLabel(fold.train_end_ms)}<small> purge {fold.purge_ms / 86_400_000}d</small></td>
-                        <td>{timestampLabel(fold.test_start_ms)} → {timestampLabel(fold.test_end_ms)}<small> embargo {fold.embargo_ms / 86_400_000}d</small></td>
+                        <td>{timestampLabel(fold.train_start_ms)} → {timestampLabel(fold.train_end_ms)}<small>{t("backtest.purgeShort", { days: fold.purge_ms / 86_400_000 })}</small></td>
+                        <td>{timestampLabel(fold.test_start_ms)} → {timestampLabel(fold.test_end_ms)}<small>{t("backtest.embargoShort", { days: fold.embargo_ms / 86_400_000 })}</small></td>
                         <td>{fold.state}</td>
                         <td>{JSON.stringify(fold.selection_receipt?.selected.params ?? null)}</td>
                         <td>{hashLabel(fold.selection_receipt?.hashes.receipt ?? null)}</td>
@@ -1587,26 +1622,26 @@ export default function BacktestApp() {
                     </table>
                   </div>}
                   {(selectedStudy.folds?.[0]?.selection_receipt?.candidates.length ?? 0) > 0 && <>
-                    <h3 className="backtest-table-title">TRAIN-only 参数热图数据（不是 OOS 排名）</h3>
+                    <h3 className="backtest-table-title">{t("backtest.trainHeatmap")}</h3>
                     <div className="backtest-monthly-heatmap" data-testid="study-train-heatmap">
                       {selectedStudy.folds?.[0]?.selection_receipt?.candidates.map((candidate) => <div
                         key={candidate.params_hash}
                         className={candidate.evaluation.eligible ? "positive" : "negative"}
                         title={candidate.evaluation.violations.join(", ")}
-                      ><span>{JSON.stringify(candidate.params)}</span><strong>{candidate.evaluation.objective_value ?? "不合格"}</strong></div>)}
+                      ><span>{JSON.stringify(candidate.params)}</span><strong>{candidate.evaluation.objective_value ?? t("backtest.unqualified")}</strong></div>)}
                     </div>
                   </>}
                   {studyComparison?.ready && studyComparison.oos_report ? (
                     <div data-testid="study-v2-oos">
                       <div className="backtest-metrics">
-                        <div><span>OOS folds</span><strong>{studyComparison.oos_report.summary.fold_count}</strong></div>
-                        <div><span>OOS return</span><strong>{studyComparison.oos_report.summary.total_return}</strong></div>
-                        <div><span>来源</span><strong>{studyComparison.oos_report.sourcePolicy}</strong></div>
-                        <div><span>OOS hash</span><strong>{hashLabel(studyComparison.oos_report.hashes.report)}</strong></div>
+                        <div><span>{t("backtest.oosFolds")}</span><strong>{studyComparison.oos_report.summary.fold_count}</strong></div>
+                        <div><span>{t("backtest.oosReturn")}</span><strong>{studyComparison.oos_report.summary.total_return}</strong></div>
+                        <div><span>{t("backtest.source")}</span><strong>{studyComparison.oos_report.sourcePolicy}</strong></div>
+                        <div><span>{t("backtest.oosHash")}</span><strong>{hashLabel(studyComparison.oos_report.hashes.report)}</strong></div>
                       </div>
                       <EquityCurve data={studyComparison.oos_report.equity} />
                       <div className="backtest-table-wrap"><table>
-                        <thead><tr><th>Fold</th><th>选中参数</th><th>Train objective</th><th>Test objective</th><th>Gap</th><th>Regime</th><th>Benchmark</th></tr></thead>
+                        <thead><tr><th>{t("backtest.fold")}</th><th>{t("backtest.selectedParams")}</th><th>{t("backtest.trainObjective")}</th><th>{t("backtest.testObjective")}</th><th>{t("backtest.gap")}</th><th>{t("backtest.regime")}</th><th>{t("backtest.benchmark")}</th></tr></thead>
                         <tbody>{studyComparison.oos_report.folds.map((fold) => <tr key={fold.ordinal}>
                           <td>{fold.ordinal}</td><td>{JSON.stringify(fold.selected_params)}</td><td>{fold.train_objective}</td><td>{fold.test_objective ?? "—"}</td><td>{fold.train_test_gap ?? "—"}</td><td>{fold.market_regime}</td><td>{fold.benchmark_return ?? "—"}</td>
                         </tr>)}</tbody>
@@ -1615,17 +1650,17 @@ export default function BacktestApp() {
                   ) : null}
                   {studyComparison?.independent_symbol_robustness ? (
                     <div data-testid="study-basket-robustness">
-                      <h3 className="backtest-table-title">独立商品稳健性（禁止组合金额加总）</h3>
+                      <h3 className="backtest-table-title">{t("backtest.symbolRobust")}</h3>
                       <div className="backtest-metrics">
-                        <div><span>Verdict</span><strong>{studyComparison.independent_symbol_robustness.verdict?.verdict ?? "—"}</strong></div>
-                        <div><span>只在单市场有效</span><strong>{studyComparison.independent_symbol_robustness.verdict?.single_market_only ? "是" : "否"}</strong></div>
-                        <div><span>参数稳定</span><strong>{studyComparison.independent_symbol_robustness.stability?.stable ? "是" : "否"}</strong></div>
-                        <div><span>组合加总</span><strong>{studyComparison.portfolio_sum_forbidden ? "禁止" : "—"}</strong></div>
+                        <div><span>{t("backtest.verdict")}</span><strong>{studyComparison.independent_symbol_robustness.verdict?.verdict ?? "—"}</strong></div>
+                        <div><span>{t("backtest.singleMarket")}</span><strong>{studyComparison.independent_symbol_robustness.verdict?.single_market_only ? t("backtest.yes") : t("backtest.no")}</strong></div>
+                        <div><span>{t("backtest.paramStable")}</span><strong>{studyComparison.independent_symbol_robustness.stability?.stable ? t("backtest.yes") : t("backtest.no")}</strong></div>
+                        <div><span>{t("backtest.portfolioSum")}</span><strong>{studyComparison.portfolio_sum_forbidden ? t("backtest.forbidden") : "—"}</strong></div>
                       </div>
                       {(studyComparison.independent_symbol_robustness.independent_oos?.members.length ?? 0) > 0 && (
                         <div className="backtest-table-wrap">
                           <table>
-                            <thead><tr><th>Symbol</th><th>Regime</th><th>OOS</th><th>Run</th><th>Report</th></tr></thead>
+                            <thead><tr><th>{t("backtest.symbol")}</th><th>{t("backtest.regime")}</th><th>OOS</th><th>{t("backtest.run")}</th><th>{t("backtest.report")}</th></tr></thead>
                             <tbody>{studyComparison.independent_symbol_robustness.independent_oos?.members.map((member) => (
                               <tr key={member.dataset_id}>
                                 <td>{member.symbol}</td>
@@ -1643,7 +1678,7 @@ export default function BacktestApp() {
                   {studyComparison?.ready && !studyComparison.oos_report ? (
                     <div className="backtest-table-wrap">
                       <table>
-                        <thead><tr><th>排名</th><th>Split</th><th>参数</th><th>OOS 权益</th></tr></thead>
+                        <thead><tr><th>{t("backtest.rank")}</th><th>{t("backtest.split")}</th><th>{t("backtest.selectedParams")}</th><th>{t("backtest.oosEquity")}</th></tr></thead>
                         <tbody>{studyComparison.ranking.map((trial, index) => (
                           <tr key={`${trial.ordinal}-${trial.split_id}`}>
                             <td>{index + 1}</td><td>{trial.split_id}</td>
@@ -1654,10 +1689,10 @@ export default function BacktestApp() {
                     </div>
                   ) : null}
                   {!studyComparison?.ready ? (
-                    <p className="backtest-empty">后台完成 Train → receipt → 单次 Test 后显示只含 TestRun 的 OOS 曲线。</p>
+                    <p className="backtest-empty">{t("backtest.oosEmpty")}</p>
                   ) : null}
                 </>
-              ) : <p className="backtest-empty">选择一个 Study 查看进度。</p>}
+              ) : <p className="backtest-empty">{t("backtest.pickStudy")}</p>}
             </div>
           </div>
         </section>

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { MutableRefObject } from "react";
+import { t } from "../../i18n/index.js";
 import type { ChartSessionRuntime } from "../chart-session/chartSessionTypes.js";
 import type { MarketDataRuntime } from "../market-data/useMarketDataRuntime.js";
 import type { ChartDataCommitMeta } from "../market-data/useChartDataRuntime.js";
@@ -2219,7 +2220,7 @@ export function useIndicatorRuntime(
         || "Indicator realtime subscription is unavailable";
       setIndicatorError(
         indicatorId,
-        `${failureMessage}；已切换为 HTTP 已收盘值补齐。`,
+        t("indicator.httpFallback", { message: failureMessage }),
       );
       const currentChartData = chartDataRef.current || [];
       const visibleRange = typeof getCurrentVisibleRange === "function"

@@ -72,6 +72,8 @@ import {
   replayReviewDrawingRecord,
 } from "./replayReviewDrawing.js";
 import type { ReplayReviewResponse } from "./replayIntegrityModel.js";
+import { t } from "../../i18n/index.js";
+import { useLocale } from "../../i18n/useLocale.js";
 
 
 export interface ReplayTrainingPageShellProps {
@@ -89,6 +91,7 @@ interface ReplayIntervalViewportTransfer {
 }
 
 function ReplayReviewRightRail({ review }: { readonly review: ReplayReviewResponse }) {
+  useLocale();
   const selectedTrackId = String(review.projection.viewer_state.selected_track_id ?? "");
   const selected = review.projection.tracks.find((track) => track.track_id === selectedTrackId)
     ?? review.projection.tracks[0]
@@ -106,54 +109,55 @@ function ReplayReviewRightRail({ review }: { readonly review: ReplayReviewRespon
   return (
     <aside
       className="replay-review-right-rail"
-      aria-label="ReviewMode 只读组合"
+      aria-label={t("replay.shell.reviewPortfolio")}
       data-review-track-id={selectedTrackId}
     >
-      <span className="training-hub-kicker">REVIEW · READ ONLY</span>
+      <span className="training-hub-kicker">{t("replay.kicker.reviewReadOnly")}</span>
       <h3>{String(selected?.symbol ?? "--")}</h3>
       <dl>
-        <div><dt>公开时间</dt><dd>{review.events.find((event) => event.event_id === review.selected_event_id)?.public_time.label ?? "--"}</dd></div>
-        <div><dt>权益</dt><dd>{String(review.projection.domain.equity ?? "--")}</dd></div>
-        <div><dt>仓位</dt><dd>{String(positionRecord?.quantity ?? "--")}</dd></div>
-        <div><dt>未实现盈亏</dt><dd>{String(positionRecord?.unrealized_pnl ?? "--")}</dd></div>
-        <div><dt>可用权益</dt><dd>{String(accountRecord?.available_equity ?? "--")}</dd></div>
-        <div><dt>订单 / 成交</dt><dd>{review.projection.orders.length} / {review.projection.fills.length}</dd></div>
-        <div><dt>账本</dt><dd>{review.projection.ledger.length}</dd></div>
-        <div><dt>绘图版本</dt><dd>r{review.projection.drawing_revision}</dd></div>
+        <div><dt>{t("replay.shell.publicTime")}</dt><dd>{review.events.find((event) => event.event_id === review.selected_event_id)?.public_time.label ?? "--"}</dd></div>
+        <div><dt>{t("replay.shell.equity")}</dt><dd>{String(review.projection.domain.equity ?? "--")}</dd></div>
+        <div><dt>{t("replay.shell.position")}</dt><dd>{String(positionRecord?.quantity ?? "--")}</dd></div>
+        <div><dt>{t("replay.shell.unrealized")}</dt><dd>{String(positionRecord?.unrealized_pnl ?? "--")}</dd></div>
+        <div><dt>{t("replay.shell.available")}</dt><dd>{String(accountRecord?.available_equity ?? "--")}</dd></div>
+        <div><dt>{t("replay.shell.ordersFills")}</dt><dd>{review.projection.orders.length} / {review.projection.fills.length}</dd></div>
+        <div><dt>{t("replay.shell.ledger")}</dt><dd>{review.projection.ledger.length}</dd></div>
+        <div><dt>{t("replay.shell.drawingRev")}</dt><dd>r{review.projection.drawing_revision}</dd></div>
       </dl>
-      <p>该侧栏来自选中事件投影，不读取活动 Run 的当前组合。</p>
+      <p>{t("replay.shell.reviewSidebarHint")}</p>
     </aside>
   );
 }
 
 function ReplayStatePanel({ runtime }: { readonly runtime: ReplayRuntime }) {
+  useLocale();
   if (runtime.phase === "ERROR" || runtime.phase === "ENTRY_ERROR") {
     return (
       <div className="chart-area" data-replay-state="error" data-replay-error={runtime.error?.code ?? "REPLAY_RUNTIME_ERROR"}>
         <div className="error-overlay">
           <div className="error-icon">!</div>
           <div className="error-message">
-            <strong>K 线回放不可用</strong><br />
+            <strong>{t("replay.shell.unavailable")}</strong><br />
             {runtime.error?.code ?? "REPLAY_RUNTIME_ERROR"}: {runtime.error?.message ?? "Unknown replay error"}
-            <small>训练工作区 fail closed；不会回退到 live、mock 或缓存中的其他市场。</small>
+            <small>{t("replay.shell.failClosed")}</small>
           </div>
-          {runtime.phase === "ERROR" && <button className="retry-btn" type="button" onClick={runtime.actions.retry}>重试回放能力</button>}
+          {runtime.phase === "ERROR" && <button className="retry-btn" type="button" onClick={runtime.actions.retry}>{t("replay.shell.retryCaps")}</button>}
         </div>
       </div>
     );
   }
   const labels: Readonly<Record<string, string>> = {
-    IDLE: "准备独立回放运行时…",
-    LOADING_CAPABILITIES: "正在加载回放能力…",
-    VALIDATING_SESSION: "正在校验服务端 session；HTTP snapshot 不会直接渲染…",
-    CONNECTING_SESSION: "等待首个原子 replay snapshot…",
-    STOPPED: "回放运行时已释放。",
+    IDLE: t("replay.shell.idle"),
+    LOADING_CAPABILITIES: t("replay.shell.loadingCaps"),
+    VALIDATING_SESSION: t("replay.shell.validating"),
+    CONNECTING_SESSION: t("replay.shell.connecting"),
+    STOPPED: t("replay.shell.stopped"),
   };
   return (
     <div className="chart-area" data-replay-state="loading">
       <div className="error-overlay">
         <div className="replay-loading-spinner" />
-        <div className="error-message"><strong>K 线回放</strong><br />{labels[runtime.phase] ?? "正在恢复回放…"}<small>加载期间不渲染 live/mock bars。</small></div>
+        <div className="error-message"><strong>{t("replay.shell.replay")}</strong><br />{labels[runtime.phase] ?? t("replay.shell.recovering")}<small>{t("replay.shell.noLiveMock")}</small></div>
       </div>
     </div>
   );
@@ -167,6 +171,7 @@ export default function ReplayTrainingPageShell({
   viewer,
   chartSettingsRuntime,
 }: ReplayTrainingPageShellProps) {
+  const locale = useLocale();
   const [returningToHub, setReturningToHub] = useState(false);
   const [returnToHubError, setReturnToHubError] = useState<string | null>(null);
   const [integrityOpen, setIntegrityOpen] = useState(false);
@@ -329,10 +334,10 @@ export default function ReplayTrainingPageShell({
     try {
       await returnToTrainingHub(runId, defaultReplayV2Api);
     } catch (cause) {
-      setReturnToHubError(cause instanceof Error ? cause.message : "返回存档大厅失败");
+      setReturnToHubError(cause instanceof Error ? cause.message : t("replay.shell.returnFailed", {}, locale));
       setReturningToHub(false);
     }
-  }, [returningToHub, viewer.viewerState?.run_id]);
+  }, [locale, returningToHub, viewer.viewerState?.run_id]);
 
   useEffect(() => {
     setLiveDrawingError(null);
@@ -340,7 +345,7 @@ export default function ReplayTrainingPageShell({
     if (runId === null || !integrityRuntime.drawingLoaded) return;
     const current = integrityRuntime.currentDrawing;
     if (current === null) {
-      setLiveDrawingError("服务端绘图证据已标记完成但缺少当前文档响应");
+      setLiveDrawingError(t("replay.shell.drawingMissing", {}, locale));
       return;
     }
     const scopeKey = `replay-run:${runId}__main`;
@@ -354,13 +359,14 @@ export default function ReplayTrainingPageShell({
       drawingDocumentSessionRegistry.markLoaded(scopeKey, store);
     } catch (cause) {
       setLiveDrawingError(
-        cause instanceof Error ? cause.message : "Run 绘图文档恢复失败",
+        cause instanceof Error ? cause.message : t("replay.shell.drawingRestoreFailed", {}, locale),
       );
     }
   }, [
     integrityRuntime.currentDrawing,
     integrityRuntime.drawingLoaded,
     integrityRuntime.runId,
+    locale,
   ]);
 
   useEffect(() => {
@@ -395,8 +401,8 @@ export default function ReplayTrainingPageShell({
           if (disposed) return;
           setLiveDrawingError(
             cause instanceof Error
-              ? `Run 绘图证据提交失败：${cause.message}`
-              : "Run 绘图证据提交失败",
+              ? t("replay.shell.drawingSubmitFailedWith", { message: cause.message }, locale)
+              : t("replay.shell.drawingSubmitFailed", {}, locale),
           );
         });
       }, 500);
@@ -415,6 +421,7 @@ export default function ReplayTrainingPageShell({
     integrityRuntime.drawingLoaded,
     integrityRuntime.runId,
     liveDrawingError,
+    locale,
   ]);
 
   useEffect(() => {
@@ -431,10 +438,11 @@ export default function ReplayTrainingPageShell({
       drawingDocumentSessionRegistry.markLoaded(scopeKey, store);
     } catch (cause) {
       setReviewDrawingError(
-        cause instanceof Error ? cause.message : "Review 绘图文档恢复失败",
+        cause instanceof Error ? cause.message : t("replay.shell.reviewRestoreFailed", {}, locale),
       );
     }
   }, [
+    locale,
     reviewDrawingCursorRevision,
     reviewDrawingDocument,
     reviewDrawingScopeBase,
@@ -460,7 +468,7 @@ export default function ReplayTrainingPageShell({
       || track?.adapter_session_id === undefined) {
       setReviewChartLoading(false);
       setReviewChartBounded(false);
-      setReviewChartError("选中 Review 轨道缺少严格身份、周期或冻结 adapter session，图表按 fail-closed 隐藏。");
+      setReviewChartError(t("replay.shell.reviewIdentityMissing", {}, locale));
       reviewSeriesStore.replace([], { source: "replay-review-unavailable" });
       return;
     }
@@ -481,7 +489,7 @@ export default function ReplayTrainingPageShell({
         || config.market_type !== reviewProjectedMarketType
         || config.symbol !== reviewProjectedSymbol
         || config.source_kind.toUpperCase() !== reviewProjectedSourceKind) {
-        throw new Error("Review 轨道身份与冻结 adapter session 不一致");
+        throw new Error(t("replay.shell.reviewIdentityMismatch", {}, locale));
       }
       provider = new ReplayHistoryProvider({
         sessionId: adapterSessionId,
@@ -522,7 +530,7 @@ export default function ReplayTrainingPageShell({
       if (cause instanceof DOMException && cause.name === "AbortError") return;
       reviewSeriesStore.replace([], { source: "replay-review-fail-closed" });
       setReviewChartError(
-        cause instanceof Error ? cause.message : "Review 图表前缀加载失败",
+        cause instanceof Error ? cause.message : t("replay.shell.reviewPrefixFailed", {}, locale),
       );
     }).finally(() => {
       if (!abort.signal.aborted) setReviewChartLoading(false);
@@ -538,6 +546,7 @@ export default function ReplayTrainingPageShell({
     reviewProjectedMarketType,
     reviewProjectedSourceKind,
     reviewProjectedSymbol,
+    locale,
     reviewSelectedTrackId,
     reviewSeriesStore,
     viewer.marketTracks,
@@ -670,21 +679,22 @@ export default function ReplayTrainingPageShell({
     setReplayDisplayInterval(next);
   }, [intervalAvailability, markIntervalUsed, review, setReplayDisplayInterval]);
   const createReplayCustomInterval = useCallback((next: IntervalString) => {
-    if (review !== null) return { ok: false as const, message: "ReviewMode 中周期只读" };
+    if (review !== null) return { ok: false as const, message: t("replay.shell.intervalReadonly", {}, locale) };
     if (!intervalAvailability(next)) {
       return { ok: false as const, message: unavailableIntervalMessage(next) };
     }
     const result = addCustomInterval(next, { markUsed: true });
-    if (!result.ok) return { ok: false as const, message: "周期格式无效" };
+    if (!result.ok) return { ok: false as const, message: t("replay.shell.intervalInvalid", {}, locale) };
     setReplayDisplayInterval(result.value);
     showIntervalNotice({
       type: "success",
-      text: `${result.value} 已保存并切换；实时主图与回放共用这份自定义周期`,
+      text: t("replay.shell.intervalSaved", { interval: result.value }, locale),
     });
     return { ok: true as const, added: result.added };
   }, [
     addCustomInterval,
     intervalAvailability,
+    locale,
     review,
     showIntervalNotice,
     unavailableIntervalMessage,
@@ -700,13 +710,14 @@ export default function ReplayTrainingPageShell({
     }
     showIntervalNotice({
       type: "warning",
-      text: `${removed.value} 已从实时主图与回放的自定义周期中删除`,
-      actionLabel: "撤销",
+      text: t("replay.shell.intervalRemoved", { interval: removed.value }, locale),
+      actionLabel: t("replay.shell.undo", {}, locale),
       duration: 6500,
     });
   }, [
     baseInterval,
     interval,
+    locale,
     removeCustomInterval,
     review,
     showIntervalNotice,
@@ -716,8 +727,8 @@ export default function ReplayTrainingPageShell({
     const restored = restoreCustomInterval(lastRemovedIntervalRef.current);
     if (restored === null) return;
     lastRemovedIntervalRef.current = null;
-    showIntervalNotice({ type: "success", text: `${restored.value} 已恢复` });
-  }, [restoreCustomInterval, showIntervalNotice]);
+    showIntervalNotice({ type: "success", text: t("replay.shell.intervalRestored", { interval: restored.value }, locale) });
+  }, [locale, restoreCustomInterval, showIntervalNotice]);
   const clearReplayCustomIntervals = useCallback((): void => {
     if (review !== null) return;
     const removed = clearCustomIntervals();
@@ -730,14 +741,15 @@ export default function ReplayTrainingPageShell({
     }
     showIntervalNotice({
       type: "warning",
-      text: `已清空 ${removed.length} 个共享自定义周期，最近一项可撤销`,
-      actionLabel: "撤销最近一项",
+      text: t("replay.shell.intervalCleared", { count: removed.length }, locale),
+      actionLabel: t("replay.shell.undoLast", {}, locale),
       duration: 6500,
     });
   }, [
     baseInterval,
     clearCustomIntervals,
     interval,
+    locale,
     review,
     showIntervalNotice,
     setReplayDisplayInterval,
@@ -766,9 +778,9 @@ export default function ReplayTrainingPageShell({
       position: fill.side === "BUY" ? "below" : "above",
       shape: fill.side === "BUY" ? "arrow_up" : "arrow_down",
       color: fill.side === "BUY" ? "#16a34a" : "#e11d48",
-      text: `${fill.side === "BUY" ? "买" : "卖"} ${fill.quantity} @ ${fill.price}`,
+      text: `${fill.side === "BUY" ? t("replay.shell.buy", {}, locale) : t("replay.shell.sell", {}, locale)} ${fill.quantity} @ ${fill.price}`,
     })),
-  }], [runtime.store.fills]);
+  }], [locale, runtime.store.fills]);
   const replayTradeHlines = useMemo<IndicatorHLine[]>(() => {
     const selectedTrackId = viewer.viewerState?.selected_track_id;
     const portfolio = viewer.marketTracks?.portfolio;
@@ -786,15 +798,15 @@ export default function ReplayTrainingPageShell({
       const orderPrice = Number(rawPrice ?? Number.NaN);
       if (!Number.isFinite(orderPrice) || orderPrice <= 0) continue;
       const protection = order.order_type === "STOP_MARKET"
-        ? "止损"
+        ? t("replay.shell.stopLoss", {}, locale)
         : order.order_type === "TAKE_PROFIT_MARKET"
-          ? "止盈"
-          : "委托";
+          ? t("replay.shell.takeProfit", {}, locale)
+          : t("replay.shell.order", {}, locale);
       lines.push({
         id: `replay-order-${order.order_id}`,
         pane: "main",
         price: orderPrice,
-        title: `${protection} ${order.side === "BUY" ? "买" : "卖"} ${order.remaining_quantity}`,
+        title: `${protection} ${order.side === "BUY" ? t("replay.shell.buy", {}, locale) : t("replay.shell.sell", {}, locale)} ${order.remaining_quantity}`,
         color: order.order_type === "STOP_MARKET"
           ? "#e11d48"
           : order.order_type === "TAKE_PROFIT_MARKET"
@@ -805,7 +817,7 @@ export default function ReplayTrainingPageShell({
       });
     }
     return lines;
-  }, [runtime.store.orders, viewer.marketTracks?.portfolio, viewer.viewerState?.selected_track_id]);
+  }, [locale, runtime.store.orders, viewer.marketTracks?.portfolio, viewer.viewerState?.selected_track_id]);
   const chartMarkers = useMemo(() => [
     ...indicators.view.markers,
     ...replayTradeMarkers,
@@ -821,9 +833,9 @@ export default function ReplayTrainingPageShell({
       <div className="error-overlay">
         <div className="error-icon">!</div>
         <div className="error-message">
-          <strong>Run 绘图证据已 fail closed</strong><br />
+          <strong>{t("replay.shell.drawingFailClosed")}</strong><br />
           {liveDrawingError}
-          <small>不会用 IndexedDB、其他 Run 或 live 绘图替代服务端文档。</small>
+          <small>{t("replay.shell.drawingFailHint")}</small>
         </div>
       </div>
     </div>
@@ -832,9 +844,9 @@ export default function ReplayTrainingPageShell({
       <div className="error-overlay">
         <div className="error-icon">!</div>
         <div className="error-message">
-          <strong>ReviewMode 已 fail closed</strong><br />
+          <strong>{t("replay.shell.reviewFailClosed")}</strong><br />
           {reviewChartError ?? reviewDrawingError}
-          <small>不会用当前 Run、live 数据或其他绘图作用域填补缺口。</small>
+          <small>{t("replay.shell.reviewFailHint")}</small>
         </div>
       </div>
     </div>
@@ -843,8 +855,8 @@ export default function ReplayTrainingPageShell({
       <div className="error-overlay">
         <div className="replay-loading-spinner" />
         <div className="error-message">
-          <strong>正在重建只读图表前缀</strong><br />
-          仅请求选中事件之前的冻结历史。
+          <strong>{t("replay.shell.rebuildingPrefix")}</strong><br />
+          {t("replay.shell.rebuildingHint")}
         </div>
       </div>
     </div>
@@ -927,15 +939,15 @@ export default function ReplayTrainingPageShell({
       priceScaleMode={priceScale.mode}
     />
   ) : active ? (
-    <div className="chart-area" data-replay-state="empty"><div className="error-overlay"><div className="error-message"><strong>尚无已揭示 BAR</strong><br />服务端 snapshot 为空；不会使用 live/mock 数据填充。</div></div></div>
+    <div className="chart-area" data-replay-state="empty"><div className="error-overlay"><div className="error-message"><strong>{t("replay.shell.noBar")}</strong><br />{t("replay.shell.noBarHint")}</div></div></div>
   ) : <ReplayStatePanel runtime={runtime} />;
 
   const drawingToolbar = review !== null ? (
-    <div className="drawing-toolbar replay-chart-toolbar" aria-label="ReviewMode 只读图表工具">
-      <span>REVIEW · READ ONLY</span>
-      <span>CLOSED PREFIX · NO FUTURE BAR</span>
-      <span>绘图 r{review.projection.drawing_revision}</span>
-      {reviewChartBounded && <span role="status">左侧历史已按 20,000 bars 上限截断</span>}
+    <div className="drawing-toolbar replay-chart-toolbar" aria-label={t("replay.shell.reviewTools")}>
+      <span>{t("replay.kicker.reviewReadOnly")}</span>
+      <span>{t("replay.kicker.closedPrefix")}</span>
+      <span>{t("replay.shell.drawingRevValue", { rev: review.projection.drawing_revision })}</span>
+      {reviewChartBounded && <span role="status">{t("replay.shell.historyTruncated")}</span>}
     </div>
   ) : (
     <DrawingToolbar
@@ -977,16 +989,17 @@ export default function ReplayTrainingPageShell({
           className="replay-top-bar"
           brandIcon="◀"
           brandText="CandleScope"
-          navigation={<span className="replay-mode-badge">REPLAY TRAINING</span>}
+          navigation={<span className="replay-mode-badge">{t("replay.kicker.training")}</span>}
           identity={config && (
-            <button className="replay-identity-readonly" type="button" title="活动 run 的来源身份不可变；请新建或 Fork。">
+            <button className="replay-identity-readonly" type="button" title={t("replay.shell.identityImmutable")}>
               {review === null
-                ? `${activeSelectedTrack?.exchange ?? config.exchange} · ${activeSelectedTrack?.market_type ?? config.market_type} · ${displayedSymbol} · 账户 ${viewer.marketTracks?.tracks.length ?? 1} 个商品 · base ${config.base_interval}`
-                : `REVIEW · ${String(
-                  review.projection.tracks.find((track) => (
+                ? `${activeSelectedTrack?.exchange ?? config.exchange} · ${activeSelectedTrack?.market_type ?? config.market_type} · ${displayedSymbol} · ${t("replay.shell.accountTracks", { count: viewer.marketTracks?.tracks.length ?? 1 })} · ${t("replay.baseInterval", { interval: config.base_interval })}`
+                : t("replay.reviewIdentity", {
+                  symbol: String(review.projection.tracks.find((track) => (
                     track.track_id === review.projection.viewer_state.selected_track_id
-                  ))?.symbol ?? config.symbol,
-                )} · ${String(review.projection.viewer_state.display_interval ?? interval)}`}
+                  ))?.symbol ?? config.symbol),
+                  interval: String(review.projection.viewer_state.display_interval ?? interval),
+                })}
             </button>
           )}
           controls={<>
@@ -997,7 +1010,7 @@ export default function ReplayTrainingPageShell({
               aria-expanded={indicatorPanelOpen}
               aria-controls="replay-indicator-panel"
               onClick={() => setIndicatorPanelOpen((open) => !open)}
-              title={review === null ? "管理仅使用已揭示 K 线的回放指标" : "ReviewMode 禁用活动 Run 指标，防止未来值进入只读投影"}
+              title={review === null ? t("replay.shell.manageIndicators") : t("replay.shell.reviewBlocksIndicators")}
             >
               📊
               <span className="indicator-badge">
@@ -1007,10 +1020,10 @@ export default function ReplayTrainingPageShell({
             <button className="indicator-toggle-btn alert-toggle-btn" type="button" disabled title={capabilities.ALERTS.state}>🔔</button>
           </>}
           quote={last && (
-            <div className="price-info"><span className={`current-price ${isUp ? "price-up" : "price-down"}`}>{last.close}</span><span className="price-change">{isUp ? "▲" : "▼"} REPLAY</span></div>
+            <div className="price-info"><span className={`current-price ${isUp ? "price-up" : "price-down"}`}>{last.close}</span><span className="price-change">{isUp ? "▲" : "▼"} {t("replay.priceLabel")}</span></div>
           )}
           marketMetrics={(
-            <div className="advanced-market-summary advanced-market-summary-unsupported" aria-label="Replay derivatives capability summary">
+            <div className="advanced-market-summary advanced-market-summary-unsupported" aria-label={t("replay.derivativesAria")}>
               {(["MARK_PRICE", "INDEX_PRICE", "BASIS"] as const).map((id) => (
                 <div className="advanced-market-chip" key={id} data-market-metric={id.toLowerCase()} data-capability-state={capabilities[id].state}>
                   <span className="advanced-market-chip-label">{capabilities[id].label}</span>
@@ -1035,7 +1048,7 @@ export default function ReplayTrainingPageShell({
                   setIntegrityOpen((open) => !open);
                 }}
               >
-                {review === null ? "复盘与完整性" : "复盘中"}
+                {review === null ? t("replay.shell.integrity") : t("replay.shell.reviewing")}
               </button>
             )}
             {active && integrityRuntime.runId !== null && (
@@ -1049,10 +1062,10 @@ export default function ReplayTrainingPageShell({
                   setIntegrityOpen(false);
                   setTrainingResultsOpen((open) => !open);
                 }}
-              >训练成绩</button>
+              >{t("replay.shell.results")}</button>
             )}
-            {active && viewer.viewerState?.run_id !== undefined && <button className="replay-return-hub" type="button" disabled={returningToHub || review !== null} title={review !== null ? "先退出只读 ReviewMode" : returnToHubError ?? "服务端暂停并写入 checkpoint 后返回存档大厅"} onClick={() => void returnToHub()}>{returningToHub ? "正在保存…" : "存档大厅"}</button>}
-            <a className="replay-live-link" href="/" target="_blank" rel="noopener noreferrer">实时行情 ↗</a>
+            {active && viewer.viewerState?.run_id !== undefined && <button className="replay-return-hub" type="button" disabled={returningToHub || review !== null} title={review !== null ? t("replay.shell.exitReviewFirst") : returnToHubError ?? t("replay.shell.returnHubHint")} onClick={() => void returnToHub()}>{returningToHub ? t("replay.shell.saving") : t("replay.shell.hub")}</button>}
+            <a className="replay-live-link" href="/" target="_blank" rel="noopener noreferrer">{t("replay.shell.liveLink")}</a>
           </>}
         />
       )}
@@ -1081,7 +1094,7 @@ export default function ReplayTrainingPageShell({
           onClearCustomIntervals={clearReplayCustomIntervals}
           intervalAvailability={intervalAvailability}
           unavailableIntervalMessage={unavailableIntervalMessage}
-          readOnlyReason={review === null ? null : "ReviewMode 中周期只读"}
+          readOnlyReason={review === null ? null : t("replay.shell.intervalReadonly")}
           intervalNotice={intervalNotice ?? {
             type: viewer.error ? "error" : "info",
             text: review === null
@@ -1113,7 +1126,7 @@ export default function ReplayTrainingPageShell({
         {review === null && history.notice !== null && (
           <div className="replay-history-boundary-notice" role="status">
             <span>{history.notice}</span>
-            <button type="button" onClick={history.dismissNotice} aria-label="关闭历史边界提示">×</button>
+            <button type="button" onClick={history.dismissNotice} aria-label={t("replay.shell.dismissHistory")}>×</button>
           </div>
         )}
         {review === null && <ReplayBottomControlDock runtime={runtime} viewer={viewer} publicTimeLabel={publicTime} />}
@@ -1141,8 +1154,8 @@ export default function ReplayTrainingPageShell({
                 indicators.marketStudyActions.toggleVisibility
               }
               modeNotice={{
-                label: "回放闭合前缀",
-                description: "只计算服务端已揭示且已闭合的 K 线；禁用 hosted range、指标 WebSocket 与 unsafe 脚本。",
+                label: t("replay.shell.closedPrefix"),
+                description: t("replay.shell.closedPrefixHint"),
               }}
               resolveIndicatorSupport={providedBarsIndicatorSupport}
             />
@@ -1153,7 +1166,7 @@ export default function ReplayTrainingPageShell({
             ref={integrityDrawerRef}
             id="replay-integrity-drawer"
             className="replay-integrity-drawer"
-            aria-label="复盘与完整性"
+            aria-label={t("replay.shell.integrity")}
             tabIndex={-1}
           >
             <ReplayIntegrityReviewPanel
@@ -1168,7 +1181,7 @@ export default function ReplayTrainingPageShell({
           <aside
             id="replay-training-results-drawer"
             className="replay-integrity-drawer replay-training-results-drawer"
-            aria-label="训练成绩"
+            aria-label={t("replay.shell.results")}
             tabIndex={-1}
           >
             <ReplayTrainingResultsPanel
@@ -1238,19 +1251,19 @@ export default function ReplayTrainingPageShell({
             "data-replay-review-original-verified": review?.immutability_proof.verified === true ? "true" : "",
           }}
           left={<>
-            <span><span className={`status-dot ${runtime.store.connectionState === "connected" ? "connected" : "loading"}`} />K 线回放 · REPLAY</span>
+            <span><span className={`status-dot ${runtime.store.connectionState === "connected" ? "connected" : "loading"}`} />{t("replay.shell.status")}</span>
             <span>{review === null ? effectiveState ?? runtime.phase : `REVIEW ${review.playback_state}`}</span>
-            <span>{viewerBarCount} display bars</span>
-            {review === null && history.loading && <span>Loading older replay data…</span>}
-            {review === null && history.historyEpoch !== null && !history.hasMore && !history.loading && <span>已到归档历史起点</span>}
+            <span>{t("replay.displayBars", { count: viewerBarCount })}</span>
+            {review === null && history.loading && <span>{t("replay.loadingOlder")}</span>}
+            {review === null && history.historyEpoch !== null && !history.hasMore && !history.loading && <span>{t("replay.shell.historyStart")}</span>}
             {review === null && history.error && <span className="replay-history-error">{history.error}</span>}
-            {review !== null && <span>immutable event #{review.selected_timeline_sequence}</span>}
-            {review !== null && reviewChartBounded && <span>20,000-bar review prefix bound</span>}
+            {review !== null && <span>{t("replay.immutableEvent", { sequence: review.selected_timeline_sequence })}</span>}
+            {review !== null && reviewChartBounded && <span>{t("replay.prefixBound")}</span>}
           </>}
           right={<>
-            <span>{review === null ? `Controller: ${ownsController ? "本页" : runtime.store.controllerClientId ? "其他页面" : "无"}` : "Original controller isolated"}</span>
+            <span>{review === null ? t("replay.shell.controller", { who: ownsController ? t("replay.shell.controllerHere") : runtime.store.controllerClientId ? t("replay.shell.controllerOther") : t("replay.shell.controllerNone") }) : t("replay.originalControllerIsolated")}</span>
             <span>{config?.source_kind.toUpperCase() ?? "BAR"} · {config?.quality_mode.toUpperCase() ?? "EXACT"}</span>
-            <span>服务端回放 · 与实时行情隔离</span>
+            <span>{t("replay.shell.isolated")}</span>
           </>}
         />
       )}

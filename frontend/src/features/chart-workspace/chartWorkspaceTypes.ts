@@ -35,6 +35,10 @@ export type ChartWorkspaceTemplateId =
   | "grid-12"
   | "grid-16";
 
+export type ChartWorkspaceBuiltinName =
+  | { kind: "default" }
+  | { kind: "template"; templateId: ChartWorkspaceTemplateId; ordinal: number };
+
 export type ChartWorkspaceId = string;
 export type ChartWorkspaceLayout = ChartWorkspaceTemplateId | "custom";
 export type ChartWorkspaceSplitDirection = "columns" | "rows";
@@ -160,6 +164,7 @@ export interface ChartWorkspaceRecord {
   schemaVersion: typeof CHART_WORKSPACE_RECORD_SCHEMA_VERSION;
   id: ChartWorkspaceId;
   name: string;
+  builtinName?: ChartWorkspaceBuiltinName;
   createdAt: number;
   updatedAt: number;
   document: ChartWorkspaceDocument;

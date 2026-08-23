@@ -1,4 +1,6 @@
 import { memo, useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { t, translateExchangeName, translateMarketType } from "../../i18n/index.js";
+import { useLocale } from "../../i18n/useLocale.js";
 import { markPerfOnce } from "../../runtime/performance/perfMarks";
 import { parseSymbolKey } from "../../utils/symbolKey";
 import type {
@@ -51,13 +53,13 @@ function formatPct(pct: number): string {
 
 const TIER_OPTIONS: ReadonlyArray<{
   value: SubscriptionTier;
-  label: string;
-  desc: string;
-  title: string;
+  labelKey: "watchlist.tier.none.label" | "watchlist.tier.price.label" | "watchlist.tier.full.label";
+  descKey: "watchlist.tier.none.desc" | "watchlist.tier.price.desc" | "watchlist.tier.full.desc";
+  titleKey: "watchlist.tier.none.title" | "watchlist.tier.price.title" | "watchlist.tier.full.title";
 }> = [
-  { value: "none", label: "不订阅", desc: "不消耗行情资源", title: "不订阅：不保活 ticker 或 K 线" },
-  { value: "price", label: "仅价格", desc: "保活价格列", title: "仅价格：保活价格列" },
-  { value: "full", label: "完全订阅", desc: "价格 + K线快切", title: "完全订阅：保活价格和可切换周期 K 线" },
+  { value: "none", labelKey: "watchlist.tier.none.label", descKey: "watchlist.tier.none.desc", titleKey: "watchlist.tier.none.title" },
+  { value: "price", labelKey: "watchlist.tier.price.label", descKey: "watchlist.tier.price.desc", titleKey: "watchlist.tier.price.title" },
+  { value: "full", labelKey: "watchlist.tier.full.label", descKey: "watchlist.tier.full.desc", titleKey: "watchlist.tier.full.title" },
 ];
 
 const EMPTY_COLLAPSED_LISTS: string[] = [];
@@ -82,6 +84,12 @@ type WatchlistCssVars = CSSProperties & Record<`--${string}`, string | number>;
 
 function watchlistColorStyle(color: string): WatchlistCssVars {
   return { "--wl-color": color || "#3b82f6" };
+}
+
+function watchlistDisplayName(watchlist: WatchlistGroup): string {
+  return watchlist.id === "default" && watchlist.name === "Watchlist"
+    ? t("watchlist.title")
+    : watchlist.name;
 }
 
 const emptyUnsubscribe = (): void => {};
@@ -114,6 +122,7 @@ const WatchlistSymbolLiveColumns = memo(function WatchlistSymbolLiveColumns({
     () => priceStore?.getSymbolSnapshot(compositeKey),
     [compositeKey, priceStore],
   );
+  useLocale();
   const tick = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
   const price = tick?.price;
   const previousPriceRef = useRef<number | undefined>(undefined);
@@ -136,8 +145,8 @@ const WatchlistSymbolLiveColumns = memo(function WatchlistSymbolLiveColumns({
   const tier = tierKnown ? (subscriptionTier ?? "none") : (tick ? "price" : "none");
   const tierDot = tier === "full" ? "wl-tier-full" : tier === "price" ? "wl-tier-price" : "";
   const tierTitle = tier === "full"
-    ? fullTierTitle || "完全订阅：保活价格和可切换周期 K 线"
-    : "仅价格：保活价格列";
+    ? fullTierTitle || t("watchlist.tier.full.title")
+    : t("watchlist.tier.price.title");
   const hasPrice = typeof price === "number" && tier !== "none";
   const change = hasPrice
     ? (tick?.daily_change ?? (price - (tick?.open ?? price)))
@@ -150,9 +159,9 @@ const WatchlistSymbolLiveColumns = memo(function WatchlistSymbolLiveColumns({
       {tierDot && <span className={`wl-tier-dot ${tierDot}`} title={tierTitle}/>}
       <span className="wl-sym-name">
         {symbol}
-        {marketType === "futures" && <span className="wl-market-badge futures">合约</span>}
+        {marketType === "futures" && <span className="wl-market-badge futures">{translateMarketType("futures")}</span>}
         <span className={`wl-exchange-badge ${exchange}`}>
-          {exchange === "okx" ? "OKX" : exchange === "binance" ? "币安" : exchange.toUpperCase()}
+          {translateExchangeName(exchange)}
         </span>
       </span>
       {hasPrice ? (
@@ -208,6 +217,7 @@ export default function WatchlistSidebar({
   priceStore, subscriptionTiers, subscriptionResourceSummaries, onTierChange,
   onRequestClose,
 }: WatchlistSidebarProps) {
+  useLocale();
   const setWatchlists = useCallback((updater: SetStateAction<WatchlistGroup[]>) => {
     if (actions?.setWatchlists) {
       actions.setWatchlists(updater);
@@ -270,7 +280,7 @@ export default function WatchlistSidebar({
   }, []);
 
   const confirmNewWatchlist = useCallback(() => {
-    const name = newName.trim() || `列表 ${watchlists.length + 1}`;
+    const name = newName.trim() || t("watchlist.defaultName", { n: watchlists.length + 1 });
     const colorIdx = watchlists.length % WATCHLIST_COLORS.length;
     const newWl: WatchlistGroup = {
       id: createWatchlistId(),
@@ -298,7 +308,7 @@ export default function WatchlistSidebar({
     const wl = watchlists.find((w) => w.id === id);
     if (!wl) return;
     setEditingId(id);
-    setEditingName(wl.name);
+    setEditingName(watchlistDisplayName(wl));
     setTimeout(() => editInputRef.current?.focus(), 60);
   }, [watchlists]);
 
@@ -589,7 +599,7 @@ export default function WatchlistSidebar({
           />
 
           {/* Delete button */}
-          <button className="wl-sym-del" onClick={(e) => { e.stopPropagation(); removeSymbol(wl.id, compositeKey); }} title="移除">
+          <button className="wl-sym-del" onClick={(e) => { e.stopPropagation(); removeSymbol(wl.id, compositeKey); }} title={t("watchlist.remove")}>
             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
               <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
             </svg>
@@ -608,8 +618,8 @@ export default function WatchlistSidebar({
         {/* ── Header ── */}
         <div className="wl-header">
           <button className="wl-collapse-btn" onClick={toggleSidebarCollapse}
-            title={managedByActivityBar ? "折叠自选" : (sidebarCollapsed ? "展开自选" : "收起自选")}
-            aria-label={managedByActivityBar ? "折叠自选" : (sidebarCollapsed ? "展开自选" : "收起自选")}>
+            title={managedByActivityBar ? t("watchlist.collapseManaged") : (sidebarCollapsed ? t("watchlist.expand") : t("watchlist.collapse"))}
+            aria-label={managedByActivityBar ? t("watchlist.collapseManaged") : (sidebarCollapsed ? t("watchlist.expand") : t("watchlist.collapse"))}>
             {sidebarCollapsed ? (
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="15 18 9 12 15 6"/></svg>
             ) : (
@@ -618,8 +628,8 @@ export default function WatchlistSidebar({
           </button>
           {!sidebarCollapsed && (
             <>
-              <span className="wl-header-title">自选</span>
-              <button className="wl-add-list-btn" onClick={addWatchlist} title="新建列表">
+              <span className="wl-header-title">{t("watchlist.title")}</span>
+              <button className="wl-add-list-btn" onClick={addWatchlist} title={t("watchlist.newList")}>
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
                   <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
                 </svg>
@@ -631,10 +641,10 @@ export default function WatchlistSidebar({
         {/* ── Column header row (table header) ── */}
         {!sidebarCollapsed && (
           <div className="wl-table-header">
-            <span className="wl-th-name">商品</span>
-            <span className="wl-th-price">最新价</span>
-            <span className="wl-th-change">涨跌</span>
-            <span className="wl-th-changepct">涨跌%</span>
+            <span className="wl-th-name">{t("watchlist.symbol")}</span>
+            <span className="wl-th-price">{t("watchlist.last")}</span>
+            <span className="wl-th-change">{t("watchlist.change")}</span>
+            <span className="wl-th-changepct">{t("watchlist.changePct")}</span>
             <span className="wl-th-actions"></span>
           </div>
         )}
@@ -642,7 +652,7 @@ export default function WatchlistSidebar({
         {/* ── Collapsed view ── */}
         {sidebarCollapsed && (
           <div className="wl-collapsed-icons">
-            <div className="wl-collapsed-icon" title="展开自选" onClick={toggleSidebarCollapse}>
+            <div className="wl-collapsed-icon" title={t("watchlist.expand")} onClick={toggleSidebarCollapse}>
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
               </svg>
@@ -651,7 +661,7 @@ export default function WatchlistSidebar({
               <div key={wl.id} className="wl-collapsed-tab"
                 style={watchlistColorStyle(wl.color)}
                 onClick={() => setSidebarCollapsed(false)}
-                title={`${wl.name} (${wl.symbols.length})`}>
+                title={`${watchlistDisplayName(wl)} (${wl.symbols.length})`}>
                 <span className="wl-collapsed-dot"/>
                 <span className="wl-collapsed-count">{wl.symbols.length}</span>
               </div>
@@ -695,7 +705,7 @@ export default function WatchlistSidebar({
                     onContextMenu={(e) => handleListContextMenu(e, wl.id)}
                   >
                     {/* Drag grip */}
-                    <span className="wl-list-grip" title="拖拽排序">
+                    <span className="wl-list-grip" title={t("watchlist.dragSort")}>
                       <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
                         <circle cx="3" cy="2" r="1"/><circle cx="7" cy="2" r="1"/>
                         <circle cx="3" cy="5" r="1"/><circle cx="7" cy="5" r="1"/>
@@ -707,7 +717,7 @@ export default function WatchlistSidebar({
                     <button
                       className="wl-list-toggle"
                       onClick={(e) => { e.stopPropagation(); toggleListCollapse(wl.id); }}
-                      title={isCollapsed ? "展开" : "收起"}
+                      title={isCollapsed ? t("watchlist.expandList") : t("watchlist.collapseList")}
                     >
                       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
                         {isCollapsed
@@ -730,7 +740,7 @@ export default function WatchlistSidebar({
                     ) : (
                       <span className="wl-list-name" onDoubleClick={() => renameWatchlist(wl.id)}>
                         <span className="wl-list-dot" />
-                        {wl.name}
+                        {watchlistDisplayName(wl)}
                       </span>
                     )}
 
@@ -744,7 +754,7 @@ export default function WatchlistSidebar({
                         onDragOver={(e) => { e.preventDefault(); if (dragType === "symbol") setDropTarget({ type: "list-header", listId: wl.id }); }}
                         onDrop={(e) => handleListHeaderDrop(e, wl.id)}
                       >
-                        <span className="wl-list-empty-text">拖入或右键添加</span>
+                        <span className="wl-list-empty-text">{t("watchlist.emptyDrop")}</span>
                       </div>
                     )}
                     {!isCollapsed && wl.symbols.map((sym, idx) => renderSymbolRow(sym, wl, idx))}
@@ -764,7 +774,7 @@ export default function WatchlistSidebar({
                   <input
                     ref={newInputRef}
                     className="wl-list-name-input"
-                    placeholder="输入列表名称..."
+                    placeholder={t("watchlist.namePlaceholder")}
                     value={newName}
                     onChange={(e) => setNewName(e.target.value)}
                     onBlur={() => { if (newName.trim()) confirmNewWatchlist(); else cancelNew(); }}
@@ -783,15 +793,15 @@ export default function WatchlistSidebar({
           onClick={(e) => e.stopPropagation()}>
           {contextMenu.type === "list" ? (
             <>
-              <div className="wl-ctx-header">{watchlists.find((w) => w.id === contextMenu.listId)?.name || "列表"}</div>
+              <div className="wl-ctx-header">{watchlists.find((w) => w.id === contextMenu.listId)?.name || t("watchlist.list")}</div>
               <button className="wl-ctx-item" onClick={() => { renameWatchlist(contextMenu.listId); setContextMenu(null); }}>
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-                重命名
+                {t("watchlist.rename")}
               </button>
               {watchlists.length > 1 && (
                 <button className="wl-ctx-item wl-ctx-item-danger" onClick={() => { deleteWatchlist(contextMenu.listId); setContextMenu(null); }}>
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-                  删除列表
+                  {t("watchlist.deleteList")}
                 </button>
               )}
             </>
@@ -805,17 +815,17 @@ export default function WatchlistSidebar({
               {/* Tier selection */}
               {onTierChange && (
                 <>
-                  <div className="wl-ctx-sub-header">订阅级别</div>
+                  <div className="wl-ctx-sub-header">{t("watchlist.subscription")}</div>
                   {TIER_OPTIONS.map((opt) => {
                     const currentTier = subscriptionTiers?.[ctxCompositeKey] || "none";
-                    const desc = opt.value === "full" && fullSummary ? fullSummary.shortText : opt.desc;
-                    const title = opt.value === "full" && fullSummary ? fullSummary.tooltip : opt.title;
+                    const desc = opt.value === "full" && fullSummary ? fullSummary.shortText : t(opt.descKey);
+                    const title = opt.value === "full" && fullSummary ? fullSummary.tooltip : t(opt.titleKey);
                     return (
                       <button key={opt.value} className={`wl-ctx-item ${currentTier === opt.value ? "wl-ctx-item-selected" : ""}`}
                         title={title}
                         onClick={() => { onTierChange(ctxCompositeKey, opt.value); setContextMenu(null); }}>
                         <span className={`wl-tier-dot ${opt.value === "full" ? "wl-tier-full" : opt.value === "price" ? "wl-tier-price" : ""}`}/>
-                        <span>{opt.label}</span>
+                        <span>{t(opt.labelKey)}</span>
                         <span className="wl-ctx-item-desc">{desc}</span>
                       </button>
                     );
@@ -834,7 +844,7 @@ export default function WatchlistSidebar({
                   setContextMenu(null);
                 }}>
                   <span className="wl-ctx-dot" style={{ background: wl.color }}/>
-                  移至「{wl.name}」
+                  {t("watchlist.moveTo", { name: watchlistDisplayName(wl) })}
                 </button>
               ))}
               <div className="wl-ctx-divider"/>
@@ -842,7 +852,7 @@ export default function WatchlistSidebar({
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
                   <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
                 </svg>
-                移除
+                {t("watchlist.remove")}
               </button>
             </>
               );

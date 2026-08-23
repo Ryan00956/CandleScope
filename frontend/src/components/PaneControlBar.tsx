@@ -2,6 +2,8 @@ import type {
   MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
 } from "react";
+import { t } from "../i18n/index.js";
+import { useLocale } from "../i18n/useLocale.js";
 import type { PaneMoveDirection } from "./paneControlModel.js";
 
 interface PaneControlBarProps {
@@ -93,7 +95,8 @@ export default function PaneControlBar({
   onToggleMaximize,
   onDelete,
 }: PaneControlBarProps) {
-  const title = paneLabel || "主图";
+  useLocale();
+  const title = paneLabel || t("pane.main");
   return (
     <div
       className="pane-control-bar pane-overlay-anchor export-exclude"
@@ -102,15 +105,15 @@ export default function PaneControlBar({
       data-pane-hovered={hovered ? "true" : "false"}
       data-pane-maximized={maximized ? "true" : "false"}
       role="toolbar"
-      aria-label={`${title}窗格控制`}
+      aria-label={t("pane.controls", { title })}
       onPointerDown={stopPointer}
       onClick={stopClick}
     >
       <button
         type="button"
         className="pane-control-button"
-        aria-label={`上移${title}`}
-        title={canMoveUp ? "上移" : "已经位于可移动范围顶部"}
+        aria-label={t("pane.moveUpAria", { title })}
+        title={canMoveUp ? t("pane.moveUp") : t("pane.moveUpDisabled")}
         disabled={!canMoveUp}
         onClick={() => onMove("up")}
       >
@@ -119,8 +122,8 @@ export default function PaneControlBar({
       <button
         type="button"
         className="pane-control-button"
-        aria-label={`下移${title}`}
-        title={canMoveDown ? "下移" : "已经位于可移动范围底部"}
+        aria-label={t("pane.moveDownAria", { title })}
+        title={canMoveDown ? t("pane.moveDown") : t("pane.moveDownDisabled")}
         disabled={!canMoveDown}
         onClick={() => onMove("down")}
       >
@@ -129,9 +132,9 @@ export default function PaneControlBar({
       <button
         type="button"
         className={`pane-control-button${collapsed ? " active" : ""}`}
-        aria-label={`${collapsed ? "展开" : "折叠"}${title}`}
+        aria-label={collapsed ? t("pane.expandAria", { title }) : t("pane.collapseAria", { title })}
         aria-pressed={collapsed}
-        title={collapsed ? "展开" : "折叠"}
+        title={collapsed ? t("pane.expand") : t("pane.collapse")}
         disabled={!canCollapse}
         onClick={onToggleCollapse}
       >
@@ -140,9 +143,9 @@ export default function PaneControlBar({
       <button
         type="button"
         className={`pane-control-button${maximized ? " active" : ""}`}
-        aria-label={`${maximized ? "退出全屏" : "全屏"}${title}`}
+        aria-label={maximized ? t("pane.exitFullscreenAria", { title }) : t("pane.fullscreenAria", { title })}
         aria-pressed={maximized}
-        title={canMaximize ? (maximized ? "退出全屏" : "全屏窗格") : "当前已经是唯一窗格"}
+        title={canMaximize ? (maximized ? t("pane.exitFullscreen") : t("pane.fullscreen")) : t("pane.onlyPane")}
         disabled={!canMaximize}
         onClick={onToggleMaximize}
       >
@@ -151,8 +154,8 @@ export default function PaneControlBar({
       <button
         type="button"
         className="pane-control-button danger"
-        aria-label={`删除${title}`}
-        title={canDelete ? "删除窗格" : "主图不能删除"}
+        aria-label={t("pane.deleteAria", { title })}
+        title={canDelete ? t("pane.delete") : t("pane.cannotDeleteMain")}
         disabled={!canDelete}
         onClick={onDelete}
       >

@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import { createIntervalTimeline, type IntervalTimeline } from "../../utils/intervalTimeline.js";
 import type {
   IndicatorPaneLegendItem,
@@ -16,22 +17,24 @@ import type {
 export const LIQUIDATION_LONG_COLOR = "#ef4444";
 export const LIQUIDATION_SHORT_COLOR = "#22c55e";
 
-const LIQUIDATION_LEGEND: readonly IndicatorPaneLegendItem[] = Object.freeze([
-  {
-    id: "liquidated-long",
-    label: "多头爆仓",
-    appearance: "solid",
-    description: "被强制卖出的多头仓位观测名义金额",
-    color: LIQUIDATION_LONG_COLOR,
-  },
-  {
-    id: "liquidated-short",
-    label: "空头爆仓",
-    appearance: "solid",
-    description: "被强制买回的空头仓位观测名义金额",
-    color: LIQUIDATION_SHORT_COLOR,
-  },
-]);
+function liquidationLegend(): readonly IndicatorPaneLegendItem[] {
+  return [
+    {
+      id: "liquidated-long",
+      label: t("liq.legend.long"),
+      appearance: "solid",
+      description: t("liq.legend.longDesc"),
+      color: LIQUIDATION_LONG_COLOR,
+    },
+    {
+      id: "liquidated-short",
+      label: t("liq.legend.short"),
+      appearance: "solid",
+      description: t("liq.legend.shortDesc"),
+      color: LIQUIDATION_SHORT_COLOR,
+    },
+  ];
+}
 
 interface ProjectedBucket {
   time: number;
@@ -198,28 +201,30 @@ function metadataForBucket(bucket: ProjectedBucket): IndicatorPanePointMetadata 
   const longLabel = bucket.longNotional === null ? "—" : formatNotional(bucket.longNotional);
   const shortLabel = bucket.shortNotional === null ? "—" : formatNotional(bucket.shortNotional);
   const qualityLabel = bucket.hasLiveEvents
-    ? "实时观测"
+    ? t("liq.q.live")
     : bucket.allRowsFinal
-      ? "已落库"
-      : "分钟桶更新中";
-  const valueLabel = `多 ${longLabel} · 空 ${shortLabel}`;
+      ? t("liq.q.stored")
+      : t("liq.q.updating");
+  const valueLabel = t("liq.value", { long: longLabel, short: shortLabel });
   return {
     time: bucket.time,
     value: (bucket.longNotional ?? 0) - (bucket.shortNotional ?? 0),
     valueLabel,
-    sourceLabel: "公开采样",
+    sourceLabel: t("liq.source"),
     qualityLabel,
     appearance: bucket.hasLiveEvents ? "realtime" : "solid",
-    accessibilityLabel: `观测爆仓额，${valueLabel}，公开采样，${qualityLabel}；未观测方向不等于零`,
+    accessibilityLabel: t("liq.a11y", { value: valueLabel, quality: qualityLabel }),
   };
 }
 
 function statusText(view: LiquidationRuntimeView): string | null {
-  if (view.error || view.historyError) return `爆仓数据暂不可用：${view.error || view.historyError}`;
-  if (view.connectionStatus === "connecting") return "正在订阅公开爆仓流…";
-  if (view.connectionStatus === "reconnecting") return "爆仓流重连中，正在重载本地分钟历史…";
-  if (view.connectionStatus === "disconnected") return "爆仓流已断开";
-  if (view.connectionStatus === "live") return "暂无本地爆仓观测；已开始采集（空白不等于 0）";
+  if (view.error || view.historyError) {
+    return t("liq.status.unavailable", { error: view.error || view.historyError || "" });
+  }
+  if (view.connectionStatus === "connecting") return t("liq.status.connecting");
+  if (view.connectionStatus === "reconnecting") return t("liq.status.reconnecting");
+  if (view.connectionStatus === "disconnected") return t("liq.status.disconnected");
+  if (view.connectionStatus === "live") return t("liq.status.liveEmpty");
   return null;
 }
 
@@ -260,17 +265,17 @@ export function buildLiquidationPane(
   });
   return {
     id: "advanced-liquidations",
-    label: "观测爆仓额",
+    label: t("liq.title"),
     lines: [
-      line("advanced-liquidation-long", "多头爆仓", LIQUIDATION_LONG_COLOR, longData),
-      line("advanced-liquidation-short", "空头爆仓", LIQUIDATION_SHORT_COLOR, shortData),
+      line("advanced-liquidation-long", t("liq.legend.long"), LIQUIDATION_LONG_COLOR, longData),
+      line("advanced-liquidation-short", t("liq.legend.short"), LIQUIDATION_SHORT_COLOR, shortData),
     ],
     owner: { kind: "market-study", id: "market:liquidations" },
     dataMarketPane: "liquidations",
-    legendItems: LIQUIDATION_LEGEND,
+    legendItems: liquidationLegend(),
     pointMetadata: projected.map(metadataForBucket),
     pointMetadataFallback: "none",
-    missingPointText: "该 K 线无爆仓观测（不等于 0）",
+    missingPointText: t("liq.missing"),
     statusText: projected.length === 0 ? statusText(view) : null,
   };
 }

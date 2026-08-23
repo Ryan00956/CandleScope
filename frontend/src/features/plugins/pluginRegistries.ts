@@ -3,6 +3,8 @@ import type {
   PluginRegistries,
   PluginUiContribution,
 } from "./pluginPlatformTypes.js";
+import type { LocaleId } from "../../i18n/index.js";
+import { localizePluginContribution } from "./pluginLocalization.js";
 
 export const EMPTY_PLUGIN_REGISTRIES: PluginRegistries = {
   commandPalette: [],
@@ -14,7 +16,10 @@ export const EMPTY_PLUGIN_REGISTRIES: PluginRegistries = {
   statusArea: [],
 };
 
-export function buildPluginRegistries(catalog: PluginCatalog | null): PluginRegistries {
+export function buildPluginRegistries(
+  catalog: PluginCatalog | null,
+  locale: LocaleId = "zh-CN",
+): PluginRegistries {
   if (!catalog?.platform.enabled) return EMPTY_PLUGIN_REGISTRIES;
   const values: PluginRegistries = {
     commandPalette: [],
@@ -27,7 +32,7 @@ export function buildPluginRegistries(catalog: PluginCatalog | null): PluginRegi
   };
   const contributions: PluginUiContribution[] = catalog.plugins
     .filter((plugin) => plugin.available && plugin.enabled)
-    .flatMap((plugin) => plugin.contributions)
+    .flatMap((plugin) => plugin.contributions.map((item) => localizePluginContribution(item, locale)))
     .filter((item): item is PluginUiContribution => (
       item.available
       && item.kind !== "symbol-provider/1"

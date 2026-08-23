@@ -29,6 +29,11 @@
       "title": "Scan scoped markets",
       "entrypoint": "main",
       "configuration": {
+      "localizations": {
+        "zh-CN": {
+          "title": "扫描已授权市场"
+        }
+      },
         "requiresUserAction": true,
         "placements": [
           "commandPalette",
@@ -48,6 +53,20 @@
       "title": "Market scanner settings",
       "entrypoint": "main",
       "configuration": {
+      "localizations": {
+        "zh-CN": {
+          "title": "市场扫描器设置",
+          "schema": {
+            "properties": {
+              "quoteAsset": {"title": "计价资产"},
+              "symbolsLimit": {"title": "扫描标的数量"},
+              "interval": {"title": "周期"},
+              "lookbackBars": {"title": "回看 K 线数"},
+              "minimumMovePct": {"title": "最小涨跌幅百分比"}
+            }
+          }
+        }
+      },
         "schema": {
           "type": "object",
           "properties": {
@@ -105,6 +124,18 @@
       "title": "Market scanner results",
       "entrypoint": "main",
       "configuration": {
+      "localizations": {
+        "zh-CN": {
+          "title": "市场扫描结果",
+          "fields": {
+            "symbol": "标的",
+            "changePct": "涨跌幅",
+            "close": "收盘价",
+            "time": "收盘时间"
+          },
+          "emptyState": "运行扫描器后将在此显示结果"
+        }
+      },
         "slot": "sidePanel",
         "renderer": "table",
         "source": {
@@ -147,6 +178,16 @@
       "title": "Market scanner summary",
       "entrypoint": "main",
       "configuration": {
+      "localizations": {
+        "zh-CN": {
+          "title": "市场扫描摘要",
+          "fields": {
+            "scannedSymbols": "已扫描",
+            "interval": "周期"
+          },
+          "emptyState": "扫描器空闲"
+        }
+      },
         "slot": "statusArea",
         "renderer": "status",
         "source": {
@@ -176,6 +217,11 @@
       "title": "Market scanner signals",
       "entrypoint": "main",
       "configuration": {
+      "localizations": {
+        "zh-CN": {
+          "title": "市场扫描信号"
+        }
+      },
         "target": "main-chart",
         "zOrder": "above-series",
         "maxItems": 16,

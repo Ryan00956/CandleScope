@@ -1,4 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { t } from "../../../i18n/index.js";
+import { useLocale } from "../../../i18n/useLocale.js";
 import { parseSymbolKey, symbolKey } from "../../../utils/symbolKey.js";
 import type { ReplayCatalog, ReplayCatalogEntry } from "../replayTypes.js";
 import { defaultReplayV2Api } from "../replayV2Api.js";
@@ -16,6 +18,7 @@ export interface ReplayWatchlistPanelProps {
 }
 
 function ReplayWatchlistPanel({ runtime, viewer, collapsed, onCollapsedChange }: ReplayWatchlistPanelProps) {
+  const locale = useLocale();
   const config = runtime.store.sessionConfig;
   const runId = viewer.viewerState?.run_id ?? null;
   const [catalog, setCatalog] = useState<ReplayCatalog | null>(null);
@@ -37,7 +40,7 @@ function ReplayWatchlistPanel({ runtime, viewer, collapsed, onCollapsedChange }:
     setCatalogError(null);
     void defaultReplayV2Api.marketCatalog(runId, controller.signal).then(setCatalog).catch((reason: unknown) => {
       if (reason instanceof DOMException && reason.name === "AbortError") return;
-      setCatalogError(reason instanceof Error ? reason.message : "商品目录读取失败");
+      setCatalogError(reason instanceof Error ? reason.message : t("replay.watchlist.catalogFailed"));
     });
     return () => controller.abort();
   }, [catalogAttempt, runId]);
@@ -73,7 +76,7 @@ function ReplayWatchlistPanel({ runtime, viewer, collapsed, onCollapsedChange }:
       });
       setMarketQuery("");
     } catch (reason) {
-      setCatalogError(reason instanceof Error ? reason.message : "商品添加失败");
+      setCatalogError(reason instanceof Error ? reason.message : t("replay.watchlist.addFailed"));
     } finally {
       setAddingMarket(null);
     }
@@ -113,7 +116,7 @@ function ReplayWatchlistPanel({ runtime, viewer, collapsed, onCollapsedChange }:
       seen.add(primaryKey);
       values.unshift({
         id: "replay_primary",
-        name: "训练主轨",
+        name: t("replay.watchlist.primary", {}, locale),
         color: "#8b5cf6",
         rows: [{ key: primaryKey, track: tracksByKey.get(primaryKey) ?? null }],
       });
@@ -131,13 +134,13 @@ function ReplayWatchlistPanel({ runtime, viewer, collapsed, onCollapsedChange }:
     if (additional.length > 0) {
       values.push({
         id: "replay_tracks",
-        name: "训练中新增",
+        name: t("replay.watchlist.addedGroup", {}, locale),
         color: "#22c55e",
         rows: additional,
       });
     }
     return values;
-  }, [primaryKey, viewer.marketTracks]);
+  }, [locale, primaryKey, viewer.marketTracks]);
   const selectedTrackId = viewer.viewerState?.selected_track_id ?? null;
   const renderRow = (
     key: string,
@@ -177,10 +180,10 @@ function ReplayWatchlistPanel({ runtime, viewer, collapsed, onCollapsedChange }:
           disabled={pending || selected || !sameScope}
           title={
             !sameScope
-              ? "首个多商品闭环仅允许同交易所、同市场类型、同结算资产"
+              ? t("replay.watchlist.sameScope")
               : selected
-                ? "当前主图：强制 FULL"
-                : "暂停全局时钟、对齐冻结历史后原子切换"
+                ? t("replay.watchlist.currentFull")
+                : t("replay.watchlist.switchHint")
           }
           onClick={activate}
         >
@@ -191,7 +194,7 @@ function ReplayWatchlistPanel({ runtime, viewer, collapsed, onCollapsedChange }:
         {forced.length > 0 && <small className="replay-track-force" title={forced.join(", ")}>🔒 {forced.join(" · ")}</small>}
         {track !== null && !selected && (
           <select
-            aria-label={`${identity.symbol} replay subscription tier`}
+            aria-label={t("replay.watchlist.tierAria", { symbol: identity.symbol })}
             value={tier}
             disabled={pending || forced.length > 0}
             onChange={(event) => {
@@ -201,9 +204,9 @@ function ReplayWatchlistPanel({ runtime, viewer, collapsed, onCollapsedChange }:
               ).catch(() => undefined);
             }}
           >
-            <option value="NONE">NONE</option>
-            <option value="WARM">WARM</option>
-            <option value="FULL">FULL</option>
+            <option value="NONE">{t("replay.watchlist.tier.none")}</option>
+            <option value="WARM">{t("replay.watchlist.tier.warm")}</option>
+            <option value="FULL">{t("replay.watchlist.tier.full")}</option>
           </select>
         )}
         {track?.degraded_reason && <small role="alert">{track.degraded_reason}</small>}
@@ -221,37 +224,37 @@ function ReplayWatchlistPanel({ runtime, viewer, collapsed, onCollapsedChange }:
           className="wl-collapse-btn"
           type="button"
           onClick={() => onCollapsedChange(!collapsed)}
-          title={collapsed ? "展开回放自选" : "收起回放自选"}
+          title={collapsed ? t("replay.watchlist.expand") : t("replay.watchlist.collapse")}
         >{collapsed ? "‹" : "›"}</button>
-        {!collapsed && <><span className="wl-header-title">回放自选</span><small>归档快照 · NONE / WARM / FULL</small></>}
+        {!collapsed && <><span className="wl-header-title">{t("replay.watchlist.title")}</span><small>{t("replay.watchlist.subtitle")}</small></>}
       </div>
       {collapsed ? (
-        <div className="wl-collapsed-icons" title="主轨 FULL">R</div>
+        <div className="wl-collapsed-icons" title={t("replay.watchlist.primaryFull")}>R</div>
       ) : (
         <div className="replay-watchlist-rows">
           <section className="replay-watchlist-group replay-market-search">
             <header>
               <i style={{ background: "#38bdf8" }} />
-              <span>添加商品</span>
+              <span>{t("replay.watchlist.add")}</span>
               <button
                 type="button"
                 disabled={runId === null || addingMarket !== null}
                 onClick={() => setCatalogAttempt((value) => value + 1)}
-              >刷新</button>
+              >{t("replay.watchlist.refresh")}</button>
             </header>
             <label>
-              <span>搜索当前 Run 可用商品</span>
+              <span>{t("replay.watchlist.search")}</span>
               <input
-                aria-label="搜索当前 Run 可用商品"
+                aria-label={t("replay.watchlist.search")}
                 value={marketQuery}
                 onChange={(event) => setMarketQuery(event.target.value)}
-                placeholder="BTC、ETH、SOL…"
+                placeholder={t("replay.watchlist.searchPlaceholder")}
               />
             </label>
-            <small>Run 不绑定单一商品；新商品会按当前全局时钟对齐后成为 MarketTrack。</small>
+            <small>{t("replay.watchlist.hint")}</small>
             {catalogError !== null && <p role="alert">{catalogError}</p>}
-            {catalog === null && catalogError === null && <p>正在读取商品目录…</p>}
-            {catalog !== null && catalogEntries.length === 0 && <p>没有匹配的可用商品</p>}
+            {catalog === null && catalogError === null && <p>{t("replay.watchlist.loading")}</p>}
+            {catalog !== null && catalogEntries.length === 0 && <p>{t("replay.watchlist.noMatch")}</p>}
             <div className="replay-market-search-results">
               {catalogEntries.map((entry) => {
                 const key = symbolKey(
@@ -264,17 +267,17 @@ function ReplayWatchlistPanel({ runtime, viewer, collapsed, onCollapsedChange }:
                   && entry.eligible_window_count > 0
                   && entry.start_compatibility?.state === "READY";
                 const unavailableReason = entry.start_compatibility?.message
-                  ?? "当前训练参数下无精确历史覆盖";
+                  ?? t("replay.watchlist.noCover");
                 return (
                   <button
                     key={key}
                     type="button"
                     disabled={tracked || !available || addingMarket !== null || viewer.viewerPending}
-                    title={tracked ? "已在当前 Run 中" : available ? "校验账户范围后添加并切换" : unavailableReason}
+                    title={tracked ? t("replay.watchlist.inRun") : available ? t("replay.watchlist.addTitle") : unavailableReason}
                     onClick={() => void addCatalogMarket(entry)}
                   >
                     <strong>{entry.identity.symbol}</strong>
-                    <small>{tracked ? "已添加" : addingMarket === key ? "校验并对齐中…" : available ? "添加" : "不可用"}</small>
+                    <small>{tracked ? t("replay.watchlist.added") : addingMarket === key ? t("replay.watchlist.adding") : available ? t("replay.watchlist.addBtn") : t("replay.watchlist.unavailable")}</small>
                   </button>
                 );
               })}
@@ -288,7 +291,7 @@ function ReplayWatchlistPanel({ runtime, viewer, collapsed, onCollapsedChange }:
                 <small>{group.rows.length}</small>
               </header>
               {group.rows.length === 0
-                ? <p>此分组在创建训练时为空</p>
+                ? <p>{t("replay.watchlist.emptyGroup")}</p>
                 : group.rows.map(({ key, track }) => (
                     renderRow(key, track, `${group.id}:${key}`)
                   ))}

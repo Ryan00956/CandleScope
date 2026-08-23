@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { getLocale, t } from "../../i18n/index.js";
+import { useLocale } from "../../i18n/useLocale.js";
 import type { ReactNode, RefObject } from "react";
 import SingleChartPanes from "../../components/SingleChartPanes.js";
 import type { MainSeriesCrosshairValue } from "../../chart-adapter/chartAdapterTypes.js";
@@ -86,19 +88,19 @@ import { resolveLocalIntervalSupport } from "./localIntervalPolicy.js";
 
 
 function formatRows(rows: number): string {
-  return new Intl.NumberFormat("zh-CN").format(rows);
+  return new Intl.NumberFormat(getLocale()).format(rows);
 }
 
 function formatDate(value: string): string {
   const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString("zh-CN");
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString(getLocale());
 }
 
 function errorMessage(reason: unknown): string {
   if (reason instanceof LocalDataApiError && reason.code === "local_profile_not_active") {
-    return "后端没有以 LOCAL_OFFLINE 模式启动。请按文档重启后端。";
+    return t("local.offlineMode");
   }
-  return reason instanceof Error ? reason.message : "本地数据操作失败";
+  return reason instanceof Error ? reason.message : t("local.opFailed");
 }
 
 function wait(milliseconds: number): Promise<void> {
@@ -163,13 +165,13 @@ function LocalImportForm({
     >
       <header>
         <div>
-          <span>IMPORT</span>
-          <strong>导入 CSV</strong>
+          <span>{t("local.kicker.import")}</span>
+          <strong>{t("local.import")}</strong>
         </div>
-        <small>数据只写入本机</small>
+        <small>{t("local.localOnly")}</small>
       </header>
       <label className="local-file-picker">
-        <span>{file?.name ?? "选择 CSV 文件"}</span>
+        <span>{file?.name ?? t("local.chooseFile")}</span>
         <input
           ref={fileInputRef}
           type="file"
@@ -178,43 +180,43 @@ function LocalImportForm({
         />
       </label>
       <label>
-        数据集名称
-        <input value={name} onChange={(event) => setName(event.target.value)} placeholder="默认使用文件名" />
+        {t("local.datasetName")}
+        <input value={name} onChange={(event) => setName(event.target.value)} placeholder={t("local.namePh")} />
       </label>
       <div className="local-import-grid">
         <label>
-          商品
+          {t("local.symbol")}
           <input required value={symbol} onChange={(event) => setSymbol(event.target.value)} />
         </label>
         <label>
-          周期
+          {t("local.interval")}
           <input required value={interval} onChange={(event) => setInterval(event.target.value)} placeholder="1m" />
         </label>
         <label>
-          时区
+          {t("local.timezone")}
           <input required value={timezone} onChange={(event) => setTimezone(event.target.value)} placeholder="UTC" />
         </label>
         <label>
-          时间格式
+          {t("local.timeFormat")}
           <select value={timestampUnit} onChange={(event) => setTimestampUnit(event.target.value as typeof timestampUnit)}>
-            <option value="auto">自动识别</option>
-            <option value="s">Unix 秒</option>
-            <option value="ms">Unix 毫秒</option>
-            <option value="iso">ISO 时间</option>
+            <option value="auto">{t("local.autoDetect")}</option>
+            <option value="s">{t("local.unixS")}</option>
+            <option value="ms">{t("local.unixMs")}</option>
+            <option value="iso">{t("local.iso")}</option>
           </select>
         </label>
         <label>
-          成交量
+          {t("local.volume")}
           <select
             value={volumeRequired ? "required" : "optional"}
             onChange={(event) => setVolumeRequired(event.target.value === "required")}
           >
-            <option value="optional">可选，缺失时标记不可用</option>
-            <option value="required">必须存在</option>
+            <option value="optional">{t("local.volumeOptional")}</option>
+            <option value="required">{t("local.volumeRequired")}</option>
           </select>
         </label>
       </div>
-      <p>必需列：time, open, high, low, close。volume/Volume 可选；缺失时明确标记为不可用，不会填 0。</p>
+      <p>{t("local.requiredCols")}</p>
       {selected !== null && (
         <label className="local-revision-choice">
           <input
@@ -222,17 +224,17 @@ function LocalImportForm({
             checked={asRevision}
             onChange={(event) => setAsRevision(event.target.checked)}
           />
-          作为“{selected.name}”的新修订导入（商品与周期必须一致）
+          {t("local.asRevision", { name: selected.name })}
         </label>
       )}
       <button type="submit" disabled={file === null || importing}>
-        {importing ? "正在后台校验并导入…" : "导入到本地资料库"}
+        {importing ? t("local.importing") : t("local.importBtn")}
       </button>
       {importing && (
         <div className="local-import-progress" role="status">
-          <div><span>{importJob?.stage ?? "uploading"}</span><b>{importJob ? `${formatRows(importJob.processed_rows)} 行` : `${Math.round((uploadProgress ?? 0) * 100)}%`}</b></div>
+          <div><span>{importJob?.stage ?? "uploading"}</span><b>{importJob ? t("local.rows", { count: formatRows(importJob.processed_rows) }) : `${Math.round((uploadProgress ?? 0) * 100)}%`}</b></div>
           <progress value={importJob?.total_rows ? importJob.processed_rows / importJob.total_rows : (uploadProgress ?? undefined)} />
-          <button type="button" onClick={onCancel}>取消导入</button>
+          <button type="button" onClick={onCancel}>{t("local.cancelImport")}</button>
         </div>
       )}
     </form>
@@ -263,7 +265,7 @@ function LocalDatasetRail({
   analysis: ReactNode;
 }) {
   return (
-    <aside className="local-data-rail" aria-label="本地数据资料库">
+    <aside className="local-data-rail" aria-label={t("local.libraryAria")}>
       <LocalImportForm
         importing={importing}
         importJob={importJob}
@@ -275,14 +277,14 @@ function LocalDatasetRail({
       <section className="local-dataset-library">
         <header>
           <div>
-            <span>LIBRARY</span>
-            <strong>本地数据集</strong>
+            <span>{t("local.kicker.library")}</span>
+            <strong>{t("local.datasets")}</strong>
           </div>
-          <small>{datasets.length} 个</small>
+          <small>{t("local.count", { count: datasets.length })}</small>
         </header>
         <div className="local-dataset-list">
           {datasets.length === 0 ? (
-            <div className="local-dataset-empty">还没有数据集。先导入一份标准 OHLC 或 OHLCV CSV。</div>
+            <div className="local-dataset-empty">{t("local.empty")}</div>
           ) : datasets.map((dataset) => (
             <button
               type="button"
@@ -291,7 +293,7 @@ function LocalDatasetRail({
               onClick={() => onSelect(dataset.dataset_id)}
             >
               <span><strong>{dataset.name}</strong><em>{dataset.symbol} · {dataset.interval} · {dataset.volume_available ? "OHLCV" : "OHLC-only"}</em></span>
-              <span><b>{formatRows(dataset.rows)}</b><small>{dataset.excluded_range_count} 缺口</small></span>
+              <span><b>{formatRows(dataset.rows)}</b><small>{t("local.gaps", { count: dataset.excluded_range_count })}</small></span>
             </button>
           ))}
         </div>
@@ -359,78 +361,78 @@ function LocalDatasetManagement({
   return (
     <section className="local-dataset-management">
       <header>
-        <div><span>DATA OPS</span><strong>质量 · 修订 · 项目包</strong></div>
+        <div><span>{t("local.kicker.dataOps")}</span><strong>{t("local.ops")}</strong></div>
         <small>{busy ?? "ready"}</small>
       </header>
       {manifest !== null && (
         <>
           <div className="local-library-actions">
-            <input value={draftName} onChange={(event) => setDraftName(event.target.value)} aria-label="数据集名称" />
+            <input value={draftName} onChange={(event) => setDraftName(event.target.value)} aria-label={t("local.datasetName")} />
             <button type="button" disabled={busy !== null || !draftName.trim() || draftName.trim() === manifest.name} onClick={() => void run("renaming", async () => {
               await updateLocalDataset(manifest.dataset_id, { name: draftName.trim() });
               await onChanged(manifest.dataset_id);
-            })}>重命名</button>
+            })}>{t("local.rename")}</button>
             <button type="button" disabled={busy !== null} onClick={() => void run("archiving", async () => {
               await updateLocalDataset(manifest.dataset_id, { archived: true });
               await onChanged();
-            })}>归档</button>
+            })}>{t("local.archive")}</button>
             <button type="button" className="danger" disabled={busy !== null} onClick={() => {
-              if (!window.confirm(`把“${manifest.name}”移入回收站？可在此处恢复。`)) return;
+              if (!window.confirm(t("local.trashConfirm", { name: manifest.name }))) return;
               void run("trashing", async () => {
                 await trashLocalDataset(manifest.dataset_id);
                 await onChanged();
                 await reloadMetadata();
               });
-            }}>移入回收站</button>
+            }}>{t("local.trash")}</button>
           </div>
           <div className="local-quality-card">
-            <div><span>当前质量</span><strong>{details?.quality.status ?? "读取中"}</strong></div>
+            <div><span>{t("local.quality")}</span><strong>{details?.quality.status ?? t("local.reading")}</strong></div>
             <dl>
-              <div><dt>行数</dt><dd>{formatRows(details?.quality.rows ?? manifest.rows)}</dd></div>
-              <div><dt>缺口</dt><dd>{details?.quality.excluded_ranges.length ?? manifest.excluded_range_count}</dd></div>
-              <div><dt>无成交量</dt><dd>{formatRows(details?.quality.missing_volume_rows ?? 0)}</dd></div>
-              <div><dt>修订</dt><dd>{manifest.revision_count ?? revisions.length}</dd></div>
+              <div><dt>{t("local.rowsLabel")}</dt><dd>{formatRows(details?.quality.rows ?? manifest.rows)}</dd></div>
+              <div><dt>{t("local.gapsLabel")}</dt><dd>{details?.quality.excluded_ranges.length ?? manifest.excluded_range_count}</dd></div>
+              <div><dt>{t("local.noVolume")}</dt><dd>{formatRows(details?.quality.missing_volume_rows ?? 0)}</dd></div>
+              <div><dt>{t("local.revisions")}</dt><dd>{manifest.revision_count ?? revisions.length}</dd></div>
             </dl>
             {(details?.quality.excluded_ranges.length ?? 0) > 0 && (
               <ul>{details?.quality.excluded_ranges.slice(0, 3).map((gap) => (
-                <li key={`${gap.start_ms}-${gap.end_ms}`}>{new Date(gap.start_ms).toLocaleString("zh-CN")} · 缺 {gap.missing_bars} 根</li>
+                <li key={`${gap.start_ms}-${gap.end_ms}`}>{t("local.gapBars", { time: new Date(gap.start_ms).toLocaleString(getLocale()), count: gap.missing_bars })}</li>
               ))}</ul>
             )}
           </div>
           <div className="local-revision-list">
-            <strong>修订历史</strong>
+            <strong>{t("local.revisionHistory")}</strong>
             {revisions.map((revision) => (
               <div key={revision.data_epoch} className={revision.current ? "current" : ""}>
-                <span><b>{revision.data_epoch.slice(7, 17)}</b><small>{formatDate(revision.imported_at)} · {formatRows(revision.rows)} 行 · {revision.quality_status}</small></span>
-                {revision.current ? <em>当前</em> : <span className="local-revision-actions">
+                <span><b>{revision.data_epoch.slice(7, 17)}</b><small>{t("local.revisionRows", { date: formatDate(revision.imported_at), rows: formatRows(revision.rows), status: revision.quality_status })}</small></span>
+                {revision.current ? <em>{t("local.current")}</em> : <span className="local-revision-actions">
                   <button type="button" disabled={busy !== null} onClick={() => void run("comparing", async () => {
                     setComparison(await compareLocalRevisions(manifest.dataset_id, revision.data_epoch, manifest.data_epoch));
-                  })}>对比</button>
+                  })}>{t("local.compare")}</button>
                   <button type="button" disabled={busy !== null} onClick={() => {
-                    if (!window.confirm("切换到这个历史修订？现有修订仍会保留。")) return;
+                    if (!window.confirm(t("local.switchConfirm"))) return;
                     void run("switching", async () => {
                       await activateLocalRevision(manifest, revision.data_epoch);
                       await onChanged(manifest.dataset_id);
                     });
-                  }}>切换</button>
+                  }}>{t("local.switchRevision")}</button>
                 </span>}
               </div>
             ))}
           </div>
           {comparison !== null && (
             <div className="local-revision-comparison">
-              <span>修订差异</span>
-              <b>新增 {comparison.added} · 删除 {comparison.removed} · 变更 {comparison.changed} · 相同 {comparison.unchanged}</b>
+              <span>{t("local.diff")}</span>
+              <b>{t("local.diffStats", { added: comparison.added, removed: comparison.removed, changed: comparison.changed, unchanged: comparison.unchanged })}</b>
             </div>
           )}
           <button type="button" className="local-project-export" disabled={busy !== null} onClick={() => void run("exporting", async () => {
             const state = await captureLocalProjectState(manifest, settings, events);
             await exportLocalProject(manifest, state);
-          })}>导出完整项目包</button>
+          })}>{t("local.exportProject")}</button>
         </>
       )}
       <label className="local-project-import">
-        <span>导入 .csproject 项目包</span>
+        <span>{t("local.importProject")}</span>
         <input
           ref={packageInputRef}
           type="file"
@@ -453,23 +455,23 @@ function LocalDatasetManagement({
       </label>
       {archived.length > 0 && (
         <div className="local-trash-list">
-          <strong>已归档</strong>
+          <strong>{t("local.archived")}</strong>
           {archived.map((dataset) => (
             <div key={dataset.dataset_id}><span>{dataset.name}<small>{dataset.symbol} · {dataset.interval}</small></span><button type="button" disabled={busy !== null} onClick={() => void run("unarchiving", async () => {
               await updateLocalDataset(dataset.dataset_id, { archived: false });
               await onChanged(dataset.dataset_id);
-            })}>恢复到资料库</button></div>
+            })}>{t("local.restoreLibrary")}</button></div>
           ))}
         </div>
       )}
       {trash.length > 0 && (
         <div className="local-trash-list">
-          <strong>回收站</strong>
+          <strong>{t("local.recycle")}</strong>
           {trash.slice(0, 3).map((entry) => (
             <div key={entry.trash_id}><span>{entry.name}<small>{formatDate(entry.deleted_at)}</small></span><button type="button" disabled={busy !== null} onClick={() => void run("restoring", async () => {
               const restored = await restoreLocalTrash(entry.trash_id);
               await onChanged(restored.dataset_id);
-            })}>恢复</button></div>
+            })}>{t("local.restore")}</button></div>
           ))}
         </div>
       )}
@@ -544,7 +546,7 @@ function LocalChart({
       {runtime.error !== null && (
         <div className="local-chart-error" role="alert">
           <span>{runtime.error}</span>
-          <button type="button" onClick={runtime.retry}>重试</button>
+          <button type="button" onClick={runtime.retry}>{t("replay.retry")}</button>
         </div>
       )}
       <ChartErrorBoundary>
@@ -855,7 +857,7 @@ function LocalDatasetWorkspace({
       <IndicatorPanel
         staticCatalog={indicatorCatalog}
         allowCustomIndicators={false}
-        customIndicatorsUnavailableReason="离线 profile 未启动自定义脚本运行时"
+        customIndicatorsUnavailableReason={t("local.offlineRuntime")}
         isOpen={indicatorPanelOpen}
         onClose={onCloseIndicatorPanel}
         activeIndicators={indicators.view.activeIndicators}
@@ -873,10 +875,10 @@ function LocalDatasetWorkspace({
           manifest,
         )}
         modeNotice={{
-          label: interval === manifest.interval ? "本地 CSV" : `本地派生 ${interval}`,
+          label: interval === manifest.interval ? t("local.csvSource") : t("local.derivedLabel", { interval }),
           description: interval === manifest.interval
-            ? "共享指标 Runtime，只计算当前不可变 dataEpoch；不联网、不回填。"
-            : `指标基于完整的 ${interval} 派生 K 线计算；源周期 ${manifest.interval}，不联网、不插值。`,
+            ? t("local.modeSource")
+            : t("local.modeDerived", { interval, source: manifest.interval }),
         }}
       />
     </>
@@ -887,13 +889,14 @@ function EmptyChart() {
   return (
     <div className="local-chart-empty">
       <div className="local-empty-icon">CSV</div>
-      <h1>把表格数据变成可分析的 K 线</h1>
-      <p>导入 OHLC CSV 后，可以直接看图、添加事件标记、写备注和保存绘图。</p>
+      <h1>{t("local.emptyTitle")}</h1>
+      <p>{t("local.emptyHint")}</p>
     </div>
   );
 }
 
 export default function LocalApp() {
+  useLocale();
   const pageExportRef = useRef<HTMLDivElement | null>(null);
   const { settings, setSettings, resolvedTheme } = useChartSettingsRuntime();
   const [datasets, setDatasets] = useState<LocalDatasetManifest[]>([]);
@@ -1055,7 +1058,7 @@ export default function LocalApp() {
         await refresh(job.dataset.dataset_id);
       } else if (job.status !== "cancelled") {
         throw new LocalDataApiError(
-          job.error?.message ?? "后台导入失败",
+          job.error?.message ?? t("local.importFailed"),
           422,
           job.error?.code ?? "import_failed",
         );
@@ -1114,8 +1117,8 @@ export default function LocalApp() {
               type="button"
               className="settings-btn"
               onClick={() => setSettingsOpen(true)}
-              title="设置"
-              aria-label="设置"
+              title={t("shell.settings")}
+              aria-label={t("shell.settings")}
             >
               ⚙️
             </button>
@@ -1124,16 +1127,16 @@ export default function LocalApp() {
               className={`indicator-toggle-btn ${indicatorPanelOpen ? "active" : ""}`}
               disabled={selected === null}
               onClick={() => setIndicatorPanelOpen((open) => !open)}
-              title="指标 (Indicators)"
+              title={t("shell.indicators")}
             >
               📊
               {activeIndicatorCount > 0 && (
                 <span className="indicator-badge">{activeIndicatorCount}</span>
               )}
             </button>
-            <span className="local-offline-badge">● 本地分析</span>
+            <span className="local-offline-badge">{t("local.badge")}</span>
           </>}
-          trailing={<span className="local-network-truth">CSV 数据 · 事件标记 · 本地绘图</span>}
+          trailing={<span className="local-network-truth">{t("local.trailing")}</span>}
         />
       )}
       intervalSelector={(
@@ -1147,7 +1150,7 @@ export default function LocalApp() {
             />
           )}
           <div className="local-dataset-truthbar">
-            <span>{selected ? `${selectedInterval}${selectedInterval === selected.interval ? " 源数据" : ` · 由 ${selected.interval} 完整聚合`} · ${selected.timezone} · ${formatRows(selected.rows)} source bars · ${selected.volume_available ? "OHLCV" : "OHLC-only / 成交量不可用"}` : "等待本地数据"}</span>
+            <span>{selected ? `${selectedInterval}${selectedInterval === selected.interval ? t("local.sourceData") : t("local.derived", { interval: selected.interval })} · ${selected.timezone} · ${formatRows(selected.rows)} source bars · ${selected.volume_available ? "OHLCV" : t("local.volumeUnavailable")}` : t("local.waitData")}</span>
             <span>{selected ? `dataEpoch ${selected.data_epoch.slice(7, 19)}` : "source: local_dataset"}</span>
           </div>
         </div>
@@ -1218,7 +1221,7 @@ export default function LocalApp() {
           {error !== null && (
             <div className="local-global-error" role="alert">
               <span>{error}</span>
-              <button type="button" onClick={() => setError(null)}>关闭</button>
+              <button type="button" onClick={() => setError(null)}>{t("backtest.close")}</button>
             </div>
           )}
           <SettingsModal
@@ -1239,8 +1242,8 @@ export default function LocalApp() {
         <MarketStatusBar
           source="local"
           connectionStatus={error === null ? "offline-ready" : "error"}
-          left={<><span className="status-dot connected" />LOCAL DATASET · ANALYSIS READY</>}
-          right={selected ? <>{analysisSnapshot.events.length} 个标记 · {selected.excluded_range_count} 个数据缺口 · 导入于 {formatDate(selected.imported_at)}</> : loadingLibrary ? "正在读取本地资料库…" : "未选择数据集"}
+          left={<><span className="status-dot connected" />{t("local.status.ready")}</>}
+          right={selected ? <>{t("local.statusRight", { events: analysisSnapshot.events.length, gaps: selected.excluded_range_count, date: formatDate(selected.imported_at) })}</> : loadingLibrary ? t("local.waitingLibrary") : t("local.noDataset")}
         />
       )}
     />

@@ -4,6 +4,8 @@ import {
   type CSSProperties,
   type FormEvent,
 } from "react";
+import { t, type MessageKey } from "../../i18n/index.js";
+import { useLocale } from "../../i18n/useLocale.js";
 import type { ChartLinkViewportIssue } from "./chartLinkCoordinator.js";
 import {
   summarizeChartDrawingLink,
@@ -17,6 +19,7 @@ import {
   chartLinkGroupDepth,
   isChartLinkGroupDescendant,
 } from "./chartWorkspaceLinkModel.js";
+import { chartLinkGroupDisplayName } from "./chartWorkspaceI18n.js";
 import type { ChartLinkGroupSettingsPatch } from "./chartWorkspaceLinkModel.js";
 import type { ChartWorkspacePersistenceMode } from "./chartWorkspaceRepository.js";
 import {
@@ -36,66 +39,66 @@ import type {
 
 type WorkspacePanelTab = "workspaces" | "layout" | "links";
 
-const TABS: ReadonlyArray<{ id: WorkspacePanelTab; label: string }> = [
-  { id: "workspaces", label: "工作区" },
-  { id: "layout", label: "布局与窗口" },
-  { id: "links", label: "联动" },
+const TABS: ReadonlyArray<{ id: WorkspacePanelTab; labelKey: MessageKey }> = [
+  { id: "workspaces", labelKey: "workspace.tab.workspaces" },
+  { id: "layout", labelKey: "workspace.tab.layout" },
+  { id: "links", labelKey: "workspace.tab.links" },
 ];
 
 const TEMPLATE_OPTIONS: ReadonlyArray<{
   id: ChartWorkspaceTemplateId;
-  label: string;
-  description: string;
+  labelKey: MessageKey;
+  descriptionKey: MessageKey;
   glyph: string;
 }> = [
-  { id: "single", label: "单图", description: "一个主图表", glyph: "□" },
-  { id: "split-vertical", label: "左右双图", description: "并排比较", glyph: "▯▯" },
-  { id: "split-horizontal", label: "上下双图", description: "上下确认", glyph: "▭" },
-  { id: "main-confirmation", label: "主图 / 确认图", description: "左主图 + 右双确认", glyph: "◧" },
-  { id: "quad", label: "四图", description: "多周期工作台", glyph: "▦" },
-  { id: "grid-6", label: "六图", description: "2 × 3 矩阵", glyph: "2×3" },
-  { id: "grid-8", label: "八图", description: "2 × 4 矩阵", glyph: "2×4" },
-  { id: "grid-9", label: "九图", description: "3 × 3 矩阵", glyph: "3×3" },
-  { id: "grid-12", label: "十二图", description: "3 × 4 矩阵", glyph: "3×4" },
-  { id: "grid-16", label: "十六图", description: "4 × 4 矩阵", glyph: "4×4" },
+  { id: "single", labelKey: "workspace.template.single", descriptionKey: "workspace.template.singleDesc", glyph: "□" },
+  { id: "split-vertical", labelKey: "workspace.template.splitVertical", descriptionKey: "workspace.template.splitVerticalDesc", glyph: "▯▯" },
+  { id: "split-horizontal", labelKey: "workspace.template.splitHorizontal", descriptionKey: "workspace.template.splitHorizontalDesc", glyph: "▭" },
+  { id: "main-confirmation", labelKey: "workspace.template.mainConfirm", descriptionKey: "workspace.template.mainConfirmDesc", glyph: "◧" },
+  { id: "quad", labelKey: "workspace.template.quad", descriptionKey: "workspace.template.quadDesc", glyph: "▦" },
+  { id: "grid-6", labelKey: "workspace.template.grid6", descriptionKey: "workspace.template.grid6Desc", glyph: "2×3" },
+  { id: "grid-8", labelKey: "workspace.template.grid8", descriptionKey: "workspace.template.grid8Desc", glyph: "2×4" },
+  { id: "grid-9", labelKey: "workspace.template.grid9", descriptionKey: "workspace.template.grid9Desc", glyph: "3×3" },
+  { id: "grid-12", labelKey: "workspace.template.grid12", descriptionKey: "workspace.template.grid12Desc", glyph: "3×4" },
+  { id: "grid-16", labelKey: "workspace.template.grid16", descriptionKey: "workspace.template.grid16Desc", glyph: "4×4" },
 ];
 
-const LAYOUT_LABELS: Record<ChartWorkspaceSummary["layout"], string> = {
-  single: "单图",
-  "split-vertical": "左右双图",
-  "split-horizontal": "上下双图",
-  "main-confirmation": "主图 / 确认图",
-  quad: "四图",
-  "grid-6": "六图",
-  "grid-8": "八图",
-  "grid-9": "九图",
-  "grid-12": "十二图",
-  "grid-16": "十六图",
-  custom: "自定义布局",
+const LAYOUT_LABELS: Record<ChartWorkspaceSummary["layout"], MessageKey> = {
+  single: "workspace.template.single",
+  "split-vertical": "workspace.template.splitVertical",
+  "split-horizontal": "workspace.template.splitHorizontal",
+  "main-confirmation": "workspace.template.mainConfirm",
+  quad: "workspace.template.quad",
+  "grid-6": "workspace.template.grid6",
+  "grid-8": "workspace.template.grid8",
+  "grid-9": "workspace.template.grid9",
+  "grid-12": "workspace.template.grid12",
+  "grid-16": "workspace.template.grid16",
+  custom: "workspace.layout.custom",
 };
 
 const LINK_SETTING_OPTIONS: ReadonlyArray<{
   key: Exclude<keyof ChartLinkGroupSettings, "indicators">;
-  label: string;
-  description: string;
+  labelKey: MessageKey;
+  descriptionKey: MessageKey;
 }> = [
-  { key: "market", label: "品种", description: "同步交易所、市场类型和品种" },
-  { key: "interval", label: "周期", description: "同步图表周期" },
-  { key: "crosshair", label: "十字线", description: "按市场时间同步十字线" },
-  { key: "timeAnchor", label: "右端", description: "对齐可视窗口右端，保留各图缩放" },
-  { key: "dateRange", label: "范围", description: "同步完整日期范围与缩放" },
-  { key: "drawings", label: "绘图", description: "同市场、同图层集共享绘图文档" },
+  { key: "market", labelKey: "workspace.link.market", descriptionKey: "workspace.link.marketDesc" },
+  { key: "interval", labelKey: "workspace.link.interval", descriptionKey: "workspace.link.intervalDesc" },
+  { key: "crosshair", labelKey: "workspace.link.crosshair", descriptionKey: "workspace.link.crosshairDesc" },
+  { key: "timeAnchor", labelKey: "workspace.link.timeAnchor", descriptionKey: "workspace.link.timeAnchorDesc" },
+  { key: "dateRange", labelKey: "workspace.link.dateRange", descriptionKey: "workspace.link.dateRangeDesc" },
+  { key: "drawings", labelKey: "workspace.link.drawings", descriptionKey: "workspace.link.drawingsDesc" },
 ];
 
 const INDICATOR_LINK_OPTIONS: ReadonlyArray<{
   key: keyof ChartLinkIndicatorSettings;
-  label: string;
-  description: string;
+  labelKey: MessageKey;
+  descriptionKey: MessageKey;
 }> = [
-  { key: "definitions", label: "指标列表", description: "同步新增、删除与指标类型" },
-  { key: "parameters", label: "指标参数", description: "按稳定绑定 ID 同步参数" },
-  { key: "visual", label: "显示样式", description: "同步显隐、线条和渲染样式" },
-  { key: "paneLayout", label: "窗格位置", description: "同步主图或副图窗格位置" },
+  { key: "definitions", labelKey: "workspace.link.definitions", descriptionKey: "workspace.link.definitionsDesc" },
+  { key: "parameters", labelKey: "workspace.link.parameters", descriptionKey: "workspace.link.parametersDesc" },
+  { key: "visual", labelKey: "workspace.link.visual", descriptionKey: "workspace.link.visualDesc" },
+  { key: "paneLayout", labelKey: "workspace.link.paneLayout", descriptionKey: "workspace.link.paneLayoutDesc" },
 ];
 
 function LinkPolicyEditor({
@@ -129,19 +132,19 @@ function LinkPolicyEditor({
             type="button"
             className={policy[option.key] ? "active" : ""}
             aria-pressed={policy[option.key]}
-            title={option.description}
+            title={t(option.descriptionKey)}
             disabled={disabled}
             onClick={() => onChange({ [option.key]: !policy[option.key] })}
           >
-            <span>{option.label}</span>
-            <small>{option.description}</small>
+            <span>{t(option.labelKey)}</span>
+            <small>{t(option.descriptionKey)}</small>
           </button>
           ))}
       </div>
       <div className="workspace-panel-section-heading">
         <div>
-          <h3>指标联动</h3>
-          <p>只传配置，不复制计算结果；每个目标图仍按自己的数据计算</p>
+          <h3>{t("workspace.indicatorLink")}</h3>
+          <p>{t("workspace.indicatorLinkHint")}</p>
         </div>
       </div>
       <div className="workspace-panel-link-settings">
@@ -151,14 +154,14 @@ function LinkPolicyEditor({
             type="button"
             className={policy.indicators[option.key] ? "active" : ""}
             aria-pressed={policy.indicators[option.key]}
-            title={option.description}
+            title={t(option.descriptionKey)}
             disabled={disabled}
             onClick={() => onChange({
               indicators: { [option.key]: !policy.indicators[option.key] },
             })}
           >
-            <span>{option.label}</span>
-            <small>{option.description}</small>
+            <span>{t(option.labelKey)}</span>
+            <small>{t(option.descriptionKey)}</small>
           </button>
         ))}
       </div>
@@ -167,26 +170,26 @@ function LinkPolicyEditor({
 }
 
 function saveStateLabel(state: ChartWorkspaceSaveState): string {
-  if (state === "loading") return "正在恢复";
-  if (state === "saving") return "正在保存";
-  if (state === "error") return "保存失败";
-  return "已保存";
+  if (state === "loading") return t("workspace.save.loading");
+  if (state === "saving") return t("workspace.save.saving");
+  if (state === "error") return t("workspace.save.error");
+  return t("workspace.save.saved");
 }
 
 function persistenceLabel(mode: ChartWorkspacePersistenceMode | null): string {
-  if (mode === "indexeddb") return "本地数据库自动保存";
-  if (mode === "local-storage") return "本地兼容存储自动保存";
-  if (mode === "memory") return "仅本次会话";
-  if (mode === "workspace-bus") return "WorkspaceBus 单写入者";
-  return "本地自动保存";
+  if (mode === "indexeddb") return t("workspace.persist.indexeddb");
+  if (mode === "local-storage") return t("workspace.persist.localStorage");
+  if (mode === "memory") return t("workspace.persist.memory");
+  if (mode === "workspace-bus") return t("workspace.persist.bus");
+  return t("workspace.persist.local");
 }
 
 function drawingLinkStatusText(summary: ChartDrawingLinkSummary): string {
-  if (summary.state === "linked") return `绘图已与 ${summary.linkedPeerCount} 个图表共享`;
-  if (summary.state === "waiting") return "绘图联动等待同组图表";
-  if (summary.state === "market-mismatch") return "绘图未共享：同组图表的市场身份不同";
-  if (summary.state === "layer-mismatch") return "绘图未共享：请选择相同图层集";
-  return summary.state === "disabled" ? "绘图联动未开启" : "独立绘图文档";
+  if (summary.state === "linked") return t("workspace.drawing.linked", { count: summary.linkedPeerCount });
+  if (summary.state === "waiting") return t("workspace.drawing.waiting");
+  if (summary.state === "market-mismatch") return t("workspace.drawing.marketMismatch");
+  if (summary.state === "layer-mismatch") return t("workspace.drawing.layerMismatch");
+  return summary.state === "disabled" ? t("workspace.drawing.disabled") : t("workspace.drawing.independent");
 }
 
 function orderedLinkGroupTree(document: ChartWorkspaceDocument) {
@@ -226,6 +229,7 @@ export default function WorkspacePanel({
   desktop,
   viewportIssue,
 }: WorkspacePanelProps) {
+  useLocale();
   const [tab, setTab] = useState<WorkspacePanelTab>("workspaces");
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState(runtime.view.activeWorkspaceName);
@@ -279,12 +283,12 @@ export default function WorkspacePanel({
   const nativeWindowsEnabled = desktop.mode === "native" && desktop.multiWindowEnabled;
   const windowCount = Object.keys(view.document.windows).length;
   const windowStatus = desktop.error || (desktop.mode === "web"
-    ? "Web 单窗口 · 原生多窗口不可用"
+    ? t("workspace.webWindows")
     : nativeWindowsEnabled
       ? windowCount >= 4
-        ? "4 / 4 窗口 · 已达应用上限"
-        : `${windowCount} / 4 窗口 · ${desktop.displayCount} 个显示器`
-      : "原生多窗口未启用");
+        ? t("workspace.windowCap")
+        : t("workspace.windowStatus", { count: windowCount, displays: desktop.displayCount })
+      : t("workspace.nativeOff"));
 
   const submitRename = (event: FormEvent) => {
     event.preventDefault();
@@ -299,14 +303,14 @@ export default function WorkspacePanel({
         className="workspace-panel"
         role="dialog"
         aria-modal="true"
-        aria-label="图表工作区管理"
+        aria-label={t("workspace.manage")}
         onClick={(event) => event.stopPropagation()}
       >
         <header className="workspace-panel-header">
           <div>
-            <div className="workspace-panel-kicker">MULTI-CHART</div>
-            <h2>图表工作区</h2>
-            <p>{view.activeWorkspaceName} · {view.layoutCellIds.length} 个图表</p>
+            <div className="workspace-panel-kicker">{t("workspace.kicker")}</div>
+            <h2>{t("workspace.title")}</h2>
+            <p>{t("workspace.chartCount", { name: view.activeWorkspaceName, count: view.layoutCellIds.length })}</p>
           </div>
           <div className="workspace-panel-header-actions">
             <span
@@ -321,14 +325,14 @@ export default function WorkspacePanel({
               type="button"
               className="workspace-panel-close"
               onClick={onClose}
-              aria-label="关闭图表工作区侧栏"
+              aria-label={t("workspace.close")}
             >
               ✕
             </button>
           </div>
         </header>
 
-        <nav className="workspace-panel-tabs" aria-label="图表工作区管理分类" role="tablist">
+        <nav className="workspace-panel-tabs" aria-label={t("workspace.tabs")} role="tablist">
           {TABS.map((item) => (
             <button
               key={item.id}
@@ -338,7 +342,7 @@ export default function WorkspacePanel({
               aria-selected={tab === item.id}
               onClick={() => setTab(item.id)}
             >
-              {item.label}
+              {t(item.labelKey)}
             </button>
           ))}
         </nav>
@@ -349,12 +353,12 @@ export default function WorkspacePanel({
               <section className="workspace-panel-section">
                 <div className="workspace-panel-section-heading">
                   <div>
-                    <h3>已保存工作区</h3>
-                    <p>{view.workspaces.length} 个本地工作区，切换后自动恢复布局</p>
+                    <h3>{t("workspace.saved")}</h3>
+                    <p>{t("workspace.savedHint", { count: view.workspaces.length })}</p>
                   </div>
                 </div>
 
-                <div className="workspace-panel-workspace-list" role="listbox" aria-label="已保存工作区">
+                <div className="workspace-panel-workspace-list" role="listbox" aria-label={t("workspace.saved")}>
                   {view.workspaces.map((workspace) => (
                     <button
                       key={workspace.id}
@@ -374,7 +378,7 @@ export default function WorkspacePanel({
                       </span>
                       <span>
                         <strong>{workspace.name}</strong>
-                        <small>{LAYOUT_LABELS[workspace.layout]}</small>
+                        <small>{t(LAYOUT_LABELS[workspace.layout])}</small>
                       </span>
                     </button>
                   ))}
@@ -382,7 +386,7 @@ export default function WorkspacePanel({
 
                 {editingName ? (
                   <form className="workspace-panel-rename-form" onSubmit={submitRename}>
-                    <label htmlFor="workspace-panel-name-input">重命名当前工作区</label>
+                    <label htmlFor="workspace-panel-name-input">{t("workspace.renameCurrent")}</label>
                     <div>
                       <input
                         autoFocus
@@ -391,7 +395,7 @@ export default function WorkspacePanel({
                         maxLength={48}
                         onChange={(event) => setNameDraft(event.currentTarget.value)}
                       />
-                      <button type="submit" disabled={!nameDraft.trim()}>确定</button>
+                      <button type="submit" disabled={!nameDraft.trim()}>{t("workspace.ok")}</button>
                       <button
                         type="button"
                         onClick={() => {
@@ -399,12 +403,12 @@ export default function WorkspacePanel({
                           setNameDraft(view.activeWorkspaceName);
                         }}
                       >
-                        取消
+                        {t("workspace.cancel")}
                       </button>
                     </div>
                   </form>
                 ) : (
-                  <div className="workspace-panel-current-actions" aria-label="当前工作区操作">
+                  <div className="workspace-panel-current-actions" aria-label={t("workspace.currentActions")}>
                     <button
                       type="button"
                       onClick={() => {
@@ -413,7 +417,7 @@ export default function WorkspacePanel({
                         setConfirmDelete(false);
                       }}
                     >
-                      重命名
+                      {t("workspace.rename")}
                     </button>
                     <button
                       type="button"
@@ -422,13 +426,13 @@ export default function WorkspacePanel({
                         actions.duplicateWorkspace(view.activeWorkspaceId);
                       }}
                     >
-                      另存副本
+                      {t("workspace.duplicate")}
                     </button>
                     <button
                       type="button"
                       className={confirmDelete ? "danger confirm" : "danger"}
                       disabled={view.workspaces.length <= 1}
-                      title={view.workspaces.length <= 1 ? "至少保留一个工作区" : "删除当前工作区"}
+                      title={view.workspaces.length <= 1 ? t("workspace.keepOne") : t("workspace.deleteCurrent")}
                       onClick={() => {
                         if (!confirmDelete) {
                           setConfirmDelete(true);
@@ -438,7 +442,7 @@ export default function WorkspacePanel({
                         actions.deleteWorkspace(view.activeWorkspaceId);
                       }}
                     >
-                      {confirmDelete ? "确认删除" : "删除"}
+                      {confirmDelete ? t("workspace.confirmDelete") : t("workspace.delete")}
                     </button>
                   </div>
                 )}
@@ -447,8 +451,8 @@ export default function WorkspacePanel({
               <section className="workspace-panel-section">
                 <div className="workspace-panel-section-heading">
                   <div>
-                    <h3>新建工作区</h3>
-                    <p>沿用当前品种与图表偏好</p>
+                    <h3>{t("workspace.create")}</h3>
+                    <p>{t("workspace.createHint")}</p>
                   </div>
                 </div>
                 <div className="workspace-panel-template-grid workspace-panel-template-grid-compact">
@@ -467,8 +471,8 @@ export default function WorkspacePanel({
                     >
                       <span className="workspace-panel-template-glyph" aria-hidden="true">{template.glyph}</span>
                       <span>
-                        <strong>{template.label}</strong>
-                        <small>{template.description}</small>
+                        <strong>{t(template.labelKey)}</strong>
+                        <small>{t(template.descriptionKey)}</small>
                       </span>
                     </button>
                   ))}
@@ -487,10 +491,10 @@ export default function WorkspacePanel({
               <section className="workspace-panel-section">
                 <div className="workspace-panel-section-heading">
                   <div>
-                    <h3>当前窗口布局</h3>
-                    <p>{view.layoutLocked ? "布局已锁定，先解锁再调整" : "选择模板会保留当前活动图表内容"}</p>
+                    <h3>{t("workspace.currentLayout")}</h3>
+                    <p>{view.layoutLocked ? t("workspace.layoutLockedHint") : t("workspace.layoutHint")}</p>
                   </div>
-                  <span className="workspace-panel-count-pill">{view.layoutCellIds.length} 图</span>
+                  <span className="workspace-panel-count-pill">{t("workspace.chartCountPill", { count: view.layoutCellIds.length })}</span>
                 </div>
                 <div className="workspace-panel-template-grid">
                   {TEMPLATE_OPTIONS.filter((template) => (
@@ -506,8 +510,8 @@ export default function WorkspacePanel({
                     >
                       <span className="workspace-panel-template-glyph" aria-hidden="true">{template.glyph}</span>
                       <span>
-                        <strong>{template.label}</strong>
-                        <small>{template.description}</small>
+                        <strong>{t(template.labelKey)}</strong>
+                        <small>{t(template.descriptionKey)}</small>
                       </span>
                     </button>
                   ))}
@@ -517,8 +521,8 @@ export default function WorkspacePanel({
               <section className="workspace-panel-section">
                 <div className="workspace-panel-section-heading">
                   <div>
-                    <h3>布局操作</h3>
-                    <p>撤销、重做与重置只影响当前工作区</p>
+                    <h3>{t("workspace.layoutActions")}</h3>
+                    <p>{t("workspace.layoutActionsHint")}</p>
                   </div>
                 </div>
                 <div className="workspace-panel-action-grid">
@@ -528,7 +532,7 @@ export default function WorkspacePanel({
                     onClick={actions.undoLayout}
                   >
                     <span aria-hidden="true">↶</span>
-                    撤销
+                    {t("workspace.undo")}
                     <small>Ctrl + Z</small>
                   </button>
                   <button
@@ -537,7 +541,7 @@ export default function WorkspacePanel({
                     onClick={actions.redoLayout}
                   >
                     <span aria-hidden="true">↷</span>
-                    重做
+                    {t("workspace.redo")}
                     <small>Ctrl + Shift + Z</small>
                   </button>
                   <button
@@ -546,7 +550,7 @@ export default function WorkspacePanel({
                     onClick={actions.resetLayout}
                   >
                     <span aria-hidden="true">⟲</span>
-                    只保留当前图
+                    {t("workspace.keepCurrent")}
                   </button>
                   <button
                     type="button"
@@ -556,7 +560,7 @@ export default function WorkspacePanel({
                     onClick={() => actions.setLayoutLocked(!view.layoutLocked)}
                   >
                     <span aria-hidden="true">{view.layoutLocked ? "🔒" : "🔓"}</span>
-                    {view.layoutLocked ? "解锁布局" : "锁定布局"}
+                    {view.layoutLocked ? t("workspace.unlock") : t("workspace.lock")}
                   </button>
                 </div>
               </section>
@@ -564,10 +568,10 @@ export default function WorkspacePanel({
               <section className="workspace-panel-section">
                 <div className="workspace-panel-section-heading workspace-panel-window-heading">
                   <div>
-                    <h3>原生窗口</h3>
+                    <h3>{t("workspace.nativeWindows")}</h3>
                     <p data-state={desktop.error ? "error" : "ready"}>{windowStatus}</p>
                   </div>
-                  <span className="workspace-panel-count-pill">{windowCount} 窗口</span>
+                  <span className="workspace-panel-count-pill">{t("workspace.windowCount", { count: windowCount })}</span>
                 </div>
                 {nativeWindowsEnabled ? (
                   <div className="workspace-panel-window-actions">
@@ -576,7 +580,7 @@ export default function WorkspacePanel({
                       disabled={!view.ready || windowCount >= 4}
                       onClick={actions.createWindow}
                     >
-                      + 新建原生窗口
+                      {t("workspace.newNativeWindow")}
                     </button>
                     {view.window.id !== "main-window" && (
                       <button
@@ -585,13 +589,13 @@ export default function WorkspacePanel({
                         disabled={!view.ready}
                         onClick={() => actions.closeWindow(view.window.id)}
                       >
-                        关闭当前窗口
+                        {t("workspace.closeWindow")}
                       </button>
                     )}
                   </div>
                 ) : (
                   <div className="workspace-panel-guidance">
-                    多窗口由桌面版功能开关控制；Web 页面仍可在单窗口内使用全部多图布局。
+                    {t("workspace.nativeHint")}
                   </div>
                 )}
               </section>
@@ -608,21 +612,23 @@ export default function WorkspacePanel({
                 } as CSSProperties : undefined}
               >
                 <div>
-                  <span>当前活动图表</span>
-                  <strong>图表 {activeCellOrdinal} / {view.layoutCellIds.length}</strong>
+                  <span>{t("workspace.activeChart")}</span>
+                  <strong>{t("workspace.activeChartValue", { current: activeCellOrdinal, total: view.layoutCellIds.length })}</strong>
                 </div>
                 <span>{activeLinkGroupId
-                  ? view.document.linkGroups[activeLinkGroupId]?.name ?? "未知联动组"
-                  : "独立图表"}</span>
+                  ? view.document.linkGroups[activeLinkGroupId]
+                    ? chartLinkGroupDisplayName(view.document.linkGroups[activeLinkGroupId])
+                    : t("workspace.unknownGroup")
+                  : t("workspace.independent")}</span>
               </section>
 
               <section className="workspace-panel-section">
                 <div className="workspace-panel-section-heading">
                   <div>
-                    <h3>父子联动组</h3>
-                    <p>同组平级互联；父组向全部子孙组单向传递</p>
+                    <h3>{t("workspace.linkGroups")}</h3>
+                    <p>{t("workspace.linkGroupsHint")}</p>
                   </div>
-                  <span className="workspace-panel-count-pill">{orderedLinkGroups.length} 组</span>
+                  <span className="workspace-panel-count-pill">{t("workspace.groupCount", { count: orderedLinkGroups.length })}</span>
                 </div>
                 <div className="workspace-panel-workspace-list workspace-panel-link-group-tree">
                   {orderedLinkGroups.map((group) => {
@@ -647,8 +653,8 @@ export default function WorkspacePanel({
                           {group.parentId ? "└" : "●"}
                         </span>
                         <span>
-                          <strong>{group.name}</strong>
-                          <small>{group.parentId ? "接收父组 · " : "根组 · "}{cellCount} 个图表</small>
+                          <strong>{chartLinkGroupDisplayName(group)}</strong>
+                          <small>{group.parentId ? t("workspace.childGroup") : t("workspace.rootGroup")}{t("workspace.groupCharts", { count: cellCount })}</small>
                         </span>
                       </button>
                     );
@@ -660,18 +666,18 @@ export default function WorkspacePanel({
                     disabled={!view.ready}
                     onClick={() => actions.createLinkGroup(null)}
                   >
-                    + 根组
+                    {t("workspace.addRoot")}
                   </button>
                   <button
                     type="button"
                     disabled={!view.ready || !selectedGroup}
                     onClick={() => actions.createLinkGroup(selectedGroup?.id ?? null)}
                   >
-                    + 子组
+                    {t("workspace.addChild")}
                   </button>
                 </div>
                 <label className="workspace-panel-field">
-                  <span>当前图表加入</span>
+                  <span>{t("workspace.joinGroup")}</span>
                   <select
                     value={activeLinkGroupId ?? ""}
                     disabled={!view.ready}
@@ -680,10 +686,10 @@ export default function WorkspacePanel({
                       (event.currentTarget.value || null) as ChartLinkGroupId | null,
                     )}
                   >
-                    <option value="">独立，不联动</option>
+                    <option value="">{t("workspace.noLink")}</option>
                     {orderedLinkGroups.map((group) => (
                       <option key={group.id} value={group.id}>
-                        {"— ".repeat(chartLinkGroupDepth(view.document, group.id) - 1)}{group.name}
+                        {"— ".repeat(chartLinkGroupDepth(view.document, group.id) - 1)}{chartLinkGroupDisplayName(group)}
                       </option>
                     ))}
                   </select>
@@ -695,13 +701,13 @@ export default function WorkspacePanel({
                   <section className="workspace-panel-section">
                     <div className="workspace-panel-section-heading">
                       <div>
-                        <h3>组信息</h3>
-                        <p>调整名称、颜色与父级；最多支持四层</p>
+                        <h3>{t("workspace.groupInfo")}</h3>
+                        <p>{t("workspace.groupInfoHint")}</p>
                       </div>
                     </div>
                     <div className="workspace-panel-link-group-fields">
                       <label className="workspace-panel-field">
-                        <span>名称</span>
+                        <span>{t("workspace.groupName")}</span>
                         <input
                           value={selectedGroup.name}
                           disabled={!view.ready}
@@ -712,7 +718,7 @@ export default function WorkspacePanel({
                         />
                       </label>
                       <label className="workspace-panel-field workspace-panel-color-field">
-                        <span>颜色</span>
+                        <span>{t("workspace.groupColor")}</span>
                         <input
                           type="color"
                           value={selectedGroup.color}
@@ -723,7 +729,7 @@ export default function WorkspacePanel({
                         />
                       </label>
                       <label className="workspace-panel-field">
-                        <span>父组</span>
+                        <span>{t("workspace.parentGroup")}</span>
                         <select
                           value={selectedGroup.parentId ?? ""}
                           disabled={!view.ready}
@@ -731,12 +737,12 @@ export default function WorkspacePanel({
                             parentId: (event.currentTarget.value || null) as ChartLinkGroupId | null,
                           })}
                         >
-                          <option value="">无，作为根组</option>
+                          <option value="">{t("workspace.noParent")}</option>
                           {orderedLinkGroups
                             .filter((group) => group.id !== selectedGroup.id
                               && !isChartLinkGroupDescendant(view.document, group.id, selectedGroup.id))
                             .map((group) => (
-                              <option key={group.id} value={group.id}>{group.name}</option>
+                              <option key={group.id} value={group.id}>{chartLinkGroupDisplayName(group)}</option>
                             ))}
                         </select>
                       </label>
@@ -750,13 +756,13 @@ export default function WorkspacePanel({
                         setSelectedGroupId(selectedGroup.parentId);
                       }}
                     >
-                      删除此组
+                      {t("workspace.deleteGroup")}
                     </button>
                   </section>
 
                   <LinkPolicyEditor
-                    title="同组平级联动"
-                    description={`${selectedGroup.name} 内任意图表操作都会同步给同组其他图表`}
+                    title={t("workspace.peerLink")}
+                    description={t("workspace.peerLinkHint", { name: selectedGroup.name })}
                     policy={selectedGroup.peerPolicy}
                     disabled={!view.ready}
                     onChange={(policyPatch) => actions.updateLinkGroupPolicy(
@@ -768,8 +774,8 @@ export default function WorkspacePanel({
 
                   {selectedGroup.parentId && (
                     <LinkPolicyEditor
-                      title="接收父组"
-                      description={`只接收 ${view.document.linkGroups[selectedGroup.parentId]?.name ?? "父组"} 及其上游事件，不会反向影响父组；绘图因写隔离仅同组共享`}
+                      title={t("workspace.receiveParent")}
+                      description={t("workspace.receiveParentHint", { name: view.document.linkGroups[selectedGroup.parentId]?.name ?? t("workspace.parentFallback") })}
                       policy={selectedGroup.receiveFromParent}
                       disabled={!view.ready}
                       includeDrawings={false}
@@ -785,11 +791,11 @@ export default function WorkspacePanel({
                     <section className="workspace-panel-section">
                       <div className="workspace-panel-section-heading">
                         <div>
-                          <h3>共享绘图图层</h3>
-                          <p>同组且同市场的图表需要选择相同图层集</p>
+                          <h3>{t("workspace.sharedLayers")}</h3>
+                          <p>{t("workspace.sharedLayersHint")}</p>
                         </div>
                       </div>
-                      <div className="workspace-panel-segmented" role="group" aria-label="共享绘图图层集">
+                      <div className="workspace-panel-segmented" role="group" aria-label={t("workspace.layerSet")}>
                         {CHART_DRAWING_LAYER_SET_IDS.map((layerSet) => (
                           <button
                             key={layerSet}
@@ -802,7 +808,7 @@ export default function WorkspacePanel({
                               layerSet as ChartDrawingLayerSetId,
                             )}
                           >
-                            图层 {layerSet}
+                            {t("workspace.layer", { id: layerSet })}
                           </button>
                         ))}
                       </div>
@@ -812,8 +818,8 @@ export default function WorkspacePanel({
               ) : (
                 <div className="workspace-panel-empty-state">
                   <span aria-hidden="true">⌘</span>
-                  <strong>请选择一个联动组</strong>
-                  <p>可以创建根组或在现有组下创建子组。</p>
+                  <strong>{t("workspace.selectGroup")}</strong>
+                  <p>{t("workspace.selectGroupHint")}</p>
                 </div>
               )}
 
@@ -822,8 +828,8 @@ export default function WorkspacePanel({
               </div>
               {viewportIssue?.group === activeLinkGroupId && (
                 <div className="workspace-panel-link-status warning" role="status">
-                  {viewportIssue.kind === "timeAnchor" ? "右端时间" : "日期范围"}
-                  {`无法映射到 ${viewportIssue.failedCellIds.length} 个目标图，目标图已保持原位。`}
+                  {viewportIssue.kind === "timeAnchor" ? t("workspace.timeAnchor") : t("workspace.dateRange")}
+                  {t("workspace.viewportIssue", { count: viewportIssue.failedCellIds.length })}
                 </div>
               )}
             </div>

@@ -9711,7 +9711,7 @@ body {
   inset: 4px;
   border: 2px solid var(--accent-blue);
   border-radius: 6px;
-  content: "交换到这里";
+  content: var(--i18n-swap-here, "交换到这里");
   display: grid;
   place-items: center;
   pointer-events: none;
@@ -10890,7 +10890,7 @@ body {
 }
 
 .workspace-panel-loading::after {
-  content: "正在加载图表工作区…";
+  content: var(--i18n-workspace-loading, "正在加载图表工作区…");
   display: grid;
   flex: 1;
   place-items: center;
@@ -11615,7 +11615,7 @@ body {
 }
 
 .workspace-panel-link-settings button.active::after {
-  content: "已同步";
+  content: var(--i18n-synced, "已同步");
   justify-self: end;
   grid-column: 2;
   grid-row: 1;
@@ -13500,7 +13500,7 @@ tr[data-position-side="short"] .replay-side-tag { color: var(--trade-negative); 
 }
 
 .replay-position-card[data-selected-track="true"] > header strong::after {
-  content: " · 管理中";
+  content: var(--i18n-managing, " · 管理中");
   color: var(--trade-muted);
   font-size: 11px;
   font-weight: 500;
@@ -14726,11 +14726,11 @@ tr[data-position-side="short"] .replay-side-tag { color: var(--trade-negative); 
 .training-hub-advanced > summary::after {
   float: right;
   color: var(--hub-faint);
-  content: "展开";
+  content: var(--i18n-expand, "展开");
   font-size: 11px;
   font-weight: 600;
 }
-.training-hub-advanced[open] > summary::after { content: "收起"; }
+.training-hub-advanced[open] > summary::after { content: var(--i18n-collapse, "收起"); }
 .training-hub-advanced .training-hub-form-section {
   margin: 0 12px 14px;
   background: var(--hub-side-background);

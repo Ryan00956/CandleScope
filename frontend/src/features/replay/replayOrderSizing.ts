@@ -1,3 +1,5 @@
+import { t } from "../../i18n/index.js";
+
 export interface ReplayMaxQuantityRebaseInput {
   readonly previousMaxQuantity: number | null;
   readonly previousReferencePrice: number | null;
@@ -26,8 +28,8 @@ export function replayReduceOnlyUnavailableMessage({
   readonly targetPositionSide: "LONG" | "SHORT";
 }): string | null {
   if (!reduceOnly || positionQuantity !== 0) return null;
-  if (positionMode !== "HEDGE") return "无持仓可平";
-  return targetPositionSide === "LONG" ? "无多仓可平" : "无空仓可平";
+  if (positionMode !== "HEDGE") return t("replay.paper.noPos");
+  return targetPositionSide === "LONG" ? t("replay.paper.noLong") : t("replay.paper.noShort");
 }
 
 /**

@@ -1,3 +1,5 @@
+import type { MessageKey } from "../../i18n/index.js";
+
 export type KlineOrderFlowIndicatorId =
   | "trade-flow:cvd"
   | "trade-flow:delta";
@@ -8,15 +10,15 @@ export const KLINE_ORDER_FLOW_INDICATOR_DEFINITIONS = Object.freeze([
     id: "trade-flow:cvd" as const,
     key: "cvd" as const,
     category: "volume" as const,
-    name: "CVD（累计成交量差）",
-    description: "基于 K 线主动买卖量构建的连续前缀和；与右侧实时订单流独立。",
+    nameKey: "study.cvd" as const satisfies MessageKey,
+    descriptionKey: "study.cvdDesc" as const satisfies MessageKey,
   }),
   Object.freeze({
     id: "trade-flow:delta" as const,
     key: "delta" as const,
     category: "volume" as const,
-    name: "Volume Delta（成交量差）",
-    description: "逐根 K 线展示主动买量、主动卖量及其差值；与右侧实时订单流独立。",
+    nameKey: "study.delta" as const satisfies MessageKey,
+    descriptionKey: "study.deltaDesc" as const satisfies MessageKey,
   }),
 ]);
 

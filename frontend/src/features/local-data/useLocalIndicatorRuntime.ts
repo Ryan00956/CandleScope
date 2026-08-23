@@ -1,4 +1,5 @@
 import { useCallback, useMemo } from "react";
+import { t } from "../../i18n/index.js";
 
 import {
   createActiveIndicatorPersistence,
@@ -51,7 +52,7 @@ export function useLocalIndicatorRuntime({
     const requests: LocalIndicatorComputeJob[] = jobs.map((job) => {
       const name = job.request.name;
       if (job.request.mode !== "builtin" || typeof name !== "string" || !name.trim()) {
-        throw new Error("离线 profile 只允许共享目录中的内置指标");
+        throw new Error(t("local.err.offlineBuiltin"));
       }
       return {
         clientId: job.clientId,

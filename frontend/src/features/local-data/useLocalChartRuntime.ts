@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { t } from "../../i18n/index.js";
 import { SeriesDataFeed } from "../market-data/feed/seriesDataFeed.js";
 import type { FeedResult, AppliedKlineResult } from "../market-data/klineContracts.js";
 import type { EpochSeconds, MarketSeries } from "../market-data/marketDataTypes.js";
@@ -103,7 +104,7 @@ export function useLocalChartRuntime(
       setHasMoreLeft(resultHasMore(result));
     }).catch((reason: unknown) => {
       if (controller.signal.aborted) return;
-      setError(reason instanceof Error ? reason.message : "本地数据读取失败");
+      setError(reason instanceof Error ? reason.message : t("local.err.readFailed"));
     }).finally(() => {
       if (!controller.signal.aborted) setLoading(false);
     });
@@ -128,7 +129,7 @@ export function useLocalChartRuntime(
       });
       setHasMoreLeft(resultHasMore(result));
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "更早的本地数据读取失败");
+      setError(reason instanceof Error ? reason.message : t("local.err.readOlderFailed"));
     } finally {
       setLoadingMore(false);
     }
@@ -153,12 +154,12 @@ export function useLocalChartRuntime(
         maxPages: 2,
       });
       if (!seriesStore.hasTime(target)) {
-        setError("标记对应的 K 线不在当前数据集内");
+        setError(t("local.err.markerNotInData"));
         return false;
       }
       return true;
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "无法定位分析标记");
+      setError(reason instanceof Error ? reason.message : t("local.err.markerLocate"));
       return false;
     } finally {
       setLoadingMore(false);

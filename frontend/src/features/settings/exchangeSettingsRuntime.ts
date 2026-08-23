@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { fetchSupportedExchanges } from "../../services/api";
 import type { ExchangeCapabilityPayload } from "../../services/apiPayloadParsers.js";
+import { t } from "../../i18n/index.js";
 export type { ExchangeCapabilityPayload } from "../../services/apiPayloadParsers.js";
 
 export interface ExchangeSettingsRuntime {
@@ -30,7 +31,7 @@ export function useExchangeSettingsRuntime({
       const data = await fetchSupportedExchanges();
       setSupportedExchanges(Array.isArray(data.exchanges) ? data.exchanges : []);
     } catch (err: unknown) {
-      setExchangeListError(errorMessage(err, "交易所列表加载失败"));
+      setExchangeListError(errorMessage(err, t("core.error.exchangeList")));
     } finally {
       setExchangeListLoading(false);
     }

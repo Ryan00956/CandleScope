@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import type { ReplayHistoricalBookProjection } from "./replayV2Types.js";
 
 export type ReplayCapabilityState =
@@ -52,51 +53,51 @@ export function buildReplayCapabilityModel(
     ? item(
       "Order book",
       "AVAILABLE_EXACT",
-      "连续历史 L2 已校验并固定；不含真实盘口排队",
+      t("replay.cap.bookExact"),
       "EXACT_L2",
     )
     : historicalBook !== null && historicalBook.status !== "OFF"
       ? item(
         "Order book",
         "DEGRADED",
-        "连续性不可用；旧盘口已清空且 BOOK_ASSISTED Run 保持暂停",
+        t("replay.cap.bookDegraded"),
       )
-      : item("Order book", "UNSUPPORTED_NO_HISTORY", "未绑定历史盘口快照与增量");
+      : item("Order book", "UNSUPPORTED_NO_HISTORY", t("replay.cap.bookNone"));
   return {
     OHLCV: item(
       "OHLCV",
       tape ? "AVAILABLE_APPROX" : "AVAILABLE_EXACT",
       tape
-        ? "由 checksum 已验证的 aggTrade 聚合；跨分钟 aggregate 可能与官方 K 线不同"
-        : "仅已揭示前缀；向左按需读取回放专属历史",
+        ? t("replay.cap.ohlcvTape")
+        : t("replay.cap.ohlcvBar"),
       tape ? "APPROX_AGGREGATE" : "EXACT",
     ),
     INDICATORS: item(
       "Local indicators",
       tape ? "AVAILABLE_APPROX" : "AVAILABLE_EXACT",
-      tape ? "以近似聚合的已揭示 bars 本地计算" : "仅以已揭示 bars 本地计算",
+      tape ? t("replay.cap.indTape") : t("replay.cap.indBar"),
       tape ? "LOCAL_APPROX_BARS" : "LOCAL",
     ),
-    SIMULATED_LIQUIDATION: item("Paper liquidation", "AVAILABLE_APPROX", "训练经纪商合成结果", "APPROX"),
+    SIMULATED_LIQUIDATION: item("Paper liquidation", "AVAILABLE_APPROX", t("replay.cap.simLiq"), "APPROX"),
     AGG_TRADE_TAPE: tape
-      ? item("Agg trade tape", "AVAILABLE_EXACT", "冻结聚合成交归档；不是交易所 raw fills", "EXACT_AGGREGATE")
-      : item("Agg trade tape", "UNSUPPORTED_SOURCE_MODE", "BAR run 不含聚合成交源"),
+      ? item("Agg trade tape", "AVAILABLE_EXACT", t("replay.cap.tapeExact"), "EXACT_AGGREGATE")
+      : item("Agg trade tape", "UNSUPPORTED_SOURCE_MODE", t("replay.cap.tapeNone")),
     ORDER_FLOW: tape
-      ? item("Order flow", "AVAILABLE_APPROX", "主动方由 buyer-maker 推断；保持聚合成交 fidelity", "APPROX_AGGRESSOR")
+      ? item("Order flow", "AVAILABLE_APPROX", t("replay.cap.flowTape"), "APPROX_AGGRESSOR")
       : item(
         "Order flow",
         "AVAILABLE_APPROX",
-        "由冻结 K 线的 taker buy volume 重建；CVD 仅在当前连续窗口锚定 0",
+        t("replay.cap.flowBar"),
         "KLINE_TAKER_PROXY",
       ),
-    OPEN_INTEREST: item("Open interest", "UNSUPPORTED_NO_HISTORY", "冻结 run 未绑定 OI 历史"),
-    MARK_PRICE: item("Mark", "UNSUPPORTED_NO_HISTORY", "冻结 run 未绑定 mark 历史"),
-    INDEX_PRICE: item("Index", "UNSUPPORTED_NO_HISTORY", "冻结 run 未绑定 index 历史"),
-    BASIS: item("Basis", "UNSUPPORTED_NO_HISTORY", "缺少 mark/index 同步历史"),
-    FUNDING: item("Funding", "UNSUPPORTED_NO_HISTORY", "未绑定交易所历史 funding/mark；Sandbox 固定资金费只属于近似账户模拟"),
-    MARKET_LIQUIDATION: item("Market liquidations", "UNSUPPORTED_NO_HISTORY", "未绑定市场爆仓归档"),
+    OPEN_INTEREST: item("Open interest", "UNSUPPORTED_NO_HISTORY", t("replay.cap.oi")),
+    MARK_PRICE: item("Mark", "UNSUPPORTED_NO_HISTORY", t("replay.cap.mark")),
+    INDEX_PRICE: item("Index", "UNSUPPORTED_NO_HISTORY", t("replay.cap.index")),
+    BASIS: item("Basis", "UNSUPPORTED_NO_HISTORY", t("replay.cap.basis")),
+    FUNDING: item("Funding", "UNSUPPORTED_NO_HISTORY", t("replay.cap.funding")),
+    MARKET_LIQUIDATION: item("Market liquidations", "UNSUPPORTED_NO_HISTORY", t("replay.cap.mktLiq")),
     ORDER_BOOK: orderBook,
-    HOSTED_INDICATORS: item("Hosted indicators", "UNSUPPORTED_NO_PROVIDER", "range/security provider 未启用"),
-    ALERTS: item("Alerts", "UNSUPPORTED_NO_PROVIDER", "回放告警 provider 未启用"),
+    HOSTED_INDICATORS: item("Hosted indicators", "UNSUPPORTED_NO_PROVIDER", t("replay.cap.hosted")),
+    ALERTS: item("Alerts", "UNSUPPORTED_NO_PROVIDER", t("replay.cap.alerts")),
   };
 }

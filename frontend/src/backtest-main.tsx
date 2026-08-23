@@ -6,8 +6,16 @@ import "@fontsource/inter/latin-500.css";
 import "@fontsource/inter/latin-600.css";
 import "@fontsource/inter/latin-700.css";
 import BacktestApp from "./features/backtest/BacktestApp.js";
+import { readPersistedLocale } from "./features/settings/chartAppearanceSettings.js";
+import { bindDocumentLocale, hydrateLocale } from "./i18n/index.js";
 import "./index.css";
 import "./features/backtest/backtest.css";
+
+hydrateLocale(readPersistedLocale());
+bindDocumentLocale({
+  titleKey: "backtest.documentTitle",
+  descriptionKey: "backtest.documentDescription",
+});
 
 const root = document.getElementById("root");
 if (!(root instanceof HTMLElement)) throw new Error("Backtest document root is missing");

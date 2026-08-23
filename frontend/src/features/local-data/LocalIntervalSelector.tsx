@@ -1,4 +1,6 @@
 import { useMemo, useState } from "react";
+import { t } from "../../i18n/index.js";
+import { useLocale } from "../../i18n/useLocale.js";
 
 import {
   getCommonLocalIntervals,
@@ -16,6 +18,7 @@ export default function LocalIntervalSelector({
   interval: string;
   onSelect(interval: string): void;
 }) {
+  useLocale();
   const [custom, setCustom] = useState("90m");
   const [feedback, setFeedback] = useState<string | null>(null);
   const common = useMemo(() => {
@@ -30,8 +33,8 @@ export default function LocalIntervalSelector({
   );
 
   return (
-    <div className="local-interval-selector" aria-label="本地数据周期">
-      <div className="local-interval-buttons" role="toolbar" aria-label="可用周期">
+    <div className="local-interval-selector" aria-label={t("local.intervalAria")}>
+      <div className="local-interval-buttons" role="toolbar" aria-label={t("local.availableIntervals")}>
         {common.map((value) => {
           const support = resolveLocalIntervalSupport(manifest, value);
           return (
@@ -64,7 +67,7 @@ export default function LocalIntervalSelector({
         }}
       >
         <label>
-          自定义
+          {t("local.custom")}
           <input
             value={custom}
             onChange={(event) => {
@@ -72,10 +75,10 @@ export default function LocalIntervalSelector({
               setFeedback(null);
             }}
             placeholder="90m"
-            aria-label="自定义本地周期"
+            aria-label={t("local.customInterval")}
           />
         </label>
-        <button type="submit" disabled={!customSupport.supported}>切换</button>
+        <button type="submit" disabled={!customSupport.supported}>{t("local.switch")}</button>
       </form>
       <span
         className={`local-interval-feedback ${customSupport.supported ? "ok" : "error"}`}

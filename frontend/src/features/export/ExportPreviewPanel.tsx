@@ -1,10 +1,12 @@
 import { memo, useMemo, useState } from "react";
+import { getLocale, t } from "../../i18n/index.js";
+import { useLocale } from "../../i18n/useLocale.js";
 import type { CSSProperties } from "react";
 
 type PreviewZoomMode = "fit" | "50" | "100";
 
-const ZOOM_OPTIONS: ReadonlyArray<{ value: PreviewZoomMode; label: string }> = [
-  { value: "fit", label: "适应" },
+const ZOOM_OPTIONS: ReadonlyArray<{ value: PreviewZoomMode; labelKey?: "export.fit"; label?: string }> = [
+  { value: "fit", labelKey: "export.fit" },
   { value: "50", label: "50%" },
   { value: "100", label: "100%" },
 ];
@@ -23,11 +25,11 @@ export interface ExportPreviewPanelProps {
 }
 
 function formatGeneratedAt(value: number | null | undefined): string {
-  if (!value) return "尚未生成";
+  if (!value) return t("export.notGenerated");
   try {
-    return new Date(value).toLocaleTimeString("zh-CN", { hour12: false });
+    return new Date(value).toLocaleTimeString(getLocale() === "zh-CN" ? "zh-CN" : "en-GB", { hour12: false });
   } catch {
-    return "刚刚";
+    return t("export.justNow");
   }
 }
 
@@ -49,6 +51,7 @@ const ExportPreviewPanel = memo(function ExportPreviewPanel({
   isCurrent = false,
   onRefresh,
 }: ExportPreviewPanelProps) {
+  useLocale();
   const [zoomMode, setZoomMode] = useState<PreviewZoomMode>("fit");
   const hasPreview = Boolean(previewUrl);
   const imageStyle = useMemo<CSSProperties | undefined>(() => {
@@ -61,42 +64,42 @@ const ExportPreviewPanel = memo(function ExportPreviewPanel({
   }, [zoomMode]);
   const formatLabel = formatMime(mimeType, filename);
   const statusText = loading
-    ? hasPreview ? "正在更新预览..." : "正在生成预览..."
-    : hasPreview && isCurrent ? "保存即此图" : hasPreview ? "配置已变化，等待刷新" : "等待预览";
+    ? hasPreview ? t("export.updating") : t("export.creating")
+    : hasPreview && isCurrent ? t("export.saveIsThis") : hasPreview ? t("export.configChanged") : t("export.waitPreview");
 
   return (
-    <aside className="export-preview-panel export-exclude" aria-label="导出图片预览">
+    <aside className="export-preview-panel export-exclude" aria-label={t("export.previewAria")}>
       <div className="export-preview-header">
         <div>
-          <div className="export-preview-title">导出预览</div>
-          <div className="export-preview-subtitle">预览图就是最终保存的图片。</div>
+          <div className="export-preview-title">{t("export.previewTitle")}</div>
+          <div className="export-preview-subtitle">{t("export.previewSubtitle")}</div>
         </div>
         <button
           type="button"
           className="export-preview-refresh"
           onClick={onRefresh}
           disabled={loading}
-          title="重新生成当前预览"
+          title={t("export.refreshPreview")}
         >
-          ↻ 刷新
+          {t("export.refresh")}
         </button>
       </div>
 
       <div className="export-preview-meta-grid">
         <div>
-          <span>状态</span>
+          <span>{t("export.status")}</span>
           <strong>{statusText}</strong>
         </div>
         <div>
-          <span>格式</span>
+          <span>{t("export.format")}</span>
           <strong>{formatLabel}</strong>
         </div>
         <div>
-          <span>尺寸</span>
+          <span>{t("export.size")}</span>
           <strong>{width && height ? `${width} × ${height}` : "--"}</strong>
         </div>
         <div>
-          <span>生成</span>
+          <span>{t("export.generated")}</span>
           <strong>{formatGeneratedAt(generatedAt)}</strong>
         </div>
       </div>
@@ -110,7 +113,7 @@ const ExportPreviewPanel = memo(function ExportPreviewPanel({
               className={zoomMode === item.value ? "active" : ""}
               onClick={() => setZoomMode(item.value)}
             >
-              {item.label}
+              {item.labelKey ? t(item.labelKey) : item.label}
             </button>
           ))}
         </div>
@@ -121,7 +124,7 @@ const ExportPreviewPanel = memo(function ExportPreviewPanel({
         {hasPreview && (
           <img
             src={previewUrl || undefined}
-            alt="导出图片预览"
+            alt={t("export.previewAlt")}
             className="export-preview-image"
             style={imageStyle}
           />
@@ -130,25 +133,25 @@ const ExportPreviewPanel = memo(function ExportPreviewPanel({
         {!hasPreview && loading && (
           <div className="export-preview-skeleton">
             <div className="export-preview-skeleton-icon">📸</div>
-            <div>正在生成第一张预览...</div>
+            <div>{t("export.firstPreview")}</div>
           </div>
         )}
 
         {!hasPreview && !loading && !error && (
           <div className="export-preview-empty">
-            <div>点击刷新生成当前画面预览</div>
+            <div>{t("export.clickRefresh")}</div>
           </div>
         )}
 
         {loading && hasPreview && (
-          <div className="export-preview-overlay">正在更新预览...</div>
+          <div className="export-preview-overlay">{t("export.updating")}</div>
         )}
 
         {error && !loading && (
           <div className="export-preview-error">
-            <strong>预览生成失败</strong>
+            <strong>{t("export.previewFailed")}</strong>
             <span>{error}</span>
-            <button type="button" onClick={onRefresh}>重新生成</button>
+            <button type="button" onClick={onRefresh}>{t("export.regenerate")}</button>
           </div>
         )}
       </div>

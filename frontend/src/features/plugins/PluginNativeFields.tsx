@@ -1,3 +1,4 @@
+import { t, type LocaleId } from "../../i18n/index.js";
 import type { JsonValue, PluginJsonSchema } from "./pluginPlatformTypes.js";
 import { defaultForPluginSchema } from "./pluginSchemaDefaults.js";
 
@@ -10,11 +11,13 @@ export function PluginNativeField({
   schema,
   value,
   onChange,
+  locale,
 }: {
   name: string;
   schema: PluginJsonSchema;
   value: JsonValue | undefined;
   onChange(value: JsonValue): void;
+  locale: LocaleId;
 }) {
   const label = displayLabel(name, schema);
   if (schema.type === "object") {
@@ -29,6 +32,7 @@ export function PluginNativeField({
             name={key}
             schema={child}
             value={current[key]}
+            locale={locale}
             onChange={(next) => onChange({ ...current, [key]: next })}
           />
         ))}
@@ -48,6 +52,7 @@ export function PluginNativeField({
                 name={`${label} ${index + 1}`}
                 schema={schema.items!}
                 value={item}
+                locale={locale}
                 onChange={(next) => onChange(current.map((entry, entryIndex) => entryIndex === index ? next : entry))}
               />
               <button
@@ -55,7 +60,7 @@ export function PluginNativeField({
                 disabled={current.length <= (schema.minItems ?? 0)}
                 onClick={() => onChange(current.filter((_, entryIndex) => entryIndex !== index))}
               >
-                Remove
+                {t("plugin.host.removeItem", {}, locale)}
               </button>
             </div>
           ))}
@@ -64,7 +69,7 @@ export function PluginNativeField({
             disabled={current.length >= (schema.maxItems ?? 256)}
             onClick={() => onChange([...current, defaultForPluginSchema(schema.items!)])}
           >
-            Add item
+            {t("plugin.host.addItem", {}, locale)}
           </button>
         </div>
       </div>
@@ -91,7 +96,11 @@ export function PluginNativeField({
             if (selected !== undefined) onChange(selected);
           }}
         >
-          {schema.enum.map((item) => <option key={JSON.stringify(item)} value={JSON.stringify(item)}>{String(item)}</option>)}
+          {schema.enum.map((item, index) => (
+            <option key={JSON.stringify(item)} value={JSON.stringify(item)}>
+              {schema.enumLabels?.[index] ?? String(item)}
+            </option>
+          ))}
         </select>
       </label>
     );

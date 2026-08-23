@@ -1,6 +1,9 @@
 import type { PluginPlatformRuntime } from "./pluginPlatformTypes.js";
+import { t } from "../../i18n/index.js";
+import { useLocale } from "../../i18n/useLocale.js";
 
 export default function PluginPlatformToolbar({ runtime }: { runtime: PluginPlatformRuntime }) {
+  useLocale();
   const { catalog, registries, managementAvailable } = runtime.view;
   if (!catalog) return null;
   if (!catalog.platform.enabled && catalog.compatibility.contributions.length === 0) return null;
@@ -24,7 +27,7 @@ export default function PluginPlatformToolbar({ runtime }: { runtime: PluginPlat
             key={command.id}
             data-plugin-command={command.id}
             disabled={!managementAvailable}
-            title={managementAvailable ? command.title : "Trusted desktop management session required"}
+            title={managementAvailable ? command.title : t("plugin.host.managementRequired")}
             onClick={() => {
               if (direct) void runtime.actions.invokeCommand(command.id, {}).catch(() => undefined);
               else runtime.actions.openPalette();
@@ -36,7 +39,7 @@ export default function PluginPlatformToolbar({ runtime }: { runtime: PluginPlat
       })}
       {catalog.platform.enabled && registries.commandPalette.length > 0 && (
         <button type="button" data-plugin-command-palette onClick={runtime.actions.openPalette}>
-          Commands
+          {t("plugin.host.commands")}
         </button>
       )}
       {catalog.platform.enabled && [...registries.sidePanel, ...registries.bottomPanel].map((view) => (

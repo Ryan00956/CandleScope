@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { t } from "../../i18n/index.js";
 import {
   canResolveIntervalFromNativeValues,
   intervalsSemanticallyEquivalent,
@@ -894,7 +895,7 @@ export function useMarketDataRuntime({
         setInitialHistoryPending(false);
         setConnectionStatus("disconnected");
         setDataSource(null);
-        setError(new Error(`当前 ${exchange}/${marketType} 没有可精确拼接 ${interval} 的历史 K 线基准周期`));
+        setError(new Error(t("interval.cannotComposeSession", { exchange, marketType, interval })));
         setLoading(false);
         setLoadingMoreLeft(false);
         setHasMoreLeft(false);

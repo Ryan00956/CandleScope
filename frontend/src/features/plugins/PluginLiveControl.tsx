@@ -1,4 +1,6 @@
 import React, { useState } from "react";
+import { t } from "../../i18n/index.js";
+import { useLocale } from "../../i18n/useLocale.js";
 import type {
   PluginLiveConfirmationPreview,
   PluginLiveConfirmationReceipt,
@@ -33,7 +35,7 @@ function HostModal({
       >
         <header>
           <h2>{title}</h2>
-          <button type="button" aria-label="Close" onClick={onClose}>×</button>
+          <button type="button" aria-label={t("plugin.host.close")} onClick={onClose}>×</button>
         </header>
         <div className="plugin-modal-body">{children}</div>
       </section>
@@ -45,21 +47,21 @@ export function IntentFacts({ preview }: { preview: PluginLiveConfirmationPrevie
   const execution = preview.schemaVersion === "candlescope.live-confirmation-preview/2";
   return (
     <dl className="live-intent-facts" data-live-intent-facts>
-      <dt>Environment</dt><dd>{execution ? "OKX Demo · Spot cash" : "Live authority preview (execution unavailable)"}</dd>
-      {preview.action && <><dt>Action</dt><dd>{preview.action.toUpperCase()}</dd></>}
-      <dt>Instrument</dt><dd>{preview.instrumentId}</dd>
-      <dt>Side</dt><dd>{preview.side.toUpperCase()}</dd>
-      <dt>Order type</dt><dd>{preview.orderType}</dd>
-      <dt>Quantity</dt><dd>{preview.quantity}</dd>
-      <dt>Limit price</dt><dd>{preview.limitPrice}</dd>
-      <dt>Client order ID</dt><dd>{preview.clientOrderId}</dd>
-      <dt>Plugin</dt><dd>{preview.pluginId} · {preview.version}</dd>
-      <dt>Publisher</dt><dd>{preview.publisherIdentity}</dd>
-      <dt>Connector</dt><dd>{preview.connectorId}</dd>
-      <dt>Intent SHA-256</dt><dd>{preview.intentSha256}</dd>
-      {preview.orderIntentSha256 && <><dt>Order intent SHA-256</dt><dd>{preview.orderIntentSha256}</dd></>}
-      {preview.notional && <><dt>Notional</dt><dd>{preview.notional} USDT</dd></>}
-      <dt>Authority</dt><dd>epoch {preview.policyEpoch} · generation {preview.controlGeneration}</dd>
+      <dt>{t("plugin.live.environment")}</dt><dd>{execution ? t("plugin.live.demoSpot") : t("plugin.live.previewOnly")}</dd>
+      {preview.action && <><dt>{t("plugin.live.action")}</dt><dd>{preview.action.toUpperCase()}</dd></>}
+      <dt>{t("plugin.live.instrument")}</dt><dd>{preview.instrumentId}</dd>
+      <dt>{t("plugin.live.side")}</dt><dd>{preview.side.toUpperCase()}</dd>
+      <dt>{t("plugin.live.orderType")}</dt><dd>{preview.orderType}</dd>
+      <dt>{t("plugin.live.quantity")}</dt><dd>{preview.quantity}</dd>
+      <dt>{t("plugin.live.limitPrice")}</dt><dd>{preview.limitPrice}</dd>
+      <dt>{t("plugin.live.clientOrderId")}</dt><dd>{preview.clientOrderId}</dd>
+      <dt>{t("plugin.live.plugin")}</dt><dd>{preview.pluginId} · {preview.version}</dd>
+      <dt>{t("plugin.host.publisher")}</dt><dd>{preview.publisherIdentity}</dd>
+      <dt>{t("plugin.live.connector")}</dt><dd>{preview.connectorId}</dd>
+      <dt>{t("plugin.live.intentDigest")}</dt><dd>{preview.intentSha256}</dd>
+      {preview.orderIntentSha256 && <><dt>{t("plugin.live.orderIntentDigest")}</dt><dd>{preview.orderIntentSha256}</dd></>}
+      {preview.notional && <><dt>{t("plugin.live.notional")}</dt><dd>{preview.notional} USDT</dd></>}
+      <dt>{t("plugin.live.authority")}</dt><dd>{t("plugin.live.authorityValue", { epoch: preview.policyEpoch, generation: preview.controlGeneration })}</dd>
     </dl>
   );
 }
@@ -83,13 +85,13 @@ function ExactIntentDialog({
   const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);
   return (
-    <HostModal title="Confirm exact Live intent" onClose={onClose} testId="live-intent-confirmation">
+    <HostModal title={t("plugin.host.liveConfirm")} onClose={onClose} testId="live-intent-confirmation">
       <div className="live-warning-callout" role="alert">
-        This Host-native receipt is short-lived and single-use. Issuing it does not execute the action; execution requires a second explicit confirmation.
+        {t("plugin.live.receiptWarning")}
       </div>
       <IntentFacts preview={preview} />
       <label className="live-control-field">
-        Type <strong>{phrase}</strong>
+        {t("plugin.live.typePhrase", { phrase })}
         <input
           autoFocus
           value={typed}
@@ -100,7 +102,7 @@ function ExactIntentDialog({
         />
       </label>
       <div className="plugin-action-row">
-        <button type="button" onClick={onClose} disabled={busy}>Cancel</button>
+        <button type="button" onClick={onClose} disabled={busy}>{t("plugin.host.cancel")}</button>
         <button
           type="button"
           className="live-danger-action"
@@ -117,7 +119,7 @@ function ExactIntentDialog({
               .finally(() => setBusy(false));
           }}
         >
-          {busy ? "Issuing…" : "Issue one-shot receipt"}
+          {busy ? t("plugin.live.issuing") : t("plugin.live.issueReceipt")}
         </button>
       </div>
     </HostModal>
@@ -143,7 +145,7 @@ function TypedActionDialog({
     <HostModal title={title} onClose={onClose} testId="live-control-action-confirmation">
       <div className="live-warning-callout" role="alert">{detail}</div>
       <label className="live-control-field">
-        Type <strong>{phrase}</strong>
+        {t("plugin.live.typePhrase", { phrase })}
         <input
           autoFocus
           value={typed}
@@ -153,7 +155,7 @@ function TypedActionDialog({
         />
       </label>
       <div className="plugin-action-row">
-        <button type="button" disabled={busy} onClick={onClose}>Cancel</button>
+        <button type="button" disabled={busy} onClick={onClose}>{t("plugin.host.cancel")}</button>
         <button
           type="button"
           className="live-danger-action"
@@ -163,7 +165,7 @@ function TypedActionDialog({
             void onConfirm().then(onClose).catch(() => undefined).finally(() => setBusy(false));
           }}
         >
-          {busy ? "Applying…" : title}
+          {busy ? t("plugin.live.applying") : title}
         </button>
       </div>
     </HostModal>
@@ -194,31 +196,31 @@ function LiveControlPanel({ runtime }: { runtime: PluginPlatformRuntime }) {
   const pendingContract = pending == null ? null : (
     pending.kind === "arm"
       ? {
-          title: "Arm Live control",
+          title: t("plugin.live.armTitle"),
           phrase: "ARM LIVE CONTROL",
           detail: demoExecution
-            ? "Arming permits action-bound one-shot receipts for the pinned OKX Demo Spot execution slice."
-            : "Arming permits short-lived confirmation receipts only; no execution method is enabled.",
+            ? t("plugin.live.armExecutionDetail")
+            : t("plugin.live.armReceiptDetail"),
           run: () => runtime.actions.setLiveControlMode("armed", "host-native-user-arm", status.mode === "killed"),
         }
       : pending.kind === "disarm"
         ? {
-            title: "Disarm Live control",
+            title: t("plugin.live.disarmTitle"),
             phrase: "DISARM LIVE CONTROL",
-            detail: "Disarming revokes every outstanding confirmation receipt.",
+            detail: t("plugin.live.disarmDetail"),
             run: () => runtime.actions.setLiveControlMode("disarmed", "host-native-user-disarm", false),
           }
         : pending.kind === "kill"
           ? {
-              title: "Apply global Live kill",
+              title: t("plugin.live.killTitle"),
               phrase: "KILL LIVE AUTHORITY",
-              detail: "This advances the policy epoch and revokes credentials, accounts, and all outstanding receipts.",
+              detail: t("plugin.live.killDetail"),
               run: () => runtime.actions.killLiveControl("host-native-global-kill"),
             }
           : {
-              title: "Revoke Live authority",
+              title: t("plugin.live.revokeTitle"),
               phrase: "REVOKE LIVE AUTHORITY",
-              detail: "This conservative revoke advances the global policy epoch before the next network-capable action.",
+              detail: t("plugin.live.revokeDetail"),
               run: () => runtime.actions.revokeLiveAuthority(
                 pending.scopeType,
                 pending.subject,
@@ -228,37 +230,36 @@ function LiveControlPanel({ runtime }: { runtime: PluginPlatformRuntime }) {
   );
   return (
     <>
-      <HostModal title="Live authority control" onClose={runtime.actions.closeLiveControl} testId="live-control-panel">
+      <HostModal title={t("plugin.host.liveAuthority")} onClose={runtime.actions.closeLiveControl} testId="live-control-panel">
         <section className={`live-control-summary live-control-${status.mode}`}>
           <div>
-            <span>Persistent Host control</span>
+            <span>{t("plugin.live.persistentControl")}</span>
             <strong>{status.mode.toUpperCase()}</strong>
           </div>
           <p>
-            policy epoch {status.policyEpoch} · control generation {status.generation}
-            {" · "}{status.outstandingConfirmationCount} outstanding receipt(s)
+            {t("plugin.live.summary", { epoch: status.policyEpoch, generation: status.generation, count: status.outstandingConfirmationCount })}
           </p>
           <p>
             {demoExecution
-              ? "OKX Demo Spot limit submit/cancel is enabled. Production, transfer, withdrawal, market, margin, amend, and batch actions remain unavailable."
-              : "Live submit, cancel, transfer, and withdrawal remain unavailable."}
+              ? t("plugin.live.executionEnabled")
+              : t("plugin.live.executionUnavailable")}
           </p>
         </section>
-        {!management && <p role="alert">Trusted desktop management session unavailable. Controls are read-only.</p>}
+        {!management && <p role="alert">{t("plugin.live.readonly")}</p>}
         <div className="plugin-action-row live-control-primary-actions">
           <button
             type="button"
             disabled={!management || !status.available || status.mode === "armed"}
             onClick={() => setPending({ kind: "arm" })}
           >
-            Arm receipt control
+            {t("plugin.live.arm")}
           </button>
           <button
             type="button"
             disabled={!management || status.mode !== "armed"}
             onClick={() => setPending({ kind: "disarm" })}
           >
-            Disarm
+            {t("plugin.live.disarm")}
           </button>
           <button
             type="button"
@@ -267,24 +268,24 @@ function LiveControlPanel({ runtime }: { runtime: PluginPlatformRuntime }) {
             onClick={() => setPending({ kind: "kill" })}
             data-live-global-kill
           >
-            Global kill
+            {t("plugin.live.globalKill")}
           </button>
           <button type="button" disabled={!management || !status.available} onClick={() => void runtime.actions.downloadLiveAudit()}>
-            Download redacted audit
+            {t("plugin.live.downloadAudit")}
           </button>
         </div>
 
         <section className="live-control-section">
-          <h3>Review an exact prepared intent</h3>
+          <h3>{t("plugin.live.reviewTitle")}</h3>
           <p>
-            These opaque references come from the Host-owned WP-D preparation flow. They are not credentials.
+            {t("plugin.live.reviewHint")}
           </p>
           <label className="live-control-field">
-            Account reference
+            {t("plugin.live.accountRef")}
             <input value={accountRef} onChange={(event) => setAccountRef(event.target.value)} autoComplete="off" spellCheck={false} />
           </label>
           <label className="live-control-field">
-            Shadow reference
+            {t("plugin.live.shadowRef")}
             <input value={shadowRef} onChange={(event) => setShadowRef(event.target.value)} autoComplete="off" spellCheck={false} />
           </label>
           <button
@@ -297,36 +298,36 @@ function LiveControlPanel({ runtime }: { runtime: PluginPlatformRuntime }) {
               void runtime.actions.previewLiveConfirmation(accountRef, shadowRef).then(setPreview).catch(() => undefined);
             }}
           >
-            Load Host preview
+            {t("plugin.live.loadPreview")}
           </button>
           {receipt && (
             <div className="live-receipt-summary" data-live-receipt-issued>
-              <strong>One-shot receipt issued</strong>
-              <span>ID {receipt.receiptId} · expires {receipt.expiresAt}</span>
+              <strong>{t("plugin.live.receiptIssued")}</strong>
+              <span>{t("plugin.live.receiptMeta", { id: receipt.receiptId, expires: receipt.expiresAt })}</span>
               {receipt.schemaVersion === "candlescope.live-confirmation/2" && receipt.action && (
                 <>
-                  <span>Bound action: {receipt.action.toUpperCase()} · receipt issuance has not sent a network request.</span>
+                  <span>{t("plugin.live.boundAction", { action: receipt.action.toUpperCase() })}</span>
                   <button
                     type="button"
                     className="live-danger-action"
                     data-execute-live-action
                     onClick={() => setExecutePending(true)}
                   >
-                    {receipt.action === "submit" ? "Submit OKX Demo order" : "Cancel OKX Demo order"}
+                    {receipt.action === "submit" ? t("plugin.live.submitDemo") : t("plugin.live.cancelDemo")}
                   </button>
                 </>
               )}
               <button type="button" onClick={() => void runtime.actions.revokeLiveConfirmation(receipt.receiptRef, "host-native-receipt-revoke").then(() => setReceipt(null)).catch(() => undefined)}>
-                Revoke receipt
+                {t("plugin.live.revokeReceipt")}
               </button>
             </div>
           )}
           {execution && (
             <div className="live-receipt-summary" data-live-execution-result>
-              <strong>OKX Demo execution: {execution.state}</strong>
+              <strong>{t("plugin.live.executionResult", { state: execution.state })}</strong>
               <span>
                 {execution.clientOrderId} · {execution.notional} USDT
-                {execution.terminal ? " · terminal" : ""}
+                {execution.terminal ? ` · ${t("plugin.live.terminal")}` : ""}
               </span>
               {execution.reconciliationRequired && (
                 <button
@@ -341,34 +342,34 @@ function LiveControlPanel({ runtime }: { runtime: PluginPlatformRuntime }) {
                       .catch(() => undefined);
                   }}
                 >
-                  Reconcile venue state
+                  {t("plugin.live.reconcile")}
                 </button>
               )}
               {!execution.reconciliationRequired && !execution.terminal && (
-                <span>Load a fresh Host preview to review the next available action.</span>
+                <span>{t("plugin.live.freshPreview")}</span>
               )}
             </div>
           )}
         </section>
 
         <section className="live-control-section">
-          <h3>Emergency authority revoke</h3>
+          <h3>{t("plugin.live.emergencyRevoke")}</h3>
           <div className="live-revoke-grid">
             <label className="live-control-field">
-              Scope
+              {t("plugin.live.scope")}
               <select value={scopeType} onChange={(event) => setScopeType(event.target.value as typeof scopeType)}>
-                <option value="grant">Grant</option>
-                <option value="plugin">Plugin</option>
-                <option value="publisher">Publisher</option>
-                <option value="credential">Credential</option>
+                <option value="grant">{t("plugin.live.grant")}</option>
+                <option value="plugin">{t("plugin.live.plugin")}</option>
+                <option value="publisher">{t("plugin.host.publisher")}</option>
+                <option value="credential">{t("plugin.live.credential")}</option>
               </select>
             </label>
             <label className="live-control-field">
-              Subject
+              {t("plugin.live.subject")}
               <input value={subject} onChange={(event) => setSubject(event.target.value)} autoComplete="off" spellCheck={false} />
             </label>
             <label className="live-control-field">
-              Reason
+              {t("plugin.live.reason")}
               <input value={reason} onChange={(event) => setReason(event.target.value)} autoComplete="off" />
             </label>
           </div>
@@ -378,7 +379,7 @@ function LiveControlPanel({ runtime }: { runtime: PluginPlatformRuntime }) {
             disabled={!management || !status.available || !subject.trim() || !reason.trim()}
             onClick={() => setPending({ kind: "revoke", scopeType, subject: subject.trim(), reason: reason.trim() })}
           >
-            Revoke and advance epoch
+            {t("plugin.live.revokeEpoch")}
           </button>
         </section>
       </HostModal>
@@ -405,12 +406,12 @@ function LiveControlPanel({ runtime }: { runtime: PluginPlatformRuntime }) {
         && receipt?.schemaVersion === "candlescope.live-confirmation/2"
         && receipt.action && (
           <TypedActionDialog
-            title={receipt.action === "submit" ? "Submit OKX Demo order" : "Cancel OKX Demo order"}
+            title={receipt.action === "submit" ? t("plugin.live.submitDemo") : t("plugin.live.cancelDemo")}
             phrase={receipt.action === "submit" ? "EXECUTE DEMO SUBMIT" : "EXECUTE DEMO CANCEL"}
             detail={
               receipt.action === "submit"
-                ? "This second confirmation sends one persisted BTC-USDT Spot limit order to OKX Demo. The Host will not retry an uncertain result."
-                : "This second confirmation sends one cancel request to OKX Demo. The acknowledgement is not final; reconcile afterward."
+                ? t("plugin.live.submitDetail")
+                : t("plugin.live.cancelDetail")
             }
             onClose={() => setExecutePending(false)}
             onConfirm={async () => {
@@ -428,6 +429,7 @@ function LiveControlPanel({ runtime }: { runtime: PluginPlatformRuntime }) {
 }
 
 export default function PluginLiveControl({ runtime }: { runtime: PluginPlatformRuntime }) {
+  useLocale();
   const status = runtime.view.liveControl;
   if (status.mode === "disabled") return null;
   return (
@@ -439,17 +441,17 @@ export default function PluginLiveControl({ runtime }: { runtime: PluginPlatform
         data-live-control-mode={status.mode}
         onClick={runtime.actions.openLiveControl}
       >
-        <strong>LIVE AUTHORITY · {status.mode.toUpperCase()}</strong>
+        <strong>{t("plugin.live.banner", { mode: status.mode.toUpperCase() })}</strong>
         <span>
           {status.mode === "armed"
             ? status.liveSubmitAvailable
-              ? "Pinned OKX Demo execution armed"
-              : "Receipt control armed; execution unavailable"
+              ? t("plugin.live.bannerArmedExecution")
+              : t("plugin.live.bannerArmedReceipt")
             : status.mode === "killed"
-              ? "Global kill active"
+              ? t("plugin.live.bannerKilled")
               : status.mode === "unavailable"
-                ? "Control status unavailable — fail closed"
-                : "Receipt control disarmed"}
+                ? t("plugin.live.bannerUnavailable")
+                : t("plugin.live.bannerDisarmed")}
         </span>
       </button>
       {runtime.view.liveControlOpen && <LiveControlPanel runtime={runtime} />}

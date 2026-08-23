@@ -6,6 +6,7 @@ import {
 } from "../../services/api";
 import { parseSymbolKey } from "../../utils/symbolKey";
 import type { WatchlistGroup } from "../watchlist/watchlistTypes.js";
+import { t } from "../../i18n/index.js";
 
 export type MaintenanceScope = "current" | "watchlist";
 export interface MaintenanceSeriesResult extends Record<string, unknown> {
@@ -122,7 +123,7 @@ export function useSettingsMaintenanceRuntime({
     } catch (err: unknown) {
       setStorageRepairResult({
         status: "error",
-        message: `修复失败: ${errorMessage(err)}`,
+        message: t("core.error.maintenanceRepair", { error: errorMessage(err) }),
         exchange: currentExchange,
         market_type: currentMarketType,
         symbols_filter: symbols,
@@ -155,7 +156,7 @@ export function useSettingsMaintenanceRuntime({
     } catch (err: unknown) {
       setGapScanResult({
         status: "error",
-        message: `扫描失败: ${errorMessage(err)}`,
+        message: t("core.error.maintenanceScan", { error: errorMessage(err) }),
         exchange: currentExchange,
         market_type: currentMarketType,
         symbols_filter: symbols,
@@ -181,13 +182,13 @@ export function useSettingsMaintenanceRuntime({
         : Object.values(counts).reduce<number>((sum, value) => sum + Number(value || 0), 0);
       setExchangeRefreshResult({
         status: "ok",
-        message: `已更新 ${currentExchange} 的 ${refreshedCount} 个交易对`,
+        message: t("core.maintenance.refreshed", { exchange: currentExchange, count: refreshedCount }),
         count: refreshedCount,
       });
     } catch (err: unknown) {
       setExchangeRefreshResult({
         status: "error",
-        message: `更新失败: ${errorMessage(err)}`,
+        message: t("core.error.maintenanceRefresh", { error: errorMessage(err) }),
       });
     } finally {
       setExchangeRefreshLoading(false);

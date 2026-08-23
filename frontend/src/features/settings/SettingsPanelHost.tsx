@@ -9,6 +9,8 @@ import StorageMaintenancePanel from "./panels/StorageMaintenancePanel.js";
 import { PluginSettingsPanel } from "../plugins/PluginPlatformSurfaces.js";
 import type { PluginPlatformRuntime } from "../plugins/pluginPlatformTypes.js";
 import type { SettingsCategory, SettingsPanelViewModel } from "./settingsTypes.js";
+import { t } from "../../i18n/index.js";
+import { useLocale } from "../../i18n/useLocale.js";
 
 export interface SettingsPanelHostProps {
   activeCategory: SettingsCategory;
@@ -23,6 +25,7 @@ export default function SettingsPanelHost({
   plugins,
   onOpenDataWorkbench,
 }: SettingsPanelHostProps) {
+  useLocale();
   switch (activeCategory) {
     case "appearance":
       return <ChartAppearancePanel {...panelModel.appearance} />;
@@ -42,7 +45,7 @@ export default function SettingsPanelHost({
     case "plugins":
       return plugins
         ? <PluginSettingsPanel runtime={plugins} />
-        : <div className="st-info-box">插件平台当前不可用。</div>;
+        : <div className="st-info-box">{t("settings.pluginsUnavailable")}</div>;
     case "about":
       return <AboutSettingsPanel />;
     default:

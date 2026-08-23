@@ -4,6 +4,24 @@ import type { PluginChartLayerSource } from "./pluginChartLayerSource.js";
 export type JsonScalar = string | number | boolean | null;
 export type JsonValue = JsonScalar | JsonValue[] | { [key: string]: JsonValue };
 
+export interface PluginSchemaLocalization {
+  title?: string;
+  description?: string;
+  enumLabels?: string[];
+  properties?: Record<string, PluginSchemaLocalization>;
+  items?: PluginSchemaLocalization;
+}
+
+export interface PluginContributionLocalization {
+  title?: string;
+  schema?: PluginSchemaLocalization;
+  fields?: Record<string, string>;
+  emptyState?: string;
+  displayName?: string;
+  marketTypes?: Record<string, string>;
+  accounts?: Record<string, string>;
+}
+
 export type PluginPlacement = "commandPalette" | "topToolbar" | "chartContextMenu";
 export type PluginViewSlot = "sidePanel" | "bottomPanel" | "statusArea";
 export type PluginDeclarativeViewRenderer = "table" | "list" | "detail" | "status";
@@ -17,6 +35,7 @@ export interface PluginJsonSchema {
   description?: string;
   default?: JsonValue;
   enum?: JsonValue[];
+  enumLabels?: string[];
   properties?: Record<string, PluginJsonSchema>;
   required?: string[];
   additionalProperties?: false;
@@ -37,6 +56,7 @@ interface ContributionBase {
   entrypointId: string;
   available: boolean;
   unavailableReason?: string;
+  localizations?: Record<string, PluginContributionLocalization>;
 }
 
 export interface PluginCommandContribution extends ContributionBase {

@@ -1,3 +1,6 @@
+import { t } from "../../i18n/index.js";
+import { useLocale } from "../../i18n/useLocale.js";
+
 const ExportIcon = (
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <path d="M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" />
@@ -39,6 +42,7 @@ export default function DrawingActionButtons({
   onToggleDrawingsHidden,
   onToggleExportPanel,
 }: DrawingActionButtonsProps) {
+  useLocale();
   return (
     <>
       <div style={{ flex: 1 }} />
@@ -47,7 +51,7 @@ export default function DrawingActionButtons({
         data-drawing-action="export"
         onClick={onToggleExportPanel}
         disabled={exportInProgress}
-        title={exportInProgress ? "Exporting image..." : "Screenshot / export image"}
+        title={exportInProgress ? t("drawing.exporting") : t("drawing.export")}
       >
         {ExportIcon}
       </button>
@@ -55,7 +59,7 @@ export default function DrawingActionButtons({
         className={`drawing-tool-btn drawing-hide-btn ${drawingsHidden ? "active" : ""}`}
         data-drawing-action="toggle-hidden"
         onClick={onToggleDrawingsHidden}
-        title={drawingsHidden ? "Show all drawings" : "Hide all drawings"}
+        title={drawingsHidden ? t("drawing.showAll") : t("drawing.hideAll")}
       >
         {drawingsHidden ? EyeOffIcon : EyeIcon}
       </button>
@@ -63,7 +67,7 @@ export default function DrawingActionButtons({
         className="drawing-tool-btn drawing-clear-btn"
         data-drawing-action="clear"
         onClick={onClearAll}
-        title="Clear all drawings"
+        title={t("drawing.clearAll")}
       >
         {ClearIcon}
       </button>

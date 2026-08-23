@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import type { IndicatorHLine } from "../indicators/indicatorTypes.js";
 import type {
   ReplayTrainingPortfolioPosition,
@@ -26,17 +27,17 @@ export function replayPositiveModelPrice(value: unknown): number | null {
 }
 
 export function replayMarkFidelityLabel(value: unknown): string {
-  if (typeof value !== "string") return "模型代理";
+  if (typeof value !== "string") return t("replay.hline.modelProxy");
   const fidelity = value.toUpperCase();
   if (fidelity.includes("HISTORICAL") && !fidelity.includes("PROXY")) {
-    return "历史 Mark";
+    return t("replay.hline.historicalMark");
   }
   if (fidelity.includes("BAR") && (
     fidelity.includes("TAPE") || fidelity.includes("TRADE")
-  )) return "K线/成交代理";
-  if (fidelity.includes("BAR")) return "K线代理";
-  if (fidelity.includes("TAPE") || fidelity.includes("TRADE")) return "成交代理";
-  return "模型代理";
+  )) return t("replay.hline.barTapeProxy");
+  if (fidelity.includes("BAR")) return t("replay.hline.barProxy");
+  if (fidelity.includes("TAPE") || fidelity.includes("TRADE")) return t("replay.hline.tapeProxy");
+  return t("replay.hline.modelProxy");
 }
 
 function displayPrice(raw: unknown, parsed: number): string {
@@ -78,10 +79,10 @@ export function buildReplayPositionHlines({
     const quantity = finiteNumber(position.quantity) ?? 0;
     const positionSide = selectedPosition.position_side;
     const sideLabel = positionSide === "LONG"
-      ? "多仓"
+      ? t("replay.hline.long")
       : positionSide === "SHORT"
-        ? "空仓"
-        : "持仓";
+        ? t("replay.hline.short")
+        : t("replay.hline.position");
     const lineSuffix = positionSide?.toLowerCase() ?? "net";
     const idSuffix = positionSide === undefined ? "" : `-${lineSuffix}`;
 
@@ -90,7 +91,10 @@ export function buildReplayPositionHlines({
         id: `replay-position-average${idSuffix}`,
         pane: "main",
         price: entryPrice,
-        title: `${sideLabel}均价 ${displayPrice(position.entry_price, entryPrice)}`,
+        title: t("replay.hline.avgPrice", {
+          side: sideLabel,
+          price: displayPrice(position.entry_price, entryPrice),
+        }),
         color: positionSide === "SHORT" ? "#7c3aed" : "#2563eb",
         linestyle: "solid",
         linewidth: 1,
@@ -104,7 +108,10 @@ export function buildReplayPositionHlines({
         id: `replay-position-liquidation${idSuffix}`,
         pane: "main",
         price: liquidationPrice,
-        title: `${sideLabel}强平价≈ ${displayPrice(selectedPosition.liquidation_price, liquidationPrice)}（服务端模型）`,
+        title: t("replay.hline.liqPrice", {
+          side: sideLabel,
+          price: displayPrice(selectedPosition.liquidation_price, liquidationPrice),
+        }),
         color: "#f59e0b",
         linestyle: "dotted",
         linewidth: 1,
@@ -117,7 +124,10 @@ export function buildReplayPositionHlines({
         id: `replay-position-bankruptcy${idSuffix}`,
         pane: "main",
         price: bankruptcyPrice,
-        title: `${sideLabel}破产价≈ ${displayPrice(selectedPosition.bankruptcy_price, bankruptcyPrice)}（服务端模型）`,
+        title: t("replay.hline.bankruptcy", {
+          side: sideLabel,
+          price: displayPrice(selectedPosition.bankruptcy_price, bankruptcyPrice),
+        }),
         color: "#e11d48",
         linestyle: "dashed",
         linewidth: 1,
@@ -144,7 +154,7 @@ export function buildReplayPositionHlines({
       id: `replay-position-risk-reference${idSuffix}`,
       pane: "main",
       price: riskPrice,
-      title: `风险参考≈ ${riskPrice.toFixed(6)}（K线标记代理）`,
+      title: t("replay.hline.riskRef", { price: riskPrice.toFixed(6) }),
       color: "#f59e0b",
       linestyle: "dotted",
       linewidth: 1,

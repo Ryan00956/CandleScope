@@ -47,6 +47,7 @@ _SEMVER_RE = re.compile(
 )
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _TRACE_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+_LOCALE_ID_RE = re.compile(r"^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$")
 _JAVA_CLASS_RE = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+$")
 _WASM_EXPORT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.:-]*$")
 _SHELL_ARTIFACT_NAMES = frozenset(
@@ -912,6 +913,7 @@ class Contribution:
     title: str
     entrypoint: str
     configuration: dict[str, Any] = field(default_factory=dict)
+    localizations: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "id", _local_id(self.id, "contribution.id"))
@@ -933,14 +935,43 @@ class Contribution:
             "configuration",
             _json_object(self.configuration, "contribution.configuration"),
         )
+        object.__setattr__(
+            self,
+            "localizations",
+            _json_object(self.localizations, "contribution.localizations"),
+        )
 
-    def to_wire(self) -> dict[str, Any]:
+    def to_wire(self, *, schema_version: int | None = None) -> dict[str, Any]:
+        configuration = dict(self.configuration)
+        embedded = configuration.pop("localizations", None)
+        if embedded is not None and self.localizations:
+            raise contract_error(
+                "contribution localizations must use exactly one manifest location",
+                path="contribution.localizations",
+            )
+        localizations = self.localizations or (
+            _json_object(embedded, "contribution.configuration.localizations")
+            if embedded is not None
+            else {}
+        )
+        if schema_version == MANIFEST_SCHEMA_VERSION_V3 and embedded is not None:
+            raise contract_error(
+                "manifest v3 contribution localizations must use the top-level field",
+                path="contribution.configuration.localizations",
+            )
+        if schema_version == MANIFEST_SCHEMA_VERSION_V2 and localizations:
+            configuration["localizations"] = dict(localizations)
         return {
             "id": self.id,
             "kind": self.kind,
             "title": self.title,
             "entrypoint": self.entrypoint,
-            "configuration": dict(self.configuration),
+            "configuration": configuration,
+            **(
+                {"localizations": dict(localizations)}
+                if localizations and schema_version != MANIFEST_SCHEMA_VERSION_V2
+                else {}
+            ),
         }
 
     def descriptor(self) -> "ContributionDescriptor":
@@ -952,21 +983,49 @@ class Contribution:
         )
 
     @classmethod
-    def from_wire(cls, value: Any) -> "Contribution":
+    def from_wire(
+        cls,
+        value: Any,
+        *,
+        schema_version: int | None = None,
+    ) -> "Contribution":
         data = _mapping(
             value,
             "contribution",
             required=frozenset({"id", "kind", "title", "entrypoint"}),
-            optional=frozenset({"configuration"}),
+            optional=frozenset({"configuration", "localizations"}),
         )
+        configuration = _json_object(
+            data.get("configuration", {}),
+            "contribution.configuration",
+        )
+        embedded_declared = "localizations" in configuration
+        embedded = configuration.pop("localizations", None)
+        top_level_declared = "localizations" in data
+        if embedded_declared and top_level_declared:
+            raise contract_error(
+                "contribution localizations must use exactly one manifest location",
+                path="contribution.localizations",
+            )
+        if schema_version == MANIFEST_SCHEMA_VERSION_V2 and top_level_declared:
+            raise contract_error(
+                "manifest v2 contribution localizations must use configuration.localizations",
+                path="contribution.localizations",
+            )
+        if schema_version == MANIFEST_SCHEMA_VERSION_V3 and embedded_declared:
+            raise contract_error(
+                "manifest v3 contribution localizations must use the top-level field",
+                path="contribution.configuration.localizations",
+            )
         return cls(
             id=data["id"],
             kind=data["kind"],
             title=data["title"],
             entrypoint=data["entrypoint"],
-            configuration=_json_object(
-                data.get("configuration", {}),
-                "contribution.configuration",
+            configuration=configuration,
+            localizations=_json_object(
+                data.get("localizations", embedded or {}),
+                "contribution.localizations",
             ),
         )
 
@@ -1183,7 +1242,10 @@ class PluginManifest:
             "plugin": self.plugin.to_wire(),
             "backend": {"entrypoints": [item.to_wire() for item in self.backend_entrypoints]},
             **({"frontend": self.frontend.to_wire()} if self.frontend is not None else {}),
-            "contributions": [item.to_wire() for item in self.contributions],
+            "contributions": [
+                item.to_wire(schema_version=self.schema_version)
+                for item in self.contributions
+            ],
             "permissions": self.permissions.to_wire(),
             "probes": [item.to_wire() for item in self.probes],
         }
@@ -1224,7 +1286,7 @@ class PluginManifest:
                 FrontendDefinition.from_wire(data["frontend"]) if "frontend" in data else None
             ),
             contributions=tuple(
-                Contribution.from_wire(item)
+                Contribution.from_wire(item, schema_version=schema_version)
                 for item in _sequence(data["contributions"], "contributions")
             ),
             permissions=PermissionSet.from_wire(data["permissions"]),
@@ -1421,6 +1483,7 @@ class RequestContext:
     user_action: bool
     generation: int
     trace_id: str
+    locale: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -1439,6 +1502,11 @@ class RequestContext:
         if not _TRACE_ID_RE.fullmatch(trace_id):
             raise contract_error("requestContext.traceId contains unsupported characters")
         object.__setattr__(self, "trace_id", trace_id)
+        if self.locale is not None:
+            locale = _string(self.locale, "requestContext.locale", max_length=35)
+            if not _LOCALE_ID_RE.fullmatch(locale):
+                raise contract_error("requestContext.locale is invalid")
+            object.__setattr__(self, "locale", locale)
 
     def to_wire(self) -> dict[str, Any]:
         return {
@@ -1446,6 +1514,7 @@ class RequestContext:
             "userAction": self.user_action,
             "generation": self.generation,
             "traceId": self.trace_id,
+            **({"locale": self.locale} if self.locale is not None else {}),
         }
 
     @classmethod
@@ -1454,12 +1523,14 @@ class RequestContext:
             value,
             "requestContext",
             required=frozenset({"contributionId", "userAction", "generation", "traceId"}),
+            optional=frozenset({"locale"}),
         )
         return cls(
             contribution_id=data["contributionId"],
             user_action=data["userAction"],
             generation=data["generation"],
             trace_id=data["traceId"],
+            locale=data.get("locale"),
         )
 
 

@@ -14,6 +14,8 @@ import {
   MARKET_RAIL_MIN_WIDTH,
   MARKET_RAIL_SPLITTER_HEIGHT,
 } from "../shared/marketRailLayout.js";
+import { t } from "../i18n/index.js";
+import { useLocale } from "../i18n/useLocale.js";
 import type { MarketRailViewDescriptor } from "./marketRailTypes.js";
 
 type RailCssVars = CSSProperties & Record<`--${string}`, string | number>;
@@ -101,8 +103,9 @@ export default function MarketRightRailFrame({
   onViewHeightChange,
   upColor = "#22c55e",
   downColor = "#ef4444",
-  ariaLabel = "市场侧栏",
+  ariaLabel,
 }: MarketRightRailFrameProps) {
+  useLocale();
   const panelRef = useRef<HTMLDivElement | null>(null);
   const sectionRefs = useRef(new Map<string, HTMLElement>());
   const pendingRevealRef = useRef<string | null>(null);
@@ -266,13 +269,14 @@ export default function MarketRightRailFrame({
     onToggleView(viewId);
   }, [onToggleView, openViewIds, panelCollapsed]);
 
-  const collapseLabel = panelCollapsed ? "显示侧栏" : "隐藏侧栏";
+  const collapseLabel = panelCollapsed ? t("rail.showPanel") : t("rail.hidePanel");
+  const resolvedAriaLabel = ariaLabel ?? t("rail.ariaLabel");
 
   return (
     <aside
       className={`right-market-rail ${panelOpen ? "" : "panel-collapsed"} ${widthResizing ? "resizing" : ""}`}
       style={colorVars}
-      aria-label={ariaLabel}
+      aria-label={resolvedAriaLabel}
       data-runtime-source={source}
       data-layout-mode="scroll-accordion"
       data-market-shell-owner="right-rail"
@@ -286,7 +290,7 @@ export default function MarketRightRailFrame({
               className={`wl-resize-handle ${widthResizing ? "active" : ""}`}
               onPointerDown={startWidthResize}
               role="separator"
-              aria-label="调整右侧栏宽度"
+              aria-label={t("rail.resizeWidth")}
               aria-orientation="vertical"
             />
           )}
@@ -332,7 +336,7 @@ export default function MarketRightRailFrame({
                         onKeyDown={(event) => handleResizeKeyDown(event, view, height)}
                         role="separator"
                         tabIndex={0}
-                        aria-label={`调整${view.title}面板高度`}
+                        aria-label={t("rail.resizeHeight", { title: view.title })}
                         aria-orientation="horizontal"
                         aria-valuemin={minViewHeight(view)}
                         aria-valuemax={maxViewHeight(view)}
@@ -346,7 +350,7 @@ export default function MarketRightRailFrame({
                       type="button"
                       className="market-rail-accordion-trigger"
                       aria-expanded="false"
-                      aria-label={`展开${view.title}面板`}
+                      aria-label={t("rail.expandView", { title: view.title })}
                       onClick={() => toggleView(view.id)}
                     >
                       <span className="market-rail-accordion-chevron" aria-hidden="true">
@@ -370,7 +374,7 @@ export default function MarketRightRailFrame({
 
       <nav
         className="market-activity-bar"
-        aria-label="右侧工具栏"
+        aria-label={t("rail.activityBar")}
         data-market-shell-owner="activity-bar"
       >
         {sortedViews.map((view) => {
@@ -410,7 +414,7 @@ export default function MarketRightRailFrame({
               <PanelCollapseIcon collapsed={panelCollapsed} />
             </span>
             <span className="market-activity-label" aria-hidden="true">
-              {panelCollapsed ? "显示" : "收起"}
+              {panelCollapsed ? t("rail.show") : t("rail.collapse")}
             </span>
           </button>
         )}

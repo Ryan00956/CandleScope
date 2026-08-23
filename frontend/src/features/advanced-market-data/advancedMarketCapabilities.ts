@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import {
   ADVANCED_MARKET_CHANNELS,
   type AdvancedMarketChannel,
@@ -30,9 +31,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function unavailableReason(marketType: string, raw: Record<string, unknown> | null): string {
-  if (!raw) return "交易所能力信息尚未就绪";
-  if (marketType.trim().toLowerCase() === "spot") return "仅合约市场支持";
-  return "当前交易所或市场不支持";
+  if (!raw) return t("market.cap.notReady");
+  if (marketType.trim().toLowerCase() === "spot") return t("market.cap.futuresOnly");
+  return t("market.cap.unsupported");
 }
 
 function unsupported(reason: string): AdvancedMarketChannelSupport {
@@ -77,8 +78,8 @@ export function resolveAdvancedMarketCapabilities({
       reason: supported
         ? null
         : requiresHistory
-          ? "当前频道缺少完整的实时或历史能力"
-          : "当前频道不支持实时数据",
+          ? t("market.cap.incompleteChannel")
+          : t("market.cap.noRealtime"),
     };
   }
 

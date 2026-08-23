@@ -3,6 +3,8 @@ import {
   useRef,
   useState,
 } from "react";
+import { t } from "../../i18n/index.js";
+import { useLocale } from "../../i18n/useLocale.js";
 import type {
   ChartCellCreationMode,
   ChartCellId,
@@ -36,6 +38,7 @@ export default function WorkspaceCellLayoutMenu({
   onClose,
   onSwap,
 }: WorkspaceCellLayoutMenuProps) {
+  useLocale();
   const [open, setOpen] = useState(false);
   const [creationMode, setCreationMode] = useState<ChartCellCreationMode>("copy");
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -81,10 +84,10 @@ export default function WorkspaceCellLayoutMenu({
         ref={triggerRef}
         type="button"
         className="multi-chart-cell-layout-trigger"
-        aria-label={`图 ${cellNumber(cellId)} 布局操作`}
+        aria-label={t("workspace.cellMenu", { n: cellNumber(cellId) })}
         aria-haspopup="dialog"
         aria-expanded={menuOpen}
-        title="拆分、关闭或交换图表"
+        title={t("workspace.cellMenuTitle")}
         disabled={disabled}
         onClick={(event) => {
           event.stopPropagation();
@@ -97,12 +100,12 @@ export default function WorkspaceCellLayoutMenu({
         <div
           className="workspace-cell-layout-popover"
           role="dialog"
-          aria-label={`图 ${cellNumber(cellId)} 布局操作`}
+          aria-label={t("workspace.cellMenu", { n: cellNumber(cellId) })}
           onPointerDown={(event) => event.stopPropagation()}
         >
-          <strong>图 {cellNumber(cellId)} 布局</strong>
+          <strong>{t("workspace.cellLayout", { n: cellNumber(cellId) })}</strong>
           <fieldset disabled={!canSplit}>
-            <legend>新图内容</legend>
+            <legend>{t("workspace.newContent")}</legend>
             <label>
               <input
                 type="radio"
@@ -111,7 +114,7 @@ export default function WorkspaceCellLayoutMenu({
                 checked={creationMode === "copy"}
                 onChange={() => setCreationMode("copy")}
               />
-              复制当前配置
+              {t("workspace.copyConfig")}
             </label>
             <label>
               <input
@@ -121,7 +124,7 @@ export default function WorkspaceCellLayoutMenu({
                 checked={creationMode === "blank"}
                 onChange={() => setCreationMode("blank")}
               />
-              空白图表
+              {t("workspace.blankChart")}
             </label>
           </fieldset>
           <div className="workspace-cell-layout-actions">
@@ -130,19 +133,19 @@ export default function WorkspaceCellLayoutMenu({
               disabled={!canSplit}
               onClick={() => runAndClose(() => onSplit(cellId, "columns", creationMode))}
             >
-              向右拆分
+              {t("workspace.splitRight")}
             </button>
             <button
               type="button"
               disabled={!canSplit}
               onClick={() => runAndClose(() => onSplit(cellId, "rows", creationMode))}
             >
-              向下拆分
+              {t("workspace.splitDown")}
             </button>
           </div>
           {swapTargets.length > 0 && (
-            <div className="workspace-cell-swap-actions" aria-label="交换图表位置">
-              <span>交换位置</span>
+            <div className="workspace-cell-swap-actions" aria-label={t("workspace.swap")}>
+              <span>{t("workspace.swapLabel")}</span>
               <div>
                 {swapTargets.map((targetCellId) => (
                   <button
@@ -150,7 +153,7 @@ export default function WorkspaceCellLayoutMenu({
                     type="button"
                     onClick={() => runAndClose(() => onSwap(cellId, targetCellId))}
                   >
-                    图 {cellNumber(targetCellId)}
+                    {t("workspace.cellN", { n: cellNumber(targetCellId) })}
                   </button>
                 ))}
               </div>
@@ -162,7 +165,7 @@ export default function WorkspaceCellLayoutMenu({
             disabled={!canClose}
             onClick={() => runAndClose(() => onClose(cellId))}
           >
-            {canClose ? "关闭此图表" : "至少保留一个图表"}
+            {canClose ? t("workspace.closeChart") : t("workspace.keepOneChart")}
           </button>
         </div>
       )}

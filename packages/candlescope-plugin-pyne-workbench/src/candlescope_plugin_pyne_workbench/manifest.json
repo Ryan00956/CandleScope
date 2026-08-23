@@ -44,6 +44,18 @@
       "title": "Run Pyne on current chart",
       "entrypoint": "main",
       "configuration": {
+      "localizations": {
+        "zh-CN": {
+          "title": "在当前图表运行 Pyne",
+          "schema": {
+            "properties": {
+              "source": {"title": "Pyne 源码"},
+              "paramsJson": {"title": "参数 JSON"},
+              "lookbackBars": {"title": "回看 K 线数"}
+            }
+          }
+        }
+      },
         "requiresUserAction": true,
         "placements": ["commandPalette", "topToolbar"],
         "inputSchema": {
@@ -64,6 +76,20 @@
       "title": "Start incremental Pyne session",
       "entrypoint": "main",
       "configuration": {
+      "localizations": {
+        "zh-CN": {
+          "title": "启动增量 Pyne 会话",
+          "schema": {
+            "properties": {
+              "sessionId": {"title": "会话 ID"},
+              "source": {"title": "Pyne 源码"},
+              "paramsJson": {"title": "参数 JSON"},
+              "lookbackBars": {"title": "回看 K 线数"},
+              "retentionBars": {"title": "保留 K 线数"}
+            }
+          }
+        }
+      },
         "requiresUserAction": true,
         "placements": ["commandPalette"],
         "inputSchema": {
@@ -86,6 +112,23 @@
       "title": "Push bar to Pyne session",
       "entrypoint": "main",
       "configuration": {
+      "localizations": {
+        "zh-CN": {
+          "title": "向 Pyne 会话推送 K 线",
+          "schema": {
+            "properties": {
+              "sessionId": {"title": "会话 ID"},
+              "time": {"title": "时间"},
+              "open": {"title": "开盘价"},
+              "high": {"title": "最高价"},
+              "low": {"title": "最低价"},
+              "close": {"title": "收盘价"},
+              "volume": {"title": "成交量"},
+              "preview": {"title": "仅预览"}
+            }
+          }
+        }
+      },
         "requiresUserAction": true,
         "placements": ["commandPalette"],
         "inputSchema": {
@@ -111,6 +154,16 @@
       "title": "Snapshot Pyne session",
       "entrypoint": "main",
       "configuration": {
+      "localizations": {
+        "zh-CN": {
+          "title": "创建 Pyne 会话快照",
+          "schema": {
+            "properties": {
+              "sessionId": {"title": "会话 ID"}
+            }
+          }
+        }
+      },
         "requiresUserAction": true,
         "placements": ["commandPalette"],
         "inputSchema": {
@@ -129,6 +182,16 @@
       "title": "Close Pyne session",
       "entrypoint": "main",
       "configuration": {
+      "localizations": {
+        "zh-CN": {
+          "title": "关闭 Pyne 会话",
+          "schema": {
+            "properties": {
+              "sessionId": {"title": "会话 ID"}
+            }
+          }
+        }
+      },
         "requiresUserAction": true,
         "placements": ["commandPalette"],
         "inputSchema": {
@@ -147,6 +210,11 @@
       "title": "Pyne backtest strategy provider",
       "entrypoint": "pyne-workbench",
       "configuration": {
+      "localizations": {
+        "zh-CN": {
+          "title": "Pyne 回测策略提供器"
+        }
+      },
         "inputModes": ["BAR_CLOSE"],
         "outputModes": ["SIGNAL", "TARGET_POSITION"],
         "stateModes": ["SESSION_STATEFUL"],
@@ -161,6 +229,11 @@
       "title": "Pyne Workbench",
       "entrypoint": "main",
       "configuration": {
+      "localizations": {
+        "zh-CN": {
+          "title": "Pyne 工作台"
+        }
+      },
         "slot": "sidePanel",
         "renderer": "sandbox",
         "surface": "workbench-view"
@@ -172,6 +245,11 @@
       "title": "Pyne output",
       "entrypoint": "main",
       "configuration": {
+      "localizations": {
+        "zh-CN": {
+          "title": "Pyne 输出"
+        }
+      },
         "target": "main-chart",
         "zOrder": "above-series",
         "maxItems": 500,

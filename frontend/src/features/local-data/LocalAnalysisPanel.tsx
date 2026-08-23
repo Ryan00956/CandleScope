@@ -1,4 +1,6 @@
 import { useMemo, useState } from "react";
+import { t, getLocale } from "../../i18n/index.js";
+import { useLocale } from "../../i18n/useLocale.js";
 import type { MainSeriesCrosshairValue } from "../../chart-adapter/chartAdapterTypes.js";
 import LocalAnalysisCsvImport from "./LocalAnalysisCsvImport.js";
 import type { LocalAnalysisEventStore } from "./localAnalysisStore.js";
@@ -24,21 +26,21 @@ function anchorFromCrosshair(value: MainSeriesCrosshairValue | null): EventAncho
 
 function formatEventTime(time: number, timezone: string): string {
   try {
-    return new Intl.DateTimeFormat("zh-CN", {
+    return new Intl.DateTimeFormat(getLocale(), {
       dateStyle: "medium",
       timeStyle: "medium",
       timeZone: timezone,
       hour12: false,
     }).format(new Date(time * 1_000));
   } catch {
-    return new Date(time * 1_000).toLocaleString("zh-CN");
+    return new Date(time * 1_000).toLocaleString(getLocale());
   }
 }
 
 function formatPrice(price: number | null): string {
   return price === null
-    ? "未记录价格"
-    : new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 12 }).format(price);
+    ? t("local.noPrice")
+    : new Intl.NumberFormat(getLocale(), { maximumFractionDigits: 12 }).format(price);
 }
 
 function eventTitle(event: LocalAnalysisEvent): string {
@@ -60,6 +62,7 @@ export default function LocalAnalysisPanel({
   onFocus(event: LocalAnalysisEvent): void;
   onError(message: string): void;
 }) {
+  useLocale();
   const [kind, setKind] = useState<LocalAnalysisEventKind>("note");
   const [label, setLabel] = useState("");
   const [note, setNote] = useState("");
@@ -93,7 +96,7 @@ export default function LocalAnalysisPanel({
 
   const submit = () => {
     if (activeAnchor === null) {
-      onError("请先把鼠标移到要标记的 K 线上");
+      onError(t("local.needHover"));
       return;
     }
     try {
@@ -109,18 +112,18 @@ export default function LocalAnalysisPanel({
       else eventStore.update(editingId, draft);
       resetForm();
     } catch (reason) {
-      onError(reason instanceof Error ? reason.message : "分析标记保存失败");
+      onError(reason instanceof Error ? reason.message : t("local.saveFailed"));
     }
   };
 
   return (
-    <section className="local-analysis-panel" aria-label="分析标记">
+    <section className="local-analysis-panel" aria-label={t("local.analysisAria")}>
       <header>
         <div>
-          <span>ANALYSIS</span>
-          <strong>事件标记</strong>
+          <span>{t("local.kicker.analysis")}</span>
+          <strong>{t("local.events")}</strong>
         </div>
-        <small>{snapshot.events.length} 个 · 自动保存</small>
+        <small>{t("local.autoSave", { count: snapshot.events.length })}</small>
       </header>
 
       {snapshot.storage_error !== null && (
@@ -130,27 +133,27 @@ export default function LocalAnalysisPanel({
             type="button"
             onClick={() => {
               try { eventStore.resetCorruptDocument(); }
-              catch (reason) { onError(reason instanceof Error ? reason.message : "重置失败"); }
+              catch (reason) { onError(reason instanceof Error ? reason.message : t("local.resetFailed")); }
             }}
           >
-            重置标记文件
+            {t("local.resetFile")}
           </button>
         </div>
       )}
 
       <div className="local-analysis-anchor" data-ready={activeAnchor !== null ? "true" : "false"}>
-        <span>{editingId === null ? "当前选点" : "标记位置"}</span>
-        <strong>{activeAnchor === null ? "将鼠标移到一根 K 线上" : formatEventTime(activeAnchor.time, manifest.timezone)}</strong>
-        <small>{activeAnchor === null ? "十字光标离开图表后仍会保留最后一个选点" : formatPrice(activeAnchor.price)}</small>
+        <span>{editingId === null ? t("local.currentPoint") : t("local.markerPos")}</span>
+        <strong>{activeAnchor === null ? t("local.moveHint") : formatEventTime(activeAnchor.time, manifest.timezone)}</strong>
+        <small>{activeAnchor === null ? t("local.keepLast") : formatPrice(activeAnchor.price)}</small>
         {editingId !== null && liveAnchor !== null && (
-          <button type="button" onClick={() => setEditingAnchor(liveAnchor)}>移动到当前选点</button>
+          <button type="button" onClick={() => setEditingAnchor(liveAnchor)}>{t("local.moveToPoint")}</button>
         )}
       </div>
 
       <div className="local-analysis-form">
         <div className="local-analysis-form-grid">
           <label>
-            类型
+            {t("local.kind")}
             <select
               value={kind}
               onChange={(event) => {
@@ -165,36 +168,36 @@ export default function LocalAnalysisPanel({
             </select>
           </label>
           <label className="local-analysis-color-field">
-            颜色
+            {t("local.color")}
             <input type="color" value={color} onChange={(event) => setColor(event.target.value)} />
           </label>
         </div>
         <label>
-          标题
+          {t("local.title")}
           <input
             value={label}
             maxLength={160}
             onChange={(event) => setLabel(event.target.value)}
-            placeholder={`${LOCAL_ANALYSIS_KIND_LABELS[kind]}（可选）`}
+            placeholder={t("local.kindOptional", { kind: LOCAL_ANALYSIS_KIND_LABELS[kind] })}
           />
         </label>
         <label>
-          备注
+          {t("local.note")}
           <textarea
             value={note}
             maxLength={8_000}
             onChange={(event) => setNote(event.target.value)}
-            placeholder="记录为什么关注这里、当时看到了什么……"
+            placeholder={t("local.notePh")}
           />
         </label>
         <div className="local-analysis-form-actions">
-          {editingId !== null && <button type="button" className="secondary" onClick={resetForm}>取消</button>}
+          {editingId !== null && <button type="button" className="secondary" onClick={resetForm}>{t("replay.hub.cancel")}</button>}
           <button
             type="button"
             onClick={submit}
             disabled={activeAnchor === null || snapshot.storage_error !== null}
           >
-            {editingId === null ? "添加到图表" : "保存修改"}
+            {editingId === null ? t("local.addToChart") : t("local.saveEdit")}
           </button>
         </div>
       </div>
@@ -207,9 +210,9 @@ export default function LocalAnalysisPanel({
       />
 
       <div className="local-analysis-list-head">
-        <strong>项目事件</strong>
+        <strong>{t("local.projectEvents")}</strong>
         <select value={filter} onChange={(event) => setFilter(event.target.value as typeof filter)}>
-          <option value="all">全部类型</option>
+          <option value="all">{t("local.allKinds")}</option>
           {LOCAL_ANALYSIS_EVENT_KINDS.map((value) => (
             <option value={value} key={value}>{LOCAL_ANALYSIS_KIND_LABELS[value]}</option>
           ))}
@@ -218,7 +221,7 @@ export default function LocalAnalysisPanel({
       <div className="local-analysis-event-list">
         {visibleEvents.length === 0 ? (
           <div className="local-analysis-event-empty">
-            {snapshot.events.length === 0 ? "还没有标记。移动十字光标选择 K 线后即可添加。" : "当前筛选条件下没有标记。"}
+            {snapshot.events.length === 0 ? t("local.noMarkers") : t("local.noFilter")}
           </div>
         ) : visibleEvents.map((event) => (
           <article className={event.id === editingId ? "editing" : ""} key={event.id}>
@@ -231,8 +234,8 @@ export default function LocalAnalysisPanel({
               </span>
             </button>
             <div className="local-analysis-event-actions">
-              <button type="button" onClick={() => onFocus(event)}>定位</button>
-              <button type="button" onClick={() => startEdit(event)}>编辑</button>
+              <button type="button" onClick={() => onFocus(event)}>{t("local.locate")}</button>
+              <button type="button" onClick={() => startEdit(event)}>{t("local.edit")}</button>
               <button
                 type="button"
                 className="danger"
@@ -241,11 +244,11 @@ export default function LocalAnalysisPanel({
                     eventStore.delete(event.id);
                     if (editingId === event.id) resetForm();
                   } catch (reason) {
-                    onError(reason instanceof Error ? reason.message : "删除标记失败");
+                    onError(reason instanceof Error ? reason.message : t("local.deleteMarkerFailed"));
                   }
                 }}
               >
-                删除
+                {t("replay.hub.delete")}
               </button>
             </div>
           </article>

@@ -757,6 +757,76 @@ test("catalog validator builds only active native registries", () => {
   assert.deepEqual(registries.sidePanel.map((item) => item.id), ["acme.scanner.results"]);
 });
 
+test("plugin-owned localizations are validated and resolved by the Host locale", () => {
+  const value = catalog();
+  const commandInputSchema = value.plugins[0]!.contributions[0]!.configuration.inputSchema!;
+  commandInputSchema.properties = {
+    interval: { type: "string", enum: ["1m", "5m"] },
+  };
+  Object.assign(value.plugins[0]!.contributions[0]!, {
+    localizations: {
+      "zh-CN": {
+        title: "扫描",
+        schema: {
+          title: "扫描参数",
+          properties: {
+            interval: { title: "周期", enumLabels: ["1 分钟", "5 分钟"] },
+          },
+        },
+      },
+    },
+  });
+  Object.assign(value.plugins[0]!.contributions[1]!, {
+    localizations: {
+      zh: {
+        title: "结果",
+        fields: { symbol: "标的" },
+        emptyState: "暂无结果",
+      },
+    },
+  });
+
+  const parsed = parsePluginCatalog(value);
+  const zh = buildPluginRegistries(parsed, "zh-CN");
+  const en = buildPluginRegistries(parsed, "en");
+  assert.equal(zh.commandPalette[0]?.title, "扫描");
+  assert.equal(zh.commandPalette[0]?.configuration.inputSchema?.title, "扫描参数");
+  assert.deepEqual(
+    zh.commandPalette[0]?.configuration.inputSchema?.properties?.interval?.enumLabels,
+    ["1 分钟", "5 分钟"],
+  );
+  assert.equal(zh.sidePanel[0]?.title, "结果");
+  const zhView = zh.sidePanel[0];
+  if (!zhView || zhView.configuration.renderer === "sandbox") assert.fail("localized view missing");
+  assert.equal(zhView.configuration.fields[0]?.label, "标的");
+  assert.equal(zhView.configuration.emptyState, "暂无结果");
+  assert.equal(en.commandPalette[0]?.title, "Scan");
+  assert.equal(en.sidePanel[0]?.title, "Results");
+
+  const unknownField = structuredClone(value);
+  const viewLocalization = (unknownField.plugins[0]!.contributions[1] as unknown as {
+    localizations: Record<string, { fields: Record<string, string> }>;
+  }).localizations.zh!;
+  viewLocalization.fields = { executable: "不得进入目录" };
+  assert.throws(() => parsePluginCatalog(unknownField), /invalid/i);
+
+  const commandOnlyPayload = structuredClone(value);
+  const commandLocalization = (commandOnlyPayload.plugins[0]!.contributions[0] as unknown as {
+    localizations: Record<string, Record<string, unknown>>;
+  }).localizations["zh-CN"]!;
+  commandLocalization.fields = { source: "源码" };
+  assert.throws(() => parsePluginCatalog(commandOnlyPayload), /invalid/i);
+
+  const mismatchedEnumLabels = structuredClone(value);
+  const intervalLocalization = (mismatchedEnumLabels.plugins[0]!.contributions[0] as unknown as {
+    localizations: Record<string, {
+      schema: { properties: { interval: { enumLabels: string[] } } };
+    }>;
+  }).localizations["zh-CN"]!.schema.properties.interval;
+  intervalLocalization.enumLabels = ["1 分钟"];
+  assert.throws(() => parsePluginCatalog(mismatchedEnumLabels), /enumLabels/i);
+});
+
 test("Phase 13 compatibility catalog is strict and never enters executable registries", () => {
   const parsed = parsePluginCatalog(catalog());
   assert.equal(parsed.schemaVersion, "candlescope.plugin-catalog/2");

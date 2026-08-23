@@ -15,6 +15,7 @@
  *   - Uses K-line colors from CSS variables
  */
 
+import { t } from "../../../i18n/index.js";
 import { drawingDataPointsToCoordinates } from "./coordinateUtils.js";
 import { isRecord, parseDrawingAnchor } from "../drawingContracts.js";
 import type {
@@ -611,7 +612,7 @@ class PositionRenderer implements PrimitivePaneRenderer {
 
     // Build info lines
     const lines: PositionInfoLine[] = [];
-    lines.push({ label: "入场", value: formatPrice(entryPrice), color: "#2196f3" });
+    lines.push({ label: t("drawing.position.entry"), value: formatPrice(entryPrice), color: "#2196f3" });
 
     if (tpPrice != null) {
       const tpPct = calcPnlPct(entryPrice, tpPrice, isLong);
@@ -619,7 +620,7 @@ class PositionRenderer implements PrimitivePaneRenderer {
       // Color follows price direction: above entry = upColor, below entry = downColor
       const tpColor = tpPrice > entryPrice ? kUpColor : kDownColor;
       lines.push({
-        label: "止盈",
+        label: t("drawing.position.takeProfit"),
         value: `${formatPrice(tpPrice)} (${tpPct >= 0 ? "+" : ""}${tpPct.toFixed(2)}%)`,
         extra: tpPnl != null ? `${tpPnl >= 0 ? "+" : ""}${tpPnl.toFixed(2)}` : null,
         color: tpColor,
@@ -631,7 +632,7 @@ class PositionRenderer implements PrimitivePaneRenderer {
       const slPnl = positionSize ? (positionSize * slPct / 100) : null;
       const slColor = slPrice > entryPrice ? kUpColor : kDownColor;
       lines.push({
-        label: "止损",
+        label: t("drawing.position.stopLoss"),
         value: `${formatPrice(slPrice)} (${slPct >= 0 ? "+" : ""}${slPct.toFixed(2)}%)`,
         extra: slPnl != null ? `${slPnl >= 0 ? "+" : ""}${slPnl.toFixed(2)}` : null,
         color: slColor,
@@ -646,7 +647,7 @@ class PositionRenderer implements PrimitivePaneRenderer {
       // Color follows price direction
       const curColor = currentPrice > entryPrice ? kUpColor : kDownColor;
       lines.push({
-        label: "现价",
+        label: t("drawing.position.current"),
         value: `${formatPrice(currentPrice)} (${isProfit ? "+" : ""}${curPct.toFixed(2)}%)`,
         extra: curPnl != null ? `${isProfit ? "+" : ""}${curPnl.toFixed(2)}` : null,
         color: curColor,
@@ -654,11 +655,11 @@ class PositionRenderer implements PrimitivePaneRenderer {
     }
 
     if (rrRatio != null) {
-      lines.push({ label: "盈亏比", value: `1 : ${rrRatio.toFixed(2)}`, color: "#ffab40" });
+      lines.push({ label: t("drawing.position.rr"), value: `1 : ${rrRatio.toFixed(2)}`, color: "#ffab40" });
     }
 
     if (positionSize) {
-      lines.push({ label: "仓位", value: `$${positionSize.toFixed(0)}`, color: "#b0bec5" });
+      lines.push({ label: t("drawing.position.size"), value: `$${positionSize.toFixed(0)}`, color: "#b0bec5" });
     }
 
     if (lines.length === 0) return;

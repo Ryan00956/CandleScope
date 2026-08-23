@@ -1,4 +1,6 @@
 import type { ReactNode } from "react";
+import { getLocale, t, type MessageKey } from "../../i18n/index.js";
+import { useLocale } from "../../i18n/useLocale.js";
 import type { GcVictim } from "../../features/cache-gc/cacheGcTypes.js";
 import type {
   BackendDiagnosticsResult,
@@ -6,34 +8,34 @@ import type {
   CacheDiagnosticsRuntime,
 } from "../../features/settings/cacheDiagnosticsSettingsRuntime.js";
 
-const REASON_LABELS: Record<string, string> = {
-  "cold-cache-over-budget": "冷缓存超预算",
-  "estimated-bytes-over-budget": "估算内存超预算",
-  "cold-non-ephemeral-storage-backed": "冷缓存，可由 SQLite 回读",
-  "ephemeral-over-limit": "临时缓存超保留量",
-  "indicator-points-over-budget": "指标点数超预算",
-  "kline-bars-over-budget": "K 线根数超预算",
-  "missing-kline-dependency": "K 线依赖已不存在",
-  "minutes-tier-retention": "分钟级保留策略",
-  "hours-tier-retention": "小时级保留策略",
-  "daily-tier-retention": "日线级保留策略",
-  "sqlite-budget-pressure": "SQLite 预算压力",
-  "warm-cache-over-budget": "预热缓存超预算",
+const REASON_KEYS: Record<string, MessageKey> = {
+  "cold-cache-over-budget": "settings.diag.reason.coldOverBudget",
+  "estimated-bytes-over-budget": "settings.diag.reason.bytesOverBudget",
+  "cold-non-ephemeral-storage-backed": "settings.diag.reason.coldStorageBacked",
+  "ephemeral-over-limit": "settings.diag.reason.ephemeralOverLimit",
+  "indicator-points-over-budget": "settings.diag.reason.indicatorOverBudget",
+  "kline-bars-over-budget": "settings.diag.reason.klineOverBudget",
+  "missing-kline-dependency": "settings.diag.reason.missingKline",
+  "minutes-tier-retention": "settings.diag.reason.minutesRetention",
+  "hours-tier-retention": "settings.diag.reason.hoursRetention",
+  "daily-tier-retention": "settings.diag.reason.dailyRetention",
+  "sqlite-budget-pressure": "settings.diag.reason.sqlitePressure",
+  "warm-cache-over-budget": "settings.diag.reason.warmOverBudget",
 };
 
-const RISK_LABELS: Record<string, string> = {
-  "active-or-subscribed": "活跃/订阅中",
-  "custom-interval": "自定义周期",
-  "latest-data-close-to-now": "接近实时尾部",
-  "storage-intent": "保留意图",
+const RISK_KEYS: Record<string, MessageKey> = {
+  "active-or-subscribed": "settings.diag.risk.active",
+  "custom-interval": "settings.diag.risk.customInterval",
+  "latest-data-close-to-now": "settings.diag.risk.nearRealtime",
+  "storage-intent": "settings.diag.risk.storageIntent",
 };
 
-const WATERMARK_LABELS: Record<string, string> = {
-  unconfigured: "未设置",
-  normal: "正常",
-  high: "偏高",
-  critical: "临界",
-  over_budget: "超预算",
+const WATERMARK_KEYS: Record<string, MessageKey> = {
+  unconfigured: "settings.diag.watermark.unconfigured",
+  normal: "settings.diag.watermark.normal",
+  high: "settings.diag.watermark.high",
+  critical: "settings.diag.watermark.critical",
+  over_budget: "settings.diag.watermark.overBudget",
 };
 
 function formatBytes(bytes: unknown): string {
@@ -45,22 +47,27 @@ function formatBytes(bytes: unknown): string {
 }
 
 function formatNumber(value: unknown): string {
-  return Number(value || 0).toLocaleString();
+  return Number(value || 0).toLocaleString(getLocale());
 }
 
 function reasonLabel(reason: unknown): string {
   const key = typeof reason === "string" ? reason : "";
-  return REASON_LABELS[key] || key || "--";
+  const messageKey = REASON_KEYS[key];
+  return messageKey ? t(messageKey) : (key || "--");
 }
 
 function riskLabel(flags: string[] = []): string {
-  if (!flags.length) return "常规";
-  return flags.map((flag) => RISK_LABELS[flag] || flag).join(" / ");
+  if (!flags.length) return t("settings.diag.routine");
+  return flags.map((flag) => {
+    const messageKey = RISK_KEYS[flag];
+    return messageKey ? t(messageKey) : flag;
+  }).join(" / ");
 }
 
 function watermarkLabel(level: unknown): string {
   const key = typeof level === "string" ? level : "";
-  return WATERMARK_LABELS[key] || key || "--";
+  const messageKey = WATERMARK_KEYS[key];
+  return messageKey ? t(messageKey) : (key || "--");
 }
 
 interface StatCardProps {
@@ -100,14 +107,14 @@ interface ScopeSummaryCardProps {
 function ScopeSummaryCard({ title, mode, plan, result, metricLabel, metricValue }: ScopeSummaryCardProps) {
   const plannedCount = countVictims(plan);
   const hasResult = Boolean(result);
-  let status = "待预估";
+  let status = t("settings.diag.pending");
   let detail = mode;
   if (plannedCount) {
-    status = "已预估";
-    detail = `${formatNumber(plannedCount)} 个候选`;
+    status = t("settings.diag.planned");
+    detail = t("settings.diag.candidates", { count: formatNumber(plannedCount) });
   }
   if (hasResult) {
-    status = "已执行";
+    status = t("settings.diag.executed");
     detail = metricValue;
   }
   return (
@@ -140,7 +147,7 @@ interface GcPlanRowsProps {
 
 function GcPlanRows({ victims = [] }: GcPlanRowsProps) {
   if (!victims.length) {
-    return <div className="st-diagnostics-empty">当前预算下没有可建议回收的缓存</div>;
+    return <div className="st-diagnostics-empty">{t("settings.diag.empty")}</div>;
   }
   return (
     <div className="st-diagnostics-list">
@@ -167,7 +174,7 @@ function TopEntries({ entries = [], metric = "bars" }: TopEntriesProps) {
     .sort((left, right) => Number(right[metric] || 0) - Number(left[metric] || 0))
     .slice(0, 5);
   if (!sorted.length) {
-    return <div className="st-diagnostics-empty">暂无缓存条目</div>;
+    return <div className="st-diagnostics-empty">{t("settings.diag.noEntries")}</div>;
   }
   return (
     <div className="st-diagnostics-list">
@@ -225,6 +232,7 @@ export default function CacheDiagnosticsPanel({
   storageGcResult,
   storageVacuumResult,
 }: CacheDiagnosticsPanelProps) {
+  useLocale();
   const frontend = frontendDiagnostics || {};
   const owners = frontend.owners || {};
   const chart = owners.chart || {};
@@ -246,175 +254,175 @@ export default function CacheDiagnosticsPanel({
     <div className="st-group">
       <div className="st-group-title-row">
         <div className="st-group-title" style={{ marginBottom: 0 }}>
-          缓存与存储 GC
-          <span className="st-badge st-badge-memory">分层</span>
+          {t("settings.diag.title")}
+          <span className="st-badge st-badge-memory">{t("settings.diag.layered")}</span>
         </div>
         <button className="st-advanced-toggle" onClick={() => onRefresh?.()} disabled={loading}>
-          {loading ? "刷新中..." : "刷新"}
+          {loading ? t("settings.diag.refreshing") : t("settings.diag.refresh")}
         </button>
       </div>
       <div className="st-group-desc">
-        前端、后端内存和 SQLite 均支持 dry-run 后手动清理；数据库 VACUUM 是单独动作，不会跟普通清理混在一起。
+        {t("settings.diag.desc")}
       </div>
 
       {error ? <div className="st-info-box st-info-warn">{error}</div> : null}
 
       <div className="st-gc-scope-grid">
         <ScopeSummaryCard
-          title="前端内存"
-          mode="浏览器缓存"
+          title={t("settings.diag.frontendMem")}
+          mode={t("settings.diag.browserCache")}
           plan={frontendGcPlan}
           result={frontendGcResult}
-          metricLabel="释放"
+          metricLabel={t("settings.diag.freed")}
           metricValue={formatBytes(frontendGcResult?.removedEstimatedBytes)}
         />
         <ScopeSummaryCard
-          title="后端内存"
+          title={t("settings.diag.backendMem")}
           mode="DataManager"
           plan={backendMemoryGcPlan}
           result={backendMemoryGcResult}
-          metricLabel="释放"
+          metricLabel={t("settings.diag.freed")}
           metricValue={`${formatNumber(backendMemoryGcResult?.removed_bars)} bars`}
         />
         <ScopeSummaryCard
-          title="SQLite"
-          mode="持久化存储"
+          title={t("settings.diag.sqlite")}
+          mode={t("settings.diag.persistent")}
           plan={storageGcPlan}
           result={storageGcResult}
-          metricLabel="删除"
-          metricValue={`${formatNumber(storageGcResult?.deleted_rows)} 行`}
+          metricLabel={t("settings.diag.deleted")}
+          metricValue={t("settings.diag.rows", { count: formatNumber(storageGcResult?.deleted_rows) })}
         />
       </div>
 
       <div className="st-diagnostics-section">
-        <SectionTitle title="前端内存缓存" badge="本地" />
+        <SectionTitle title={t("settings.diag.frontendCache")} badge={t("settings.diag.local")} />
         <div className="st-diagnostics-grid">
-          <StatCard label="主图 K 线" value={`${formatNumber(chart.totalBars)} 根`} detail={`${formatNumber(chart.seriesCount)} 个 series`} />
-          <StatCard label="自选 Full" value={`${formatNumber(watchlist.totalBars)} 根`} detail={`${formatNumber(watchlist.seriesCount)} 个 series`} />
-          <StatCard label="指标结果" value={`${formatNumber(indicators.totalPoints)} 点`} detail={`${formatNumber(indicators.entryCount)} 个 entry`} />
-          <StatCard label="估算内存" value={formatBytes(frontend.estimatedBytes)} detail="浏览器侧粗估" />
+          <StatCard label={t("settings.diag.chartBars")} value={t("settings.diag.barsUnit", { count: formatNumber(chart.totalBars) })} detail={t("settings.diag.seriesCount", { count: formatNumber(chart.seriesCount) })} />
+          <StatCard label={t("settings.diag.watchlistFull")} value={t("settings.diag.barsUnit", { count: formatNumber(watchlist.totalBars) })} detail={t("settings.diag.seriesCount", { count: formatNumber(watchlist.seriesCount) })} />
+          <StatCard label={t("settings.diag.indicatorResults")} value={t("settings.diag.pointsUnit", { count: formatNumber(indicators.totalPoints) })} detail={t("settings.diag.entriesUnit", { count: formatNumber(indicators.entryCount) })} />
+          <StatCard label={t("settings.diag.estimatedMem")} value={formatBytes(frontend.estimatedBytes)} detail={t("settings.diag.browserEstimate")} />
         </div>
         <TopEntries entries={[...(chart.entries || []), ...(watchlist.entries || [])]} metric="bars" />
         <div className="st-actions-row">
           <button className="st-btn st-btn-secondary" onClick={() => onPlanFrontendGc?.()}>
-            预估前端缓存清理
+            {t("settings.diag.planFrontend")}
           </button>
           <button
             className="st-btn st-btn-accent"
             onClick={() => onRunFrontendGc?.()}
             disabled={!canRunFrontendGc}
           >
-            清理前端 warm/cold 缓存
+            {t("settings.diag.runFrontend")}
           </button>
         </div>
         {frontendGcPlan ? (
           <div className="st-diagnostics-plan">
             <div className="st-diagnostics-grid">
-              <StatCard label="可释放估算" value={formatBytes(frontendGcPlan.wouldFreeEstimatedBytes)} detail={`${formatNumber(frontendGcPlan.victims?.length)} 个条目`} />
-              <StatCard label="K 线根数" value={formatNumber(frontendGcPlan.wouldFreeBars)} detail={`压力 ${formatNumber(frontendGcPlan.pressure?.klineBars)} 根`} />
-              <StatCard label="指标点数" value={formatNumber(frontendGcPlan.wouldFreeIndicatorPoints)} detail={`压力 ${formatNumber(frontendGcPlan.pressure?.indicatorPoints)} 点`} />
-              <StatCard label="保护条目" value={formatNumber(frontendGcPlan.protectedCount)} detail="active/subscribed" />
+              <StatCard label={t("settings.diag.wouldFree")} value={formatBytes(frontendGcPlan.wouldFreeEstimatedBytes)} detail={t("settings.diag.entriesCount", { count: formatNumber(frontendGcPlan.victims?.length) })} />
+              <StatCard label={t("settings.diag.barCount")} value={formatNumber(frontendGcPlan.wouldFreeBars)} detail={t("settings.diag.pressureBars", { count: formatNumber(frontendGcPlan.pressure?.klineBars) })} />
+              <StatCard label={t("settings.diag.indicatorPoints")} value={formatNumber(frontendGcPlan.wouldFreeIndicatorPoints)} detail={t("settings.diag.pressurePoints", { count: formatNumber(frontendGcPlan.pressure?.indicatorPoints) })} />
+              <StatCard label={t("settings.diag.protectedEntries")} value={formatNumber(frontendGcPlan.protectedCount)} detail="active/subscribed" />
             </div>
             <GcPlanRows victims={frontendGcPlan.victims || []} />
           </div>
         ) : null}
         {frontendGcResult ? (
           <div className="st-info-box">
-            <span className="st-info-label">清理结果</span>
-            <span>移除 {formatNumber(frontendGcResult.removedCount)} 个条目</span>
-            <span>释放估算 {formatBytes(frontendGcResult.removedEstimatedBytes)}</span>
-            <span>K 线 {formatNumber(frontendGcResult.removedBars)} 根</span>
-            <span>指标 {formatNumber(frontendGcResult.removedIndicatorPoints)} 点</span>
+            <span className="st-info-label">{t("settings.diag.gcResult")}</span>
+            <span>{t("settings.diag.removedEntries", { count: formatNumber(frontendGcResult.removedCount) })}</span>
+            <span>{t("settings.diag.freedEst", { bytes: formatBytes(frontendGcResult.removedEstimatedBytes) })}</span>
+            <span>{t("settings.diag.barsRemoved", { count: formatNumber(frontendGcResult.removedBars) })}</span>
+            <span>{t("settings.diag.pointsRemoved", { count: formatNumber(frontendGcResult.removedIndicatorPoints) })}</span>
           </div>
         ) : null}
       </div>
 
       <div className="st-diagnostics-section">
-        <SectionTitle title="后端内存缓存" badge="进程内" />
+        <SectionTitle title={t("settings.diag.backendCache")} badge={t("settings.diag.inProcess")} />
         <div className="st-diagnostics-grid">
-          <StatCard label="DataManager series" value={formatNumber(backendCache.total_series)} detail={`上限 ${formatNumber(backendCache.max_series)}`} />
-          <StatCard label="DataManager bars" value={formatNumber(backendCache.total_bars)} detail={`每 series ${formatNumber(backendCache.max_bars_per_series)}`} />
-          <StatCard label="Cache 命中" value={formatNumber(backendCache.hits)} detail={`${formatNumber(backendCache.misses)} 次 miss`} />
-          <StatCard label="Pyne cache" value={formatNumber(pyneCache.size ?? pyneCache.items ?? 0)} detail={`上限 ${formatNumber(pyneCache.max_items ?? pyneCache.maxItems ?? 0)}`} />
+          <StatCard label="DataManager series" value={formatNumber(backendCache.total_series)} detail={t("settings.diag.cap", { count: formatNumber(backendCache.max_series) })} />
+          <StatCard label="DataManager bars" value={formatNumber(backendCache.total_bars)} detail={t("settings.diag.perSeries", { count: formatNumber(backendCache.max_bars_per_series) })} />
+          <StatCard label={t("settings.diag.cacheHits")} value={formatNumber(backendCache.hits)} detail={t("settings.diag.misses", { count: formatNumber(backendCache.misses) })} />
+          <StatCard label="Pyne cache" value={formatNumber(pyneCache.size ?? pyneCache.items ?? 0)} detail={t("settings.diag.cap", { count: formatNumber(pyneCache.max_items ?? pyneCache.maxItems ?? 0) })} />
         </div>
         <div className="st-actions-row">
           <button className="st-btn st-btn-secondary" onClick={() => onPlanBackendMemoryGc?.()} disabled={loading}>
-            预估后端内存清理
+            {t("settings.diag.planBackend")}
           </button>
           <button
             className="st-btn st-btn-accent"
             onClick={() => onRunBackendMemoryGc?.()}
             disabled={loading || !canRunBackendMemoryGc}
           >
-            清理后端内存缓存
+            {t("settings.diag.runBackend")}
           </button>
         </div>
         {backendMemoryGcPlan ? (
           <div className="st-diagnostics-plan">
             <div className="st-diagnostics-grid">
-              <StatCard label="可释放估算" value={formatBytes(backendMemoryGcPlan.would_free_estimated_bytes)} detail={`${formatNumber(backendMemoryGcPlan.victims?.length)} 个条目`} />
-              <StatCard label="可释放 bars" value={formatNumber(backendMemoryGcPlan.would_free_bars)} detail={`${formatNumber(backendMemoryGcPlan.would_remove_series)} 个 series`} />
-              <StatCard label="受保护" value={formatNumber(backendMemoryGcPlan.protected_count)} detail="active/subscribed" />
-              <StatCard label="压力" value={formatNumber(backendMemoryGcPlan.pressure?.total_bars)} detail={`上限 ${formatNumber(backendMemoryGcPlan.pressure?.max_total_bars)}`} />
+              <StatCard label={t("settings.diag.wouldFree")} value={formatBytes(backendMemoryGcPlan.would_free_estimated_bytes)} detail={t("settings.diag.entriesCount", { count: formatNumber(backendMemoryGcPlan.victims?.length) })} />
+              <StatCard label={t("settings.diag.wouldFreeBars")} value={formatNumber(backendMemoryGcPlan.would_free_bars)} detail={t("settings.diag.seriesUnit", { count: formatNumber(backendMemoryGcPlan.would_remove_series) })} />
+              <StatCard label={t("settings.diag.protected")} value={formatNumber(backendMemoryGcPlan.protected_count)} detail="active/subscribed" />
+              <StatCard label={t("settings.diag.pressure")} value={formatNumber(backendMemoryGcPlan.pressure?.total_bars)} detail={t("settings.diag.cap", { count: formatNumber(backendMemoryGcPlan.pressure?.max_total_bars) })} />
             </div>
             <GcPlanRows victims={backendMemoryGcPlan.victims || []} />
           </div>
         ) : null}
         {backendMemoryGcResult ? (
           <div className="st-info-box">
-            <span className="st-info-label">后端清理结果</span>
-            <span>删除 {formatNumber(backendMemoryGcResult.removed_series)} 个 series</span>
-            <span>裁剪 {formatNumber(backendMemoryGcResult.trimmed_series)} 个 series</span>
-            <span>释放 {formatNumber(backendMemoryGcResult.removed_bars)} 根 bars</span>
-            <span>估算 {formatBytes(backendMemoryGcResult.removed_estimated_bytes)}</span>
+            <span className="st-info-label">{t("settings.diag.backendResult")}</span>
+            <span>{t("settings.diag.removedSeries", { count: formatNumber(backendMemoryGcResult.removed_series) })}</span>
+            <span>{t("settings.diag.trimmedSeries", { count: formatNumber(backendMemoryGcResult.trimmed_series) })}</span>
+            <span>{t("settings.diag.freedBars", { count: formatNumber(backendMemoryGcResult.removed_bars) })}</span>
+            <span>{t("settings.diag.estimated", { bytes: formatBytes(backendMemoryGcResult.removed_estimated_bytes) })}</span>
           </div>
         ) : null}
       </div>
 
       <div className="st-diagnostics-section">
-        <SectionTitle title="SQLite 存储" badge="持久化" tone="db" />
+        <SectionTitle title={t("settings.diag.sqliteStorage")} badge={t("settings.diag.persistentBadge")} tone="db" />
         <div className="st-diagnostics-grid">
-          <StatCard label="DB 文件" value={formatBytes(storageFiles.db_size_bytes)} detail={storageFiles.exists ? "已创建" : "未创建"} />
-          <StatCard label="WAL 文件" value={formatBytes(storageFiles.wal_size_bytes)} detail="只读检测" />
-          <StatCard label="Series" value={formatNumber(storageSeries.series_count)} detail={`${formatNumber(storageSeries.total_rows)} 行`} />
-          <StatCard label="总占用" value={formatBytes(storageFiles.total_size_bytes)} detail="DB + WAL + SHM" />
+          <StatCard label={t("settings.diag.dbFile")} value={formatBytes(storageFiles.db_size_bytes)} detail={storageFiles.exists ? t("settings.diag.created") : t("settings.diag.notCreated")} />
+          <StatCard label={t("settings.diag.walFile")} value={formatBytes(storageFiles.wal_size_bytes)} detail={t("settings.diag.readonly")} />
+          <StatCard label="Series" value={formatNumber(storageSeries.series_count)} detail={t("settings.diag.totalRows", { count: formatNumber(storageSeries.total_rows) })} />
+          <StatCard label={t("settings.diag.totalSize")} value={formatBytes(storageFiles.total_size_bytes)} detail="DB + WAL + SHM" />
           <StatCard
-            label="SQLite 预算"
-            value={storageWatermarks.budget_bytes ? formatBytes(storageWatermarks.budget_bytes) : "未设置"}
-            detail={`水位 ${watermarkLabel(storageWatermarks.level)}`}
+            label={t("settings.diag.sqliteBudget")}
+            value={storageWatermarks.budget_bytes ? formatBytes(storageWatermarks.budget_bytes) : t("settings.diag.unset")}
+            detail={t("settings.diag.watermark", { level: watermarkLabel(storageWatermarks.level) })}
           />
         </div>
         <div className="st-actions-row">
           <button className="st-btn st-btn-secondary" onClick={() => onPlanStorageGc?.()} disabled={loading}>
-            预估数据库清理
+            {t("settings.diag.planStorage")}
           </button>
           <button
             className="st-btn st-btn-warn"
             onClick={() => onRunStorageGc?.()}
             disabled={loading || !canRunStorageGc}
           >
-            执行数据库清理
+            {t("settings.diag.runStorage")}
           </button>
           <button
             className="st-btn st-btn-accent"
             onClick={() => onVacuumStorage?.()}
             disabled={loading || !canVacuumStorage}
           >
-            压缩数据库文件
+            {t("settings.diag.vacuum")}
           </button>
         </div>
         {storageGcPlan ? (
           <div className="st-diagnostics-plan">
             <div className="st-diagnostics-grid">
-              <StatCard label="将删除行数" value={formatNumber(storageGcPlan.would_delete_rows)} detail={`${formatNumber(storageGcPlan.victim_count)} 个 series`} />
-              <StatCard label="释放估算" value={formatBytes(storageGcPlan.would_free_estimated_bytes)} detail="粗略按总大小/总行数估算" />
-              <StatCard label="预算水位" value={watermarkLabel(storageGcPlan.watermarks?.level)} detail={`${((storageGcPlan.watermarks?.budget_usage_ratio || 0) * 100).toFixed(1)}%`} />
-              <StatCard label="VACUUM" value={storageGcPlan.vacuum_recommended ? "建议" : "手动可选"} detail="不会自动执行" />
+              <StatCard label={t("settings.diag.wouldDeleteRows")} value={formatNumber(storageGcPlan.would_delete_rows)} detail={t("settings.diag.seriesUnit", { count: formatNumber(storageGcPlan.victim_count) })} />
+              <StatCard label={t("settings.diag.freeEst")} value={formatBytes(storageGcPlan.would_free_estimated_bytes)} detail={t("settings.diag.roughEst")} />
+              <StatCard label={t("settings.diag.budgetLevel")} value={watermarkLabel(storageGcPlan.watermarks?.level)} detail={`${((storageGcPlan.watermarks?.budget_usage_ratio || 0) * 100).toFixed(1)}%`} />
+              <StatCard label={t("settings.diag.vacuumLabel")} value={storageGcPlan.vacuum_recommended ? t("settings.diag.recommended") : t("settings.diag.optional")} detail={t("settings.diag.notAuto")} />
             </div>
             {storageGcPlan.unable_to_reach_budget ? (
               <div className="st-info-box st-info-warn">
-                <span className="st-info-label">预算提醒</span>
-                <span>受保护数据过多，当前清理计划预计仍差 {formatBytes(storageGcPlan.budget_gap_bytes)} 才能回到目标水位；自动行删除默认关闭，需后端显式启用</span>
+                <span className="st-info-label">{t("settings.diag.budgetWarn")}</span>
+                <span>{t("settings.diag.budgetGap", { bytes: formatBytes(storageGcPlan.budget_gap_bytes) })}</span>
               </div>
             ) : null}
             {storageGcPlan.series?.length ? (
@@ -423,31 +431,31 @@ export default function CacheDiagnosticsPanel({
                   <div key={`${entry.owner}:${entry.key}`} className="st-diagnostics-row st-diagnostics-row-storage">
                     <span className="st-diagnostics-row-key">{entry.key}</span>
                     <span>{reasonLabel(entry.reason)}</span>
-                    <span>{formatNumber(entry.would_delete_rows)} 行</span>
+                    <span>{t("settings.diag.rows", { count: formatNumber(entry.would_delete_rows) })}</span>
                     <span>{riskLabel(entry.risk_flags)}</span>
                   </div>
                 ))}
               </div>
             ) : (
-              <div className="st-diagnostics-empty">当前预算与高级行数策略下没有会被删除的数据库行</div>
+              <div className="st-diagnostics-empty">{t("settings.diag.noStorageVictims")}</div>
             )}
           </div>
         ) : null}
         {storageGcResult ? (
           <div className="st-info-box">
-            <span className="st-info-label">数据库清理结果</span>
-            <span>删除 {formatNumber(storageGcResult.deleted_rows)} 行</span>
-            <span>影响 {formatNumber(storageGcResult.affected_series)} 个 series</span>
-            <span>耗时 {formatNumber(storageGcResult.elapsed_ms)} ms</span>
-            <span>Checkpoint {storageGcResult.checkpoint_result ? "已执行" : "未执行"}</span>
+            <span className="st-info-label">{t("settings.diag.storageResult")}</span>
+            <span>{t("settings.diag.deletedRows", { count: formatNumber(storageGcResult.deleted_rows) })}</span>
+            <span>{t("settings.diag.affectedSeries", { count: formatNumber(storageGcResult.affected_series) })}</span>
+            <span>{t("settings.diag.elapsed", { count: formatNumber(storageGcResult.elapsed_ms) })}</span>
+            <span>{storageGcResult.checkpoint_result ? t("settings.diag.checkpointDone") : t("settings.diag.checkpointSkip")}</span>
           </div>
         ) : null}
         {storageVacuumResult ? (
           <div className="st-info-box">
-            <span className="st-info-label">VACUUM 结果</span>
+            <span className="st-info-label">{t("settings.diag.vacuumResult")}</span>
             <span>{storageVacuumResult.status || "ok"}</span>
-            <span>耗时 {formatNumber(storageVacuumResult.elapsed_ms)} ms</span>
-            <span>当前总占用 {formatBytes(storageVacuumResult.storage_files_after?.total_size_bytes)}</span>
+            <span>{t("settings.diag.elapsed", { count: formatNumber(storageVacuumResult.elapsed_ms) })}</span>
+            <span>{t("settings.diag.currentTotal", { bytes: formatBytes(storageVacuumResult.storage_files_after?.total_size_bytes) })}</span>
           </div>
         ) : null}
         <TopEntries entries={(storageSeries.largest_series || []).map((item) => ({

@@ -1542,7 +1542,7 @@ def create_core_plugin_router() -> APIRouter:
     async def invoke_command(contribution_id: str, request: Request) -> dict[str, Any]:
         platform = await _guarded_platform(request)
         try:
-            value = await _body(request, required={"input"})
+            value = await _body(request, required={"input"}, optional={"locale"})
             if not isinstance(value["input"], dict):
                 raise HTTPException(
                     status_code=400, detail="command input must be an object"
@@ -1553,6 +1553,7 @@ def create_core_plugin_router() -> APIRouter:
                 value["input"],
                 user_action=True,
                 trace_id=f"management-{action}",
+                locale=value.get("locale"),
             )
             return {"result": result}
         except HTTPException:

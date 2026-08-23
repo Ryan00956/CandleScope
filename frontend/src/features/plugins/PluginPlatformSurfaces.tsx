@@ -1,8 +1,11 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { t } from "../../i18n/index.js";
+import { useLocale } from "../../i18n/useLocale.js";
 import { PluginNativeField } from "./PluginNativeFields.js";
 import SandboxPluginFrame from "./SandboxPluginFrame.js";
 import { defaultForPluginSchema } from "./pluginSchemaDefaults.js";
 import { formatPluginValue } from "./pluginViewFormatting.js";
+import { localizePluginContribution } from "./pluginLocalization.js";
 import type {
   JsonValue,
   PluginCommandContribution,
@@ -48,7 +51,7 @@ export class PluginUiErrorBoundary extends React.Component<
 
   render() {
     return this.state.failed
-      ? <div className="plugin-ui-fallback" role="alert">Plugin UI unavailable. CandleScope remains operational.</div>
+      ? <div className="plugin-ui-fallback" role="alert">{t("plugin.host.uiUnavailable")}</div>
       : this.props.children;
   }
 }
@@ -127,14 +130,14 @@ async function writeSelectedDestination(
     || receipt.name !== config.suggestedName
     || !config.accept.includes(receipt.mediaType)
     || receipt.size > config.maxBytes
-  ) throw new Error("Plugin file download exceeds the selected destination contract");
+  ) throw new Error(t("plugin.host.fileDownloadContract"));
   const blob = await runtime.actions.downloadUserFile(pluginId, receipt.downloadId);
   if (blob.size !== receipt.size || blob.size > config.maxBytes) {
-    throw new Error("Plugin file download size does not match its receipt");
+    throw new Error(t("plugin.host.fileReceiptMismatch"));
   }
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", await blob.arrayBuffer()));
   const actual = `sha256:${[...digest].map((item) => item.toString(16).padStart(2, "0")).join("")}`;
-  if (actual !== receipt.sha256) throw new Error("Plugin file download failed integrity validation");
+  if (actual !== receipt.sha256) throw new Error(t("plugin.host.fileIntegrityFailed"));
   const writable = await destination.createWritable();
   try {
     await writable.write(blob);
@@ -155,7 +158,7 @@ function Modal({ title, onClose, children, testId }: React.PropsWithChildren<{
       if (event.target === event.currentTarget) onClose();
     }}>
       <section className="plugin-modal" role="dialog" aria-modal="true" aria-label={title} data-testid={testId}>
-        <header><h2>{title}</h2><button type="button" aria-label="Close" onClick={onClose}>×</button></header>
+        <header><h2>{title}</h2><button type="button" aria-label={t("plugin.host.close")} onClick={onClose}>×</button></header>
         <div className="plugin-modal-body">{children}</div>
       </section>
     </div>
@@ -163,6 +166,7 @@ function Modal({ title, onClose, children, testId }: React.PropsWithChildren<{
 }
 
 function CommandPalette({ runtime }: { runtime: PluginPlatformRuntime }) {
+  const locale = useLocale();
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [input, setInput] = useState<Record<string, JsonValue>>({});
@@ -186,8 +190,8 @@ function CommandPalette({ runtime }: { runtime: PluginPlatformRuntime }) {
   const nativeSchema = selected ? commandNativeSchema(selected) : null;
   const filesReady = fileInputs.every((item) => typeof input[item.field] === "string" && String(input[item.field]).length > 0);
   return (
-    <Modal title="Plugin commands" onClose={runtime.actions.closePalette} testId="plugin-command-palette">
-      <input autoFocus className="plugin-command-search" placeholder="Search commands" value={query} onChange={(event) => setQuery(event.target.value)} />
+    <Modal title={t("plugin.host.paletteTitle")} onClose={runtime.actions.closePalette} testId="plugin-command-palette">
+      <input autoFocus className="plugin-command-search" placeholder={t("plugin.host.searchCommands")} value={query} onChange={(event) => setQuery(event.target.value)} />
       <div className="plugin-command-layout">
         <nav>
           {commands.map((command) => (
@@ -208,7 +212,7 @@ function CommandPalette({ runtime }: { runtime: PluginPlatformRuntime }) {
           ))}
         </nav>
         <div className="plugin-command-form">
-          {!selected && <p>Select a command.</p>}
+          {!selected && <p>{t("plugin.host.selectCommand")}</p>}
           {selected && (
             <>
               {nativeSchema && (
@@ -216,6 +220,7 @@ function CommandPalette({ runtime }: { runtime: PluginPlatformRuntime }) {
                   name="root"
                   schema={nativeSchema}
                   value={input}
+                  locale={locale}
                   onChange={(value) => {
                     if (value && typeof value === "object" && !Array.isArray(value)) setInput(value);
                   }}
@@ -223,8 +228,8 @@ function CommandPalette({ runtime }: { runtime: PluginPlatformRuntime }) {
               )}
               {fileInputs.map((fileInput) => (
                 <div className="plugin-command-file" key={fileInput.field} data-plugin-file-mode={fileInput.mode}>
-                  <strong>{fileInput.mode === "open" ? "Select input file" : "Select save destination"}</strong>
-                  <small>{fileInput.accept.join(", ")} · maximum {fileInput.maxBytes} bytes · one use</small>
+                  <strong>{fileInput.mode === "open" ? t("plugin.host.selectInputFile") : t("plugin.host.selectSaveDestination")}</strong>
+                  <small>{t("plugin.host.fileContract", { types: fileInput.accept.join(", "), bytes: fileInput.maxBytes })}</small>
                   {fileInput.mode === "open" ? (
                     <input
                       type="file"
@@ -235,16 +240,16 @@ function CommandPalette({ runtime }: { runtime: PluginPlatformRuntime }) {
                         event.target.value = "";
                         if (!file) return;
                         if (!fileInput.accept.includes(file.type) || file.size < 1 || file.size > fileInput.maxBytes) {
-                          setFileStatus((current) => ({ ...current, [fileInput.field]: "File type or size is outside the declared scope." }));
+                          setFileStatus((current) => ({ ...current, [fileInput.field]: t("plugin.host.fileOutOfScope") }));
                           return;
                         }
                         setFileBusy(fileInput.field);
                         try {
                           const selection = await runtime.actions.stageUserFile(selected.id, fileInput.field, file);
                           setInput((current) => ({ ...current, [fileInput.field]: selection.handle }));
-                          setFileStatus((current) => ({ ...current, [fileInput.field]: `${selection.name} selected for one read.` }));
+                          setFileStatus((current) => ({ ...current, [fileInput.field]: t("plugin.host.fileSelectedRead", { name: selection.name }) }));
                         } catch (error) {
-                          setFileStatus((current) => ({ ...current, [fileInput.field]: error instanceof Error ? error.message : "File selection failed." }));
+                          setFileStatus((current) => ({ ...current, [fileInput.field]: error instanceof Error ? error.message : t("plugin.host.fileSelectionFailed") }));
                         } finally {
                           setFileBusy(null);
                         }
@@ -257,7 +262,7 @@ function CommandPalette({ runtime }: { runtime: PluginPlatformRuntime }) {
                       onClick={async () => {
                         const picker = (window as unknown as { showSaveFilePicker?: NativeSavePicker }).showSaveFilePicker;
                         if (!picker || !fileInput.suggestedName) {
-                          setFileStatus((current) => ({ ...current, [fileInput.field]: "A native save picker is required." }));
+                          setFileStatus((current) => ({ ...current, [fileInput.field]: t("plugin.host.nativeSaveRequired") }));
                           return;
                         }
                         setFileBusy(fileInput.field);
@@ -266,15 +271,15 @@ function CommandPalette({ runtime }: { runtime: PluginPlatformRuntime }) {
                           const selection = await runtime.actions.prepareUserFileSave(selected.id, fileInput.field);
                           saveDestinations.current.set(fileInput.field, destination);
                           setInput((current) => ({ ...current, [fileInput.field]: selection.handle }));
-                          setFileStatus((current) => ({ ...current, [fileInput.field]: `${selection.name} selected for one write.` }));
+                          setFileStatus((current) => ({ ...current, [fileInput.field]: t("plugin.host.fileSelectedWrite", { name: selection.name }) }));
                         } catch (error) {
-                          setFileStatus((current) => ({ ...current, [fileInput.field]: error instanceof Error ? error.message : "Save destination was not selected." }));
+                          setFileStatus((current) => ({ ...current, [fileInput.field]: error instanceof Error ? error.message : t("plugin.host.saveNotSelected") }));
                         } finally {
                           setFileBusy(null);
                         }
                       }}
                     >
-                      Choose destination…
+                      {t("plugin.host.chooseDestination")}
                     </button>
                   )}
                   {fileStatus[fileInput.field] && <span role="status">{fileStatus[fileInput.field]}</span>}
@@ -307,7 +312,7 @@ function CommandPalette({ runtime }: { runtime: PluginPlatformRuntime }) {
                         ...current,
                         [statusField]: error instanceof Error
                           ? error.message
-                          : "The command or selected file operation failed.",
+                          : t("plugin.host.commandFileFailed"),
                       }));
                     }
                     setInput((current) => {
@@ -321,9 +326,9 @@ function CommandPalette({ runtime }: { runtime: PluginPlatformRuntime }) {
                   }
                 }}
               >
-                {running ? "Running…" : "Run command"}
+                {running ? t("plugin.host.running") : t("plugin.host.runCommand")}
               </button>
-              {!runtime.view.managementAvailable && <small>Trusted desktop management session required.</small>}
+              {!runtime.view.managementAvailable && <small>{t("plugin.host.managementRequired")}</small>}
             </>
           )}
         </div>
@@ -336,6 +341,7 @@ function SettingsSurface({ runtime, contribution }: {
   runtime: PluginPlatformRuntime;
   contribution: PluginSettingsContribution;
 }) {
+  const locale = useLocale();
   const [value, setValue] = useState<Record<string, JsonValue>>(contribution.configuration.defaults);
   const [loading, setLoading] = useState(runtime.view.managementAvailable);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -348,19 +354,20 @@ function SettingsSurface({ runtime, contribution }: {
     setLoadError(null);
     readSettings(contribution.id)
       .then((next) => { if (active) setValue(next); })
-      .catch(() => { if (active) setLoadError("Plugin settings could not be loaded. Saving is disabled."); })
+      .catch(() => { if (active) setLoadError(t("plugin.host.settingsLoadFailed")); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, [contribution.id, readSettings, runtime.view.managementAvailable]);
   return (
     <Modal title={contribution.title} onClose={runtime.actions.closeSettings} testId="plugin-settings">
-      {!runtime.view.managementAvailable && <p>Settings are read-only until a trusted desktop management session is injected.</p>}
+      {!runtime.view.managementAvailable && <p>{t("plugin.host.settingsReadonly")}</p>}
       {loadError && <p role="alert">{loadError}</p>}
-      {loading ? <p>Loading settings…</p> : (
+      {loading ? <p>{t("plugin.host.settingsLoading")}</p> : (
         <PluginNativeField
           name="root"
           schema={contribution.configuration.schema}
           value={value}
+          locale={locale}
           onChange={(next) => {
             if (next && typeof next === "object" && !Array.isArray(next)) setValue(next);
           }}
@@ -375,7 +382,7 @@ function SettingsSurface({ runtime, contribution }: {
           finally { setSaving(false); }
         }}
       >
-        {saving ? "Saving…" : "Save settings"}
+        {saving ? t("plugin.host.saving") : t("plugin.host.saveSettings")}
       </button>
     </Modal>
   );
@@ -386,7 +393,7 @@ function ViewContent({ contribution, projection }: {
   projection: PluginViewProjection | undefined;
 }) {
   if (!projection || projection.state === "empty") return <p>{contribution.configuration.emptyState}</p>;
-  if (projection.state === "error") return <p role="alert">This plugin view returned invalid data and was isolated.</p>;
+  if (projection.state === "error") return <p role="alert">{t("plugin.host.viewInvalid")}</p>;
   if ("rows" in projection.data) {
     if (contribution.configuration.renderer === "list") {
       return (
@@ -435,7 +442,7 @@ function ViewSurface({ runtime, contribution }: {
         data-plugin-renderer="sandbox"
         aria-label={contribution.title}
       >
-        <header><h2>{contribution.title}</h2><button type="button" aria-label="Close" onClick={runtime.actions.closeView}>×</button></header>
+        <header><h2>{contribution.title}</h2><button type="button" aria-label={t("plugin.host.close")} onClick={runtime.actions.closeView}>×</button></header>
         <PluginUiErrorBoundary>
           <SandboxPluginFrame runtime={runtime} contribution={contribution} />
         </PluginUiErrorBoundary>
@@ -462,10 +469,10 @@ function ViewSurface({ runtime, contribution }: {
       data-plugin-view={contribution.id}
       aria-label={contribution.title}
     >
-      <header><h2>{contribution.title}</h2><button type="button" aria-label="Close" onClick={runtime.actions.closeView}>×</button></header>
+      <header><h2>{contribution.title}</h2><button type="button" aria-label={t("plugin.host.close")} onClick={runtime.actions.closeView}>×</button></header>
       <PluginUiErrorBoundary>
         {projectionMismatch
-          ? <p role="alert">This plugin view returned mismatched metadata and was isolated.</p>
+          ? <p role="alert">{t("plugin.host.viewMetadataMismatch")}</p>
           : <ViewContent contribution={contribution} projection={projection} />}
       </PluginUiErrorBoundary>
       {primaryCommand && (
@@ -500,7 +507,7 @@ function PermissionRows({ runtime, detail, reload }: {
       // Runtime publishes a bounded notice and leaves the prior detail visible.
     }
   };
-  if (!permissions.length) return <p>No requested permissions.</p>;
+  if (!permissions.length) return <p>{t("plugin.host.noPermissions")}</p>;
   return (
     <div className="plugin-permissions">
       {permissions.map((permission) => (
@@ -508,9 +515,9 @@ function PermissionRows({ runtime, detail, reload }: {
           <div><strong>{permission.permissionId}</strong><span>{permission.kind} · {permission.decision}</span></div>
           <pre>{JSON.stringify(permission.requestedScope, null, 2)}</pre>
           <div className="plugin-action-row">
-            {permission.decision !== "granted" && <button type="button" onClick={() => void decide(permission.permissionId, "grant", permission.requestedScope)}>Grant requested scope</button>}
-            {permission.decision === "granted" && <button type="button" onClick={() => void decide(permission.permissionId, "revoke")}>Revoke</button>}
-            {permission.decision !== "denied" && <button type="button" onClick={() => void decide(permission.permissionId, "deny")}>Deny</button>}
+            {permission.decision !== "granted" && <button type="button" onClick={() => void decide(permission.permissionId, "grant", permission.requestedScope)}>{t("plugin.host.grantScope")}</button>}
+            {permission.decision === "granted" && <button type="button" onClick={() => void decide(permission.permissionId, "revoke")}>{t("plugin.host.revoke")}</button>}
+            {permission.decision !== "denied" && <button type="button" onClick={() => void decide(permission.permissionId, "deny")}>{t("plugin.host.deny")}</button>}
           </div>
         </article>
       ))}
@@ -522,18 +529,18 @@ function ProviderRows({ providers }: { providers: PluginProviderContribution[] }
   if (!providers.length) return null;
   return (
     <>
-      <h4>Public market-data providers</h4>
-      <p>Host-owned ingestion only · public data · no account, secrets, or trading access.</p>
+      <h4>{t("plugin.host.providersTitle")}</h4>
+      <p>{t("plugin.host.providersHint")}</p>
       <div className="plugin-provider-list">
         {providers.map((provider) => {
           if (provider.kind === "symbol-provider/1") {
             const config = provider.configuration;
             return (
               <article key={provider.id} data-plugin-provider-exchange={config.exchange}>
-                <div><strong>{config.displayName}</strong><span>{config.exchange} · symbols</span></div>
+                <div><strong>{config.displayName}</strong><span>{t("plugin.host.exchangeSymbols", { exchange: config.exchange })}</span></div>
                 <p>
-                  Markets: {config.marketTypes.map((item) => item.id).join(", ")}
-                  {` · page ≤ ${config.maxPageSize} · cache ${config.cacheTtlSeconds}s`}
+                  {t("plugin.host.markets", { markets: config.marketTypes.map((item) => item.label).join(", ") })}
+                  {` · ${t("plugin.host.providerBounds", { page: config.maxPageSize, seconds: config.cacheTtlSeconds })}`}
                 </p>
               </article>
             );
@@ -541,19 +548,19 @@ function ProviderRows({ providers }: { providers: PluginProviderContribution[] }
           const config = provider.configuration;
           return (
             <article key={provider.id} data-plugin-provider-exchange={config.exchange}>
-              <div><strong>{config.exchange.toUpperCase()} market data</strong><span>{config.dataPlane}</span></div>
+              <div><strong>{t("plugin.host.exchangeMarketData", { exchange: config.exchange.toUpperCase() })}</strong><span>{config.dataPlane}</span></div>
               <p>
-                Source: {config.sourceQuality.quality} · finality {config.sourceQuality.finality}
+                {t("plugin.host.sourceFinality", { quality: config.sourceQuality.quality, finality: config.sourceQuality.finality })}
               </p>
               <ul>
                 {config.channels.map((channel) => (
                   <li key={channel.kind}>
-                    {channel.kind === "full_depth" ? "Full depth" : "Kline"}
-                    {` · ${[channel.history && "history", channel.realtime && "realtime"].filter(Boolean).join(" + ")}`}
+                    {channel.kind === "full_depth" ? t("plugin.host.fullDepth") : t("plugin.host.kline")}
+                    {` · ${[channel.history && t("plugin.host.history"), channel.realtime && t("plugin.host.realtime")].filter(Boolean).join(" + ")}`}
                     {channel.intervals.length ? ` · ${channel.intervals.join(", ")}` : ""}
                     {` · ${channel.delivery} · ${channel.finality}`}
-                    {channel.corrections ? " · corrections" : ""}
-                    {` · ${channel.ratePerMinute}/min · concurrency ${channel.maxConcurrent}`}
+                    {channel.corrections ? ` · ${t("plugin.host.corrections")}` : ""}
+                    {` · ${t("plugin.host.channelBounds", { rate: channel.ratePerMinute, concurrency: channel.maxConcurrent })}`}
                   </li>
                 ))}
               </ul>
@@ -583,7 +590,7 @@ function PaperRows({
   const toggleKillSwitch = async () => {
     if (!paper) return;
     const next = !paper.killSwitchEnabled;
-    if (!next && !window.confirm("Resume Paper order submission? Host risk checks and limits remain active.")) return;
+    if (!next && !window.confirm(t("plugin.host.paperResumeConfirm"))) return;
     try {
       await runtime.actions.setPaperKillSwitch(next);
       await reload();
@@ -591,8 +598,8 @@ function PaperRows({
   };
   return (
     <section className="plugin-paper-panel" data-plugin-paper-only>
-      <h4>Paper trading only</h4>
-      <p>Host-owned balances, fills, risk, idempotency and audit. No live credentials, live submission, or plugin network access.</p>
+      <h4>{t("plugin.host.paperTitle")}</h4>
+      <p>{t("plugin.host.paperHint")}</p>
       {account?.kind === "account-provider/1" && (
         <p>
           <strong>{account.configuration.displayName}</strong>
@@ -614,7 +621,7 @@ function PaperRows({
       {paper && (
         <div className="plugin-action-row">
           <strong data-paper-kill-switch-state>
-            Global kill switch: {paper.killSwitchEnabled ? "ON" : "OFF"}
+            {t("plugin.host.globalKillSwitch", { state: paper.killSwitchEnabled ? "ON" : "OFF" })}
           </strong>
           <button
             type="button"
@@ -622,7 +629,7 @@ function PaperRows({
             disabled={!runtime.view.managementAvailable}
             onClick={() => void toggleKillSwitch()}
           >
-            {paper.killSwitchEnabled ? "Resume Paper orders" : "Stop Paper orders"}
+            {paper.killSwitchEnabled ? t("plugin.host.resumePaperOrders") : t("plugin.host.stopPaperOrders")}
           </button>
         </div>
       )}
@@ -641,11 +648,12 @@ function MarketplacePanel({
   busy: string | null;
   run(key: string, operation: () => Promise<void>): Promise<void>;
 }) {
+  useLocale();
   const catalog = runtime.view.marketplaceCatalog;
   if (catalog === null) {
     return (
       <section className="plugin-marketplace-panel plugin-settings-card">
-        <p>正在读取签名插件市场配置…</p>
+        <p>{t("plugin.market.loading")}</p>
       </section>
     );
   }
@@ -653,30 +661,31 @@ function MarketplacePanel({
     <section className="plugin-marketplace-panel plugin-settings-card" data-plugin-marketplace>
       <header className="plugin-settings-card-header">
         <div>
-          <h3>签名插件市场</h3>
-          <p>Host 会验证发布者身份、构建摘要与透明度记录；身份已验证不代表代码安全或官方背书。</p>
+          <h3>{t("plugin.marketplace")}</h3>
+          <p>{t("plugin.market.desc")}</p>
         </div>
         <span
           className={`plugin-state-pill ${catalog.enabled ? "is-ready" : "is-muted"}`}
           data-plugin-marketplace-state
         >
-          {catalog.enabled ? "已开启" : "未配置"}
+          {catalog.enabled ? t("plugin.on") : t("plugin.unconfigured")}
         </span>
       </header>
       {!catalog.enabled && !catalog.marketplaces.length && (
         <div className="plugin-empty-state plugin-marketplace-empty">
-          <strong>尚未配置签名插件市场</strong>
-          <p>当前仍可通过上方的本地安装加入经 SHA-256 校验的 .cspkg 插件包。</p>
+          <strong>{t("plugin.market.missing")}</strong>
+          <p>{t("plugin.market.missingHint")}</p>
         </div>
       )}
       <details className="plugin-technical-details">
-        <summary>签名边界与更新策略</summary>
-        <p>市场元数据不会自动授予权限。下载只会生成已验证的候选版本，应用与激活均需显式操作，自动更新保持关闭。</p>
-        {catalog.rollout && <p>发布通道：{catalog.rollout.channel}（internal → opted-in local → preview → stable）。</p>}
+        <summary>{t("plugin.market.policy")}</summary>
+        <p>{t("plugin.market.policyHint")}</p>
+        {catalog.rollout && <p>{t("plugin.market.channel", { channel: catalog.rollout.channel })}</p>}
         {status?.telemetry && (
           <p data-marketplace-telemetry={status.telemetry.enabled ? "enabled" : "disabled"}>
-            匿名稳定性遥测：{status.telemetry.enabled ? "用户已选择，仅保存在本机聚合计数" : "关闭"}
-            · 上传始终关闭 · 不记录策略输入、账户、标识符或插件私有数据
+            {t("plugin.market.telemetry", {
+              state: status.telemetry.enabled ? t("plugin.market.telemetryOn") : t("plugin.market.telemetryOff"),
+            })}
           </p>
         )}
       </details>
@@ -687,8 +696,8 @@ function MarketplacePanel({
               <strong>{marketplace.marketplaceId}</strong>
               <small>
                 {marketplace.cache.status === "valid"
-                  ? `verified index #${marketplace.cache.sequence} · expires ${marketplace.cache.expiresAt}`
-                  : `cache unavailable · ${marketplace.cache.reason ?? "no verified index"}`}
+                  ? t("plugin.market.cacheVerified", { sequence: marketplace.cache.sequence, expires: marketplace.cache.expiresAt })
+                  : t("plugin.market.cacheUnavailable", { reason: marketplace.cache.reason ?? t("plugin.market.noVerifiedIndex") })}
               </small>
             </div>
             <button
@@ -700,7 +709,7 @@ function MarketplacePanel({
                 () => runtime.actions.refreshMarketplace(marketplace.marketplaceId),
               )}
             >
-              {busy === `refresh:${marketplace.marketplaceId}` ? "Verifying…" : "Refresh signed index"}
+              {busy === `refresh:${marketplace.marketplaceId}` ? t("plugin.market.verifying") : t("plugin.market.refreshIndex")}
             </button>
           </article>
         ))}
@@ -720,67 +729,77 @@ function MarketplacePanel({
               <div className="plugin-marketplace-title">
                 <div>
                   <strong>{entry.pluginId}</strong>
-                  <small>{entry.publisher.displayName} · publisher key {entry.publisher.keyId.slice(0, 24)}… · 发布者验证不等于代码安全</small>
+                  <small>{t("plugin.market.publisherKey", { publisher: entry.publisher.displayName, key: entry.publisher.keyId.slice(0, 24), boundary: t("plugin.market.notCodeSafety") })}</small>
                 </div>
                 <span>
                   {entry.latest.version} · {entry.latest.licenseExpression}
-                  {entry.latest.revoked ? " · revoked" : ""}
+                  {entry.latest.revoked ? t("plugin.market.revokedSuffix") : ""}
                 </span>
               </div>
               {entry.assurances && (
                 <div className="plugin-marketplace-assurances" data-marketplace-assurances={entry.pluginId}>
                   <span data-marketplace-publisher-verified={entry.assurances.publisherVerified}>
-                    发布者：{entry.assurances.publisherVerified ? "已验证" : "未验证"}
+                    {t("plugin.market.publisher", {
+                      state: entry.assurances.publisherVerified ? t("plugin.market.verified") : t("plugin.market.unverified"),
+                    })}
                   </span>
                   <span data-marketplace-official-maintained={entry.assurances.officialMaintained}>
-                    维护方：{entry.assurances.officialMaintained ? "CandleScope 官方" : "社区发布者"}
+                    {t("plugin.market.maintainer", {
+                      who: entry.assurances.officialMaintained ? t("plugin.market.official") : t("plugin.market.community"),
+                    })}
                   </span>
                   <span data-marketplace-sandbox-available={entry.assurances.sandbox.available}>
-                    沙箱：{entry.assurances.sandbox.available ? "本机可用" : "本机不可用"}
-                    {` · ${entry.assurances.sandbox.runtimeKinds.join(", ") || "无运行时"}`}
+                    {t("plugin.market.sandbox", {
+                      state: entry.assurances.sandbox.available ? t("plugin.market.sandboxLocal") : t("plugin.market.sandboxUnavailable"),
+                    })}
+                    {` · ${entry.assurances.sandbox.runtimeKinds.join(", ") || t("plugin.market.noRuntime")}`}
                   </span>
                   <span data-marketplace-rollout-stage={entry.assurances.rolloutStage}>
-                    发布阶段：{entry.assurances.rolloutStage}
+                    {t("plugin.market.stage", { stage: entry.assurances.rolloutStage })}
                   </span>
                   <details data-marketplace-permission-scope>
                     <summary>
-                      权限范围：{entry.assurances.permissions.required.length} 个必需，{entry.assurances.permissions.optional.length} 个可选
+                      {t("plugin.market.permScope", {
+                        required: entry.assurances.permissions.required.length,
+                        optional: entry.assurances.permissions.optional.length,
+                      })}
                     </summary>
                     <pre>{JSON.stringify(entry.assurances.permissions, null, 2)}</pre>
                   </details>
                 </div>
               )}
+              <p>{t("plugin.market.artifact", {
+                sha: selectedArtifact.sha256,
+                size: selectedArtifact.size,
+                index: entry.latest.transparency.logIndex,
+              })}</p>
               <p>
-                {selectedArtifact.sha256}
-                {` · ${selectedArtifact.size} bytes · transparency #${entry.latest.transparency.logIndex}`}
-              </p>
-              <p>
-                Installed: {entry.installedVersion ?? "no"}
-                {candidate ? ` · candidate ${candidate.version}: ${candidate.phase}` : ""}
+                {t("plugin.market.installed", { version: entry.installedVersion ?? t("plugin.market.notInstalled") })}
+                {candidate ? t("plugin.market.candidate", { version: candidate.version, phase: candidate.phase }) : ""}
               </p>
               {candidate && (
                 <div className="plugin-marketplace-candidate" data-marketplace-candidate-phase={candidate.phase}>
                   <p>
-                    Compatibility: Host {candidate.compatibility.hostVersion} verified · migration {candidate.migration.policy}
-                    {` · permission confirmation ${candidate.permissionDiff.requiresConfirmation ? "required" : "not required"}`}
+                    {t("plugin.market.compatibility", { host: candidate.compatibility.hostVersion, migration: candidate.migration.policy })}
+                    {t("plugin.market.permissionConfirmation", { state: candidate.permissionDiff.requiresConfirmation ? t("plugin.market.required") : t("plugin.market.notRequired") })}
                     {candidate.compatibility.runtimeKinds ? ` · ${candidate.compatibility.runtimeKinds.join(", ")}` : ""}
-                    {candidate.compatibility.cacheReuse === true ? " · offline verified cache reuse" : ""}
+                    {candidate.compatibility.cacheReuse === true ? t("plugin.market.offlineCache") : ""}
                   </p>
                   {candidate.permissionDiff.permissions.length > 0 && (
                     <ul>
                       {candidate.permissionDiff.permissions.map((permission) => (
                         <li key={permission.permissionId}>
                           {permission.permissionId} · {permission.change}
-                          {permission.requiresConfirmation ? " · confirmation required" : ""}
+                          {permission.requiresConfirmation ? t("plugin.market.confirmationRequired") : ""}
                         </li>
                       ))}
                     </ul>
                   )}
                   {candidate.observation.status !== "not-started" && (
-                    <p>Health observation: {candidate.observation.status}{candidate.observation.detail ? ` · ${candidate.observation.detail}` : ""}</p>
+                    <p>{t("plugin.market.healthObservation", { status: candidate.observation.status, detail: candidate.observation.detail ? ` · ${candidate.observation.detail}` : "" })}</p>
                   )}
                   {candidate.phase === "quarantined" && (
-                    <p role="alert">该签名版本已撤销，缓存产物已隔离，不能继续应用或激活。</p>
+                    <p role="alert">{t("plugin.market.revoked")}</p>
                   )}
                 </div>
               )}
@@ -794,7 +813,7 @@ function MarketplacePanel({
                     () => runtime.actions.prepareMarketplaceRelease(entry.pluginId, entry.latest.version),
                   )}
                 >
-                  {busy === `prepare:${entry.pluginId}` ? "Downloading and verifying…" : "Download, verify & stage"}
+                  {busy === `prepare:${entry.pluginId}` ? t("plugin.market.downloading") : t("plugin.market.downloadStage")}
                 </button>
                 {candidate?.phase === "verified-staged" && (
                   <button
@@ -806,7 +825,7 @@ function MarketplacePanel({
                       () => runtime.actions.applyMarketplaceRelease(entry.pluginId),
                     )}
                   >
-                    {busy === `apply:${entry.pluginId}` ? "Probing in sandbox…" : "Apply as inactive staged"}
+                    {busy === `apply:${entry.pluginId}` ? t("plugin.market.probing") : t("plugin.market.applyStaged")}
                   </button>
                 )}
                 {candidate?.phase === "activation-staged" && (
@@ -815,26 +834,26 @@ function MarketplacePanel({
                     data-marketplace-activate={entry.pluginId}
                     disabled={!runtime.view.managementAvailable || !activationReady || busy !== null}
                     onClick={() => {
-                      if (!window.confirm(`Activate ${entry.pluginId} ${candidate.version} and begin immediate Host health observation?`)) return;
+                      if (!window.confirm(t("plugin.market.activateConfirm", { plugin: entry.pluginId, version: candidate.version }))) return;
                       void run(
                         `activate:${entry.pluginId}`,
                         () => runtime.actions.activateMarketplaceRelease(entry.pluginId),
                       );
                     }}
                   >
-                    {busy === `activate:${entry.pluginId}` ? "Activating and observing…" : "Activate & observe"}
+                    {busy === `activate:${entry.pluginId}` ? t("plugin.market.activating") : t("plugin.market.activateObserve")}
                   </button>
                 )}
               </div>
               {candidate?.phase === "activation-staged" && !activationReady && (
-                <small>Grant every required permission in the installed-plugin detail before activation.</small>
+                <small>{t("plugin.host.grantEveryPermission")}</small>
               )}
             </article>
           );
         })}
         {status?.quarantine && status.quarantine.length > 0 && (
           <details className="plugin-technical-details" data-marketplace-quarantine>
-            <summary>已隔离版本：{status.quarantine.length}</summary>
+            <summary>{t("plugin.market.quarantine", { count: status.quarantine.length })}</summary>
             {status.quarantine.map((item) => (
               <p key={`${item.bundleSha256}:${item.quarantinedAt}`}>
                 {item.pluginId} {item.version} · {item.reason} · {item.quarantinedAt}
@@ -842,79 +861,95 @@ function MarketplacePanel({
             ))}
           </details>
         )}
-        {catalog.enabled && !catalog.plugins.length && <p>已验证的插件索引中暂无可安装版本。</p>}
+        {catalog.enabled && !catalog.plugins.length && <p>{t("plugin.market.emptyIndex")}</p>}
       </div>
     </section>
   );
 }
 
 function RuntimeRegistryPanel({ status }: { status: PluginRuntimeRegistryStatus }) {
+  useLocale();
   const size = (value: number) => `${(value / (1024 * 1024)).toFixed(1)} MiB`;
   return (
     <section className="plugin-settings-card plugin-runtime-registry-card" data-runtime-registry-revision={status.active.revision}>
       <header className="plugin-settings-card-header">
         <div>
-          <h3>宿主管理的运行时</h3>
+          <h3>{t("plugin.runtime.hostManaged")}</h3>
           <p>
-            {status.active.registryId} · revision {status.active.revision} · 自动网络更新已关闭
+            {t("plugin.host.registryRevision", { id: status.active.registryId, revision: status.active.revision })} · {t("plugin.runtime.autoUpdateOff")}
           </p>
         </div>
-        <span className="plugin-state-pill is-muted">{status.runtimes.length} 个</span>
+        <span className="plugin-state-pill is-muted">{t("plugin.count", { count: status.runtimes.length })}</span>
       </header>
       {status.runtimes.map((item) => (
         <article key={`${item.runtimeId}:${item.kind}:${item.os}:${item.arch}`} className="plugin-runtime-registry-row">
           <strong>{item.runtimeId} · {item.version}</strong>
           <p>{item.kind} · {item.os}/{item.arch} · {size(item.size)} · {item.verificationStatus}</p>
           <small>
-            Host-managed · {item.license} · 引用 {item.referenceCount} · SHA-256 {item.sha256.slice(7, 19)}…
+            {t("plugin.host.runtimeFingerprint", {
+              owner: t("plugin.host.hostManaged"),
+              license: item.license,
+              refs: t("plugin.runtime.refs", { count: item.referenceCount }),
+              hash: `${item.sha256.slice(7, 19)}…`,
+            })}
           </small>
         </article>
       ))}
       {status.systemRuntimes.map((item) => (
         <article key={`${item.runtimeId}:${item.kind}`} className="plugin-runtime-registry-row is-system">
           <strong>{item.runtimeId} · {item.version}</strong>
-          <p>{item.kind} · system · {size(item.artifactSize)} · 已探针验证</p>
-          <small>不可复现的 developer-local 选择：{item.executable}</small>
+          <p>{t("plugin.host.systemRuntime", { kind: item.kind, size: size(item.artifactSize), state: t("plugin.runtime.probed") })}</p>
+          <small>{t("plugin.runtime.devLocal", { path: item.executable })}</small>
         </article>
       ))}
     </section>
   );
 }
 
+function changedLabel(changed: boolean): string {
+  return t(changed ? "plugin.trust.changed" : "plugin.trust.same");
+}
+
 function trustAcknowledgementLabel(value: string): string {
-  if (value === "execute-local-code") return "我确认这会以当前 Windows 用户身份执行本地应用代码";
-  if (value === "sandbox-status") return "我已核对上方沙箱状态，而不是仅依据发布者名称判断安全性";
-  if (value === "live-authority-separate") return "我确认账户、密钥与实盘权限不会由本次信任选择自动开放";
-  if (value.startsWith("runtime:")) return `我确认运行时：${value.slice("runtime:".length).replaceAll(":", " · ")}`;
-  if (value.startsWith("permission:")) return `我确认插件声明了权限：${value.slice("permission:".length)}`;
+  if (value === "execute-local-code") return t("plugin.ack.execute");
+  if (value === "sandbox-status") return t("plugin.ack.sandbox");
+  if (value === "live-authority-separate") return t("plugin.ack.authority");
+  if (value.startsWith("runtime:")) {
+    return t("plugin.ack.runtime", { runtime: value.slice("runtime:".length).replaceAll(":", " · ") });
+  }
+  if (value.startsWith("permission:")) {
+    return t("plugin.ack.permission", { permission: value.slice("permission:".length) });
+  }
   return value;
 }
 
 function TrustRequestMatrix({ trust }: { trust: PluginTrustSummary["requests"] }) {
+  useLocale();
   const rows = [
-    ["网络", trust.network],
-    ["文件", trust.files],
-    ["密钥", trust.secrets],
-    ["账户", trust.accounts],
-    ["交易", trust.trading],
+    [t("plugin.trust.network"), trust.network],
+    [t("plugin.trust.files"), trust.files],
+    [t("plugin.trust.secrets"), trust.secrets],
+    [t("plugin.trust.accounts"), trust.accounts],
+    [t("plugin.trust.trading"), trust.trading],
   ] as const;
   return (
     <div className="plugin-trust-risk-grid">
       {rows.map(([label, value]) => (
         <div key={label} data-requested={value.requested ? "true" : "false"}>
           <strong>{label}</strong>
-          <span>{value.requested ? value.permissionIds.join("、") : "未请求"}</span>
+          <span>{value.requested ? value.permissionIds.join("、") : t("plugin.trust.notRequested")}</span>
         </div>
       ))}
       <div data-requested="false">
-        <strong>子进程</strong>
-        <span>未声明 · 上限 {trust.subprocess.maxProcesses}</span>
+        <strong>{t("plugin.trust.subprocess")}</strong>
+        <span>{t("plugin.trust.subprocessLimit", { count: trust.subprocess.maxProcesses })}</span>
       </div>
     </div>
   );
 }
 
 function LocalTrustInstallPanel({ runtime }: { runtime: PluginPlatformRuntime }) {
+  useLocale();
   const [candidate, setCandidate] = useState<PluginLocalInstallCandidate | null>(null);
   const [reason, setReason] = useState("");
   const [accepted, setAccepted] = useState<Set<string>>(new Set());
@@ -967,10 +1002,10 @@ function LocalTrustInstallPanel({ runtime }: { runtime: PluginPlatformRuntime })
     <section className="plugin-settings-card plugin-install-card plugin-trust-install-card" data-plugin-trust-flow="itemized-double-confirmation">
       <header className="plugin-settings-card-header">
         <div>
-          <h3>从本地安装</h3>
-          <p>先验证并展示来源、运行时、沙箱和权限；完成两次独立确认后才首次执行插件代码。</p>
+          <h3>{t("plugin.localInstall")}</h3>
+          <p>{t("plugin.trust.localHint")}</p>
         </div>
-        <span className="plugin-state-pill is-warn">本地代码</span>
+        <span className="plugin-state-pill is-warn">{t("plugin.trust.localCode")}</span>
       </header>
       <div className="plugin-install-row">
         <label className="plugin-install-button">
@@ -985,9 +1020,9 @@ function LocalTrustInstallPanel({ runtime }: { runtime: PluginPlatformRuntime })
               if (file) void prepare(file);
             }}
           />
-          <span>{busy === "prepare" ? "正在验证（不会执行插件）…" : "选择 .cspkg 并生成审阅单"}</span>
+          <span>{busy === "prepare" ? t("plugin.trust.verifying") : t("plugin.trust.pickReview")}</span>
         </label>
-        <small>浏览器与 Host 分别复算 SHA-256；准备阶段不会运行语义探针或插件进程。</small>
+        <small>{t("plugin.trust.prepareHint")}</small>
       </div>
       {candidate && (
         <div className="plugin-trust-review" data-preview-sha256={candidate.previewSha256}>
@@ -995,57 +1030,60 @@ function LocalTrustInstallPanel({ runtime }: { runtime: PluginPlatformRuntime })
             <strong>{candidate.preview.plugin.name} {candidate.preview.plugin.version}</strong>
             <span>{candidate.preview.plugin.publisher} · {candidate.preview.source.source}</span>
             <small>
-              发布者身份 {candidate.preview.source.publisherIdentity}
+              {t("plugin.trust.publisherId", { identity: candidate.preview.source.publisherIdentity })}
               {candidate.preview.source.signatureRoot
-                ? ` · 签名根 ${candidate.preview.source.signatureRoot}`
-                : " · 未签名本地来源"}
+                ? t("plugin.signedRoot", { root: candidate.preview.source.signatureRoot })
+                : t("plugin.unsignedLocal")}
             </small>
             <code>{candidate.preview.plugin.bundleSha256}</code>
           </div>
           <p className="plugin-trust-warning">{candidate.preview.warning}</p>
-          <h4>将运行什么</h4>
+          <h4>{t("plugin.trust.whatRuns")}</h4>
           {candidate.preview.authorization.entrypoints.map((entrypoint) => (
             <div className="plugin-trust-runtime" key={entrypoint.entrypointId}>
               <strong>{entrypoint.entrypointId}</strong>
               <span>{entrypoint.runtimeKind} · {entrypoint.runtimeId} · {entrypoint.supplySource}</span>
               <small>
-                {entrypoint.hostManaged ? "Host-managed" : "插件随包 runtime"}
+                  {entrypoint.hostManaged ? t("plugin.host.hostManaged") : t("plugin.bundledRuntime")}
                 {` · ${entrypoint.profile.profileId} · maxProcesses=${entrypoint.profile.limits.maxProcesses}`}
               </small>
               {entrypoint.systemRuntimePath && <code>{entrypoint.systemRuntimePath}</code>}
             </div>
           ))}
           <p data-sandbox-status={candidate.preview.authorization.sandbox.status}>
-            沙箱：{candidate.preview.authorization.sandbox.status} · 当前模式 {candidate.preview.authorization.mode}
+            {t("plugin.trust.sandboxMode", {
+              status: candidate.preview.authorization.sandbox.status,
+              mode: candidate.preview.authorization.mode,
+            })}
           </p>
           <TrustRequestMatrix trust={candidate.preview.requests} />
           <div className="plugin-trust-diffs">
             <div>
-              <strong>Runtime diff</strong>
-              <span>{candidate.preview.runtimeDiff.changed ? "已变化，必须确认" : "未变化"}</span>
+              <strong>{t("plugin.host.runtimeDiff")}</strong>
+              <span>{candidate.preview.runtimeDiff.changed ? t("plugin.trust.changedMustConfirm") : t("plugin.trust.unchanged")}</span>
               <small>
-                kind/id {candidate.preview.runtimeDiff.kindOrIdChanged ? "变化" : "不变"}
-                {` · 签名根 ${candidate.preview.runtimeDiff.signatureRootChanged ? "变化" : "不变"}`}
-                {` · 系统路径 ${candidate.preview.runtimeDiff.systemRuntimePathChanged ? "变化" : "不变"}`}
+                {t("plugin.host.kindOrId", { state: changedLabel(candidate.preview.runtimeDiff.kindOrIdChanged) })}
+                {` · ${t("plugin.diff.sigRoot", { state: changedLabel(candidate.preview.runtimeDiff.signatureRootChanged) })}`}
+                {` · ${t("plugin.diff.sysPath", { state: changedLabel(candidate.preview.runtimeDiff.systemRuntimePathChanged) })}`}
               </small>
             </div>
             <div>
-              <strong>Permission diff</strong>
-              <span>{candidate.preview.permissionDiff.requiresConfirmation ? "需要重新确认" : "无扩权"}</span>
-              <small>{candidate.preview.permissionDiff.permissions.map((item) => `${item.permissionId}: ${item.change}`).join(" · ") || "未声明 Host API 权限"}</small>
+              <strong>{t("plugin.host.permissionDiff")}</strong>
+              <span>{candidate.preview.permissionDiff.requiresConfirmation ? t("plugin.trust.needReconfirm") : t("plugin.trust.noExpansion")}</span>
+              <small>{candidate.preview.permissionDiff.permissions.map((item) => `${item.permissionId}: ${item.change}`).join(" · ") || t("plugin.trust.noHostApi")}</small>
             </div>
           </div>
           <label className="plugin-trust-reason">
-            <span>安装原因（写入审计日志，至少 12 个字符）</span>
+            <span>{t("plugin.trust.reason")}</span>
             <textarea
               value={reason}
               maxLength={500}
               onChange={(event) => { setReason(event.target.value); resetReview(); }}
-              placeholder="例如：从本地源码构建，用于离线回测 ta4j 指标"
+              placeholder={t("plugin.trust.reasonPh")}
             />
           </label>
           <fieldset className="plugin-trust-acknowledgements">
-            <legend>逐项确认</legend>
+            <legend>{t("plugin.trust.itemized")}</legend>
             {required.map((item) => (
               <label key={item}>
                 <input
@@ -1069,7 +1107,7 @@ function LocalTrustInstallPanel({ runtime }: { runtime: PluginPlatformRuntime })
               disabled={!allAccepted || reason.trim().length < 12 || busy !== null || review !== null}
               onClick={() => void firstConfirmation()}
             >
-              {busy === "review" ? "正在记录第一次确认…" : "第一次确认：复核以上明细"}
+              {busy === "review" ? t("plugin.trust.recording") : t("plugin.trust.firstReview")}
             </button>
             <button
               type="button"
@@ -1078,10 +1116,10 @@ function LocalTrustInstallPanel({ runtime }: { runtime: PluginPlatformRuntime })
               disabled={review === null || busy !== null}
               onClick={() => void secondConfirmation()}
             >
-              {busy === "confirm" ? "正在安装并首次执行…" : "第二次确认：安装并执行本地代码"}
+              {busy === "confirm" ? t("plugin.trust.installing") : t("plugin.trust.secondInstall")}
             </button>
           </div>
-          {review && <small>第一次确认已记录；第二次确认令牌将在 {review.expiresAt} 失效，且只能使用一次。</small>}
+          {review && <small>{t("plugin.trust.firstRecorded", { expires: review.expiresAt })}</small>}
         </div>
       )}
     </section>
@@ -1099,6 +1137,7 @@ function TrustModeControl({
   trust: PluginTrustSummary;
   onComplete: () => Promise<void>;
 }) {
+  useLocale();
   const target = trust.mode === "trusted-local" ? "marketplace-sandboxed" : "trusted-local";
   const acknowledgements = useMemo(() => {
     const values = new Set<string>(["execute-local-code", "sandbox-status", "live-authority-separate"]);
@@ -1130,13 +1169,13 @@ function TrustModeControl({
   };
   return (
     <div className="plugin-trust-mode-control">
-      <p className="plugin-trust-warning">发布者签名已验证，只说明来源身份与工件完整性；不表示代码“安全”“官方”或无漏洞。</p>
+      <p className="plugin-trust-warning">{t("plugin.trust.signedWarning")}</p>
       <label className="plugin-trust-reason">
-        <span>变更原因（写入审计日志）</span>
+        <span>{t("plugin.trust.changeReason")}</span>
         <textarea value={reason} maxLength={500} onChange={(event) => { setReason(event.target.value); setReview(null); }} />
       </label>
       <fieldset className="plugin-trust-acknowledgements">
-        <legend>{target === "trusted-local" ? "提升为 trusted-local" : "撤销本地信任并恢复沙箱"}</legend>
+        <legend>{target === "trusted-local" ? t("plugin.trust.promote") : t("plugin.trust.revoke")}</legend>
         {acknowledgements.map((item) => (
           <label key={item}>
             <input type="checkbox" checked={accepted.has(item)} onChange={(event) => {
@@ -1152,30 +1191,30 @@ function TrustModeControl({
       {review && (
         <div className="plugin-trust-diffs" data-trust-change-preview={review.previewSha256}>
           <div>
-            <strong>已冻结的目标运行边界</strong>
+            <strong>{t("plugin.trust.frozenBoundary")}</strong>
             <span>{review.preview.to.mode} · {review.preview.to.sandbox.status}</span>
             <small>
-              runtime {review.preview.runtimeDiff.changed ? "变化" : "不变"}
-              {` · kind/id ${review.preview.runtimeDiff.kindOrIdChanged ? "变化" : "不变"}`}
-              {` · 签名根 ${review.preview.runtimeDiff.signatureRootChanged ? "变化" : "不变"}`}
-              {` · 系统路径 ${review.preview.runtimeDiff.systemRuntimePathChanged ? "变化" : "不变"}`}
+              {t("plugin.diff.runtime", { state: changedLabel(review.preview.runtimeDiff.changed) })}
+              {` · kind/id ${changedLabel(review.preview.runtimeDiff.kindOrIdChanged)}`}
+              {` · ${t("plugin.diff.sigRoot", { state: changedLabel(review.preview.runtimeDiff.signatureRootChanged) })}`}
+              {` · ${t("plugin.diff.sysPath", { state: changedLabel(review.preview.runtimeDiff.systemRuntimePathChanged) })}`}
             </small>
           </div>
           <div>
-            <strong>已冻结的权限 diff</strong>
-            <span>{review.preview.permissionDiff.requiresConfirmation ? "旧授权不会继承，需重新确认" : "无授权扩张"}</span>
+            <strong>{t("plugin.trust.frozenDiff")}</strong>
+            <span>{review.preview.permissionDiff.requiresConfirmation ? t("plugin.trust.noInherit") : t("plugin.trust.noAuthExpand")}</span>
             <small>
-              {review.preview.permissionDiff.permissions.map((item) => `${item.permissionId}: ${item.change}`).join(" · ") || "未声明 Host API 权限"}
+              {review.preview.permissionDiff.permissions.map((item) => `${item.permissionId}: ${item.change}`).join(" · ") || t("plugin.trust.noHostApi")}
             </small>
           </div>
         </div>
       )}
       <div className="plugin-action-row">
         <button type="button" disabled={busy || !allAccepted || reason.trim().length < 12 || review !== null} onClick={() => void begin()}>
-          第一次确认：审阅 {target}
+          {t("plugin.trust.firstReviewTarget", { target })}
         </button>
         <button type="button" disabled={busy || review === null} onClick={() => void confirm()}>
-          第二次确认：应用并终止旧 generation
+          {t("plugin.trust.secondApply")}
         </button>
       </div>
     </div>
@@ -1183,14 +1222,20 @@ function TrustModeControl({
 }
 
 export function PluginSettingsPanel({ runtime }: { runtime: PluginPlatformRuntime }) {
+  const locale = useLocale();
   const { closeManager, openManager } = runtime.actions;
   useEffect(() => {
     openManager();
     return closeManager;
   }, [closeManager, openManager]);
   const plugins = useMemo(
-    () => runtime.view.catalog?.plugins ?? [],
-    [runtime.view.catalog?.plugins],
+    () => (runtime.view.catalog?.plugins ?? []).map((plugin) => ({
+      ...plugin,
+      contributions: plugin.contributions.map((contribution) => (
+        localizePluginContribution(contribution, locale)
+      )),
+    })),
+    [locale, runtime.view.catalog?.plugins],
   );
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<PluginManagementDetail | null>(null);
@@ -1238,7 +1283,7 @@ export function PluginSettingsPanel({ runtime }: { runtime: PluginPlatformRuntim
   const selected = plugins.find((item) => item.id === selectedId) ?? null;
   const mutate = async (action: "enable" | "disable" | "rollback" | "uninstall") => {
     if (!selected) return;
-    if (action === "uninstall" && !window.confirm(`Uninstall ${selected.name}? Plugin data and immutable artifacts will be retained.`)) return;
+    if (action === "uninstall" && !window.confirm(t("plugin.host.uninstallConfirm", { name: selected.name }))) return;
     try {
       await runtime.actions.changeState(selected.id, action);
       if (action !== "uninstall") await reload();
@@ -1275,8 +1320,8 @@ export function PluginSettingsPanel({ runtime }: { runtime: PluginPlatformRuntim
     const action = compatibilityPreview.action;
     if (!window.confirm(
       action === "import"
-        ? "Import this exact v1 registry preview into the compatibility catalog? The v1 registry itself will not be modified."
-        : "Roll back the compatibility catalog to this exact preview? The v1 registry itself will not be modified.",
+        ? t("plugin.host.v1ImportConfirm")
+        : t("plugin.host.v1RollbackConfirm"),
     )) return;
     setCompatibilityBusy(action);
     try {
@@ -1298,30 +1343,30 @@ export function PluginSettingsPanel({ runtime }: { runtime: PluginPlatformRuntim
     <div className="plugin-settings-page" data-testid="plugin-manager">
       <section className="plugin-settings-hero">
         <div>
-          <span className="plugin-settings-eyebrow">扩展能力</span>
-          <h3>插件中心</h3>
-          <p>集中管理脚本运行时、插件安装与可信扩展来源。</p>
+          <span className="plugin-settings-eyebrow">{t("plugin.eyebrow")}</span>
+          <h3>{t("plugin.title")}</h3>
+          <p>{t("plugin.subtitle")}</p>
         </div>
         <span className={`plugin-state-pill ${platformEnabled ? "is-ready" : "is-compatibility"}`}>
-          {platformEnabled ? "平台已启用" : "兼容模式"}
+          {platformEnabled ? t("plugin.platformOn") : t("plugin.compatMode")}
         </span>
       </section>
-      <div className="plugin-settings-summary" aria-label="插件平台概览">
-        <div><strong>{plugins.length}</strong><span>已安装插件</span></div>
-        <div><strong>{runtimeCount}</strong><span>脚本运行时</span></div>
+      <div className="plugin-settings-summary" aria-label={t("plugin.overviewAria")}>
+        <div><strong>{plugins.length}</strong><span>{t("plugin.installedCount")}</span></div>
+        <div><strong>{runtimeCount}</strong><span>{t("plugin.scriptRuntimes")}</span></div>
         <div>
-          <strong>{marketplaceEnabled ? "已开启" : "未配置"}</strong>
-          <span>签名插件市场</span>
+          <strong>{marketplaceEnabled ? t("plugin.on") : t("plugin.unconfigured")}</strong>
+          <span>{t("plugin.marketplace")}</span>
         </div>
       </div>
       {compatibility && (
         <section className="plugin-settings-card plugin-v1-compatibility" data-v1-compatibility-status={compatibility.import.status}>
           <header className="plugin-settings-card-header">
             <div>
-              <h3>脚本运行时</h3>
-              <p>已接入的指标语言运行时，可直接为图表提供计算与渲染能力。</p>
+              <h3>{t("plugin.scriptRuntimes")}</h3>
+              <p>{t("plugin.runtimeDesc")}</p>
             </div>
-            <span className="plugin-state-pill is-ready">{runtimeCount} 个可用</span>
+            <span className="plugin-state-pill is-ready">{t("plugin.availableCount", { count: runtimeCount })}</span>
           </header>
           <div className="plugin-runtime-list">
             {compatibility.contributions.map((contribution) => (
@@ -1332,20 +1377,20 @@ export function PluginSettingsPanel({ runtime }: { runtime: PluginPlatformRuntim
                     <span>
                       {contribution.version}
                       {` · ${contribution.languages.map((item) => item.name).join("、")}`}
-                      {contribution.imported ? " · 已导入" : " · 实时发现"}
+                      {contribution.imported ? t("plugin.imported") : t("plugin.liveDiscover")}
                     </span>
                   </div>
                   <span className={`plugin-state-pill ${contribution.available ? "is-ready" : "is-muted"}`}>
-                    {contribution.available ? "可用" : "不可用"}
+                    {contribution.available ? t("plugin.available") : t("plugin.unavailable")}
                   </span>
                 </div>
                 <details className="plugin-technical-details">
-                  <summary>技术详情</summary>
+                  <summary>{t("plugin.techDetails")}</summary>
                   <dl>
-                    <div><dt>运行时</dt><dd>{contribution.runtimeId}</dd></div>
-                    <div><dt>协议</dt><dd>{compatibility.protocol}</dd></div>
+                    <div><dt>{t("plugin.runtime")}</dt><dd>{contribution.runtimeId}</dd></div>
+                    <div><dt>{t("plugin.protocol")}</dt><dd>{compatibility.protocol}</dd></div>
                     {contribution.release.bundleSha256 && (
-                      <div><dt>构建摘要</dt><dd>{contribution.release.bundleSha256}</dd></div>
+                      <div><dt>{t("plugin.bundleDigest")}</dt><dd>{contribution.release.bundleSha256}</dd></div>
                     )}
                   </dl>
                 </details>
@@ -1354,8 +1399,8 @@ export function PluginSettingsPanel({ runtime }: { runtime: PluginPlatformRuntim
           </div>
           {!compatibility.contributions.length && (
             <div className="plugin-empty-state">
-              <strong>暂未发现脚本运行时</strong>
-              <p>已安装并可路由的运行时会显示在这里。</p>
+              <strong>{t("plugin.noRuntimes")}</strong>
+              <p>{t("plugin.noRuntimesHint")}</p>
             </div>
           )}
           <div className="plugin-action-row">
@@ -1365,7 +1410,7 @@ export function PluginSettingsPanel({ runtime }: { runtime: PluginPlatformRuntim
               disabled={!platformEnabled || !runtime.view.managementAvailable || compatibilityBusy !== null}
               onClick={() => void previewCompatibility("import")}
             >
-              {compatibilityBusy === "import" ? "正在生成预览…" : "预览注册表导入"}
+              {compatibilityBusy === "import" ? t("plugin.previewing") : t("plugin.previewImport")}
             </button>
             <button
               type="button"
@@ -1378,14 +1423,17 @@ export function PluginSettingsPanel({ runtime }: { runtime: PluginPlatformRuntim
               }
               onClick={() => void previewCompatibility("rollback")}
             >
-              {compatibilityBusy === "rollback" ? "正在生成预览…" : "预览兼容层回滚"}
+              {compatibilityBusy === "rollback" ? t("plugin.previewing") : t("plugin.previewRollback")}
             </button>
           </div>
-          {!platformEnabled && <small>启用插件平台后，才可保存兼容层导入快照。</small>}
+          {!platformEnabled && <small>{t("plugin.enableToSave")}</small>}
           {compatibilityPreview && (
             <div className="plugin-v1-compatibility-preview" data-v1-compatibility-action={compatibilityPreview.action}>
               <p>
-                Preview {compatibilityPreview.previewSha256 ?? "unavailable"} · state revision {compatibilityPreview.stateRevision}
+                {t("plugin.host.compatPreview", {
+                  hash: compatibilityPreview.previewSha256 ?? t("plugin.unavailable"),
+                  revision: compatibilityPreview.stateRevision,
+                })}
                 {compatibilityPreview.targetSnapshotRevision == null ? "" : ` · target ${compatibilityPreview.targetSnapshotRevision}`}
               </p>
               {compatibilityPreview.changes.length
@@ -1397,10 +1445,7 @@ export function PluginSettingsPanel({ runtime }: { runtime: PluginPlatformRuntim
                   </ul>
                 )
                 : (
-                  <p>
-                    No public contribution changes. Applying can refresh a changed source identity;
-                    an already-current repeat remains idempotent.
-                  </p>
+                  <p>{t("plugin.host.compatNoChanges")}</p>
                 )}
               <button
                 type="button"
@@ -1408,7 +1453,7 @@ export function PluginSettingsPanel({ runtime }: { runtime: PluginPlatformRuntim
                 disabled={!compatibilityPreview.available || compatibilityBusy !== null}
                 onClick={() => void applyCompatibility()}
               >
-                Apply exact {compatibilityPreview.action} preview
+                {t("plugin.host.compatApply", { action: compatibilityPreview.action })}
               </button>
             </div>
           )}
@@ -1423,8 +1468,8 @@ export function PluginSettingsPanel({ runtime }: { runtime: PluginPlatformRuntim
           : <section className="plugin-settings-card plugin-install-card">
           <header className="plugin-settings-card-header">
             <div>
-              <h3>从本地安装</h3>
-              <p>安装经过摘要校验的 CandleScope 插件包，安装后仍需显式授权与启用。</p>
+              <h3>{t("plugin.localInstall")}</h3>
+              <p>{t("plugin.localInstallHint")}</p>
             </div>
           </header>
           <div className="plugin-install-row">
@@ -1441,11 +1486,11 @@ export function PluginSettingsPanel({ runtime }: { runtime: PluginPlatformRuntim
                 try { await runtime.actions.installBundle(file); } catch { /* notice published */ }
               }}
               />
-              <span>选择 .cspkg 文件</span>
+              <span>{t("plugin.pickCspkg")}</span>
             </label>
             <div>
-              <strong>经过摘要校验的本地插件包</strong>
-              <small>浏览器与 Host 会分别复算 SHA-256，文件最大 16 MiB。</small>
+              <strong>{t("plugin.hashedLocal")}</strong>
+              <small>{t("plugin.hashHint")}</small>
             </div>
           </div>
         </section>
@@ -1462,20 +1507,20 @@ export function PluginSettingsPanel({ runtime }: { runtime: PluginPlatformRuntim
         <section className="plugin-settings-card plugin-installed-card">
           <header className="plugin-settings-card-header">
             <div>
-              <h3>已安装插件</h3>
-              <p>查看运行状态、权限、更新与回滚信息。</p>
+              <h3>{t("plugin.installedCount")}</h3>
+              <p>{t("plugin.installedHint")}</p>
             </div>
-            <span className="plugin-state-pill is-muted">{plugins.length} 个</span>
+            <span className="plugin-state-pill is-muted">{t("plugin.count", { count: plugins.length })}</span>
           </header>
           {!plugins.length && (
             <div className="plugin-empty-state">
-              <strong>还没有安装插件</strong>
-              <p>可以从上方选择本地插件包，或在配置签名插件市场后安装扩展。</p>
+              <strong>{t("plugin.empty")}</strong>
+              <p>{t("plugin.emptyHint")}</p>
             </div>
           )}
           {plugins.length > 0 && (
             <div className="plugin-manager-layout">
-              <nav aria-label="已安装插件">
+              <nav aria-label={t("plugin.installedCount")}>
                 {plugins.map((plugin) => (
                   <button type="button" key={plugin.id} className={selectedId === plugin.id ? "active" : ""} onClick={() => setSelectedId(plugin.id)}>
                     <strong>{plugin.name}</strong><small>{plugin.version} · {plugin.state}</small>
@@ -1491,35 +1536,35 @@ export function PluginSettingsPanel({ runtime }: { runtime: PluginPlatformRuntim
                     </p>
                     <div className="plugin-action-row">
                       {selected.state === "active"
-                        ? <button type="button" disabled={!runtime.view.managementAvailable} onClick={() => void mutate("disable")}>停用</button>
-                        : <button type="button" disabled={!runtime.view.managementAvailable || !selected.permissions.activationReady} onClick={() => void mutate("enable")}>启用</button>}
-                      <button type="button" disabled={!runtime.view.managementAvailable || !detail?.rollback.available} onClick={() => void mutate("rollback")}>回滚</button>
-                      <button type="button" disabled={!runtime.view.managementAvailable} onClick={() => void mutate("uninstall")}>卸载</button>
+                        ? <button type="button" disabled={!runtime.view.managementAvailable} onClick={() => void mutate("disable")}>{t("plugin.disable")}</button>
+                        : <button type="button" disabled={!runtime.view.managementAvailable || !selected.permissions.activationReady} onClick={() => void mutate("enable")}>{t("plugin.enable")}</button>}
+                      <button type="button" disabled={!runtime.view.managementAvailable || !detail?.rollback.available} onClick={() => void mutate("rollback")}>{t("plugin.rollback")}</button>
+                      <button type="button" disabled={!runtime.view.managementAvailable} onClick={() => void mutate("uninstall")}>{t("plugin.uninstall")}</button>
                     </div>
-                    {!runtime.view.managementAvailable && <p>当前为只读模式：缺少受信任的桌面管理会话。</p>}
-                    {loading && <p>正在读取受保护的插件详情…</p>}
+                    {!runtime.view.managementAvailable && <p>{t("plugin.readonly")}</p>}
+                    {loading && <p>{t("plugin.loadingDetail")}</p>}
                     {(detail?.trust ?? selected.trust) && (() => {
                       const trust = (detail?.trust ?? selected.trust)!;
                       return (
                         <section className="plugin-trust-installed-summary" data-trust-mode={trust.mode}>
-                          <h4>信任与运行时</h4>
+                          <h4>{t("plugin.trustRuntime")}</h4>
                           <p>
-                            来源 {trust.source.source} · 发布者身份 {trust.source.publisherIdentity}
-                            {trust.source.signatureRoot ? ` · 签名根 ${trust.source.signatureRoot}` : " · 未签名本地来源"}
+                            {t("plugin.sourceLine", { source: trust.source.source, identity: trust.source.publisherIdentity })}
+                            {trust.source.signatureRoot ? t("plugin.signedRoot", { root: trust.source.signatureRoot }) : t("plugin.unsignedLocal")}
                           </p>
                           <p>
-                            模式 {trust.mode} · 沙箱 {trust.authorization.sandbox.status}
-                            {` · ${trust.decisionRecorded ? "已有可撤销决定" : "默认策略"}`}
+                            {t("plugin.modeSandbox", { mode: trust.mode, status: trust.authorization.sandbox.status })}
+                            {` · ${trust.decisionRecorded ? t("plugin.hasDecision") : t("plugin.defaultPolicy")}`}
                           </p>
                           {trust.authorization.entrypoints.map((item) => (
                             <div className="plugin-trust-runtime" key={item.entrypointId}>
                               <strong>{item.entrypointId}</strong>
                               <span>{item.runtimeKind} · {item.runtimeId} · {item.supplySource}</span>
-                              <small>{item.hostManaged ? "Host-managed" : "插件随包 runtime"} · {item.profile.profileId}</small>
+                              <small>{item.hostManaged ? t("plugin.host.hostManaged") : t("plugin.bundledRuntime")} · {item.profile.profileId}</small>
                             </div>
                           ))}
                           <TrustRequestMatrix trust={trust.requests} />
-                          <small>账户、密钥与实盘 authority 始终独立保护；信任模式不会自动授予它们。</small>
+                          <small>{t("plugin.authorityHint")}</small>
                           {trust.changeAllowed && runtime.view.managementAvailable && (
                             <TrustModeControl runtime={runtime} pluginId={selected.id} trust={trust} onComplete={reload} />
                           )}
@@ -1545,32 +1590,34 @@ export function PluginSettingsPanel({ runtime }: { runtime: PluginPlatformRuntim
                       <>
                         {detail.health.entrypoints.some((item) => item.runtimeSupply !== undefined) && (
                           <>
-                            <h4>运行时供应</h4>
+                            <h4>{t("plugin.runtimeSupply")}</h4>
                             {detail.health.entrypoints.filter((item) => item.runtimeSupply !== undefined).map((item) => {
                               const supply = item.runtimeSupply!;
                               return (
                                 <p key={item.entrypointId} data-runtime-supply={supply.source}>
                                   {item.entrypointId} · {supply.runtimeId} {supply.version} · {supply.source}
-                                  · {supply.verificationStatus} · {supply.reproducible ? "可复现" : "不可复现"}
+                                  · {supply.verificationStatus} · {supply.reproducible ? t("plugin.reproducible") : t("plugin.unreproducible")}
                                 </p>
                               );
                             })}
                           </>
                         )}
-                        <h4>健康状态</h4>
-                        <p>{detail.health.available ? "可用" : `不可用：${detail.health.unavailableReason ?? "原因未知"}`}</p>
-                        <h4>更新与回滚</h4>
+                        <h4>{t("plugin.health")}</h4>
+                        <p>{detail.health.available ? t("plugin.available") : t("plugin.unavailableReason", { reason: detail.health.unavailableReason ?? t("plugin.unknownReason") })}</p>
+                        <h4>{t("plugin.updateRollback")}</h4>
                         <p>
-                          更新来源：签名插件市场或本地构建 · 自动更新已关闭
-                          {detail.update.latest ? ` · 已验证 ${detail.update.latest.version} 可用` : ""}
+                          {t("plugin.updateSource")}
+                          {detail.update.latest ? t("plugin.verifiedAvailable", { version: detail.update.latest.version }) : ""}
                           {detail.update.reason ? ` · ${detail.update.reason}` : ""}
                         </p>
-                        {detail.update.candidate && <p>候选版本：{detail.update.candidate.version} · {detail.update.candidate.phase}</p>}
-                        <p>回滚：{detail.rollback.available ? `可用 → ${detail.rollback.target?.version ?? detail.rollback.target?.state ?? "上一个激活版本"}` : detail.rollback.reason ?? "不可用"}</p>
-                        <h4>数据保留</h4>
-                        <p>停用或卸载后保留插件私有数据，不会自动删除。</p>
+                        {detail.update.candidate && <p>{t("plugin.candidate", { version: detail.update.candidate.version, phase: detail.update.candidate.phase })}</p>}
+                        <p>{detail.rollback.available
+                          ? t("plugin.rollbackAvailable", { target: detail.rollback.target?.version ?? detail.rollback.target?.state ?? t("plugin.previousActive") })
+                          : t("plugin.rollbackUnavailable", { reason: detail.rollback.reason ?? t("plugin.unavailable") })}</p>
+                        <h4>{t("plugin.dataRetention")}</h4>
+                        <p>{t("plugin.dataRetentionHint")}</p>
                         <pre>{JSON.stringify(detail.dataRetention.storage, null, 2)}</pre>
-                        <h4>权限</h4>
+                        <h4>{t("plugin.permissions")}</h4>
                         <PermissionRows runtime={runtime} detail={detail} reload={reload} />
                       </>
                     )}
@@ -1586,6 +1633,7 @@ export function PluginSettingsPanel({ runtime }: { runtime: PluginPlatformRuntim
 }
 
 export default function PluginPlatformSurfaces({ runtime }: { runtime: PluginPlatformRuntime }) {
+  useLocale();
   const openView = useMemo(
     () => [...runtime.view.registries.sidePanel, ...runtime.view.registries.bottomPanel].find((item) => item.id === runtime.view.openViewId) ?? null,
     [runtime.view.openViewId, runtime.view.registries.bottomPanel, runtime.view.registries.sidePanel],
@@ -1606,7 +1654,7 @@ export default function PluginPlatformSurfaces({ runtime }: { runtime: PluginPla
       <CommandPalette runtime={runtime} />
       {openSettings && <SettingsSurface runtime={runtime} contribution={openSettings} />}
       {openView && <ViewSurface key={openView.id} runtime={runtime} contribution={openView} />}
-      {runtime.view.error && <div className="plugin-platform-notice plugin-platform-error" role="alert">Plugin Platform unavailable: {runtime.view.error}</div>}
+      {runtime.view.error && <div className="plugin-platform-notice plugin-platform-error" role="alert">{t("plugin.host.platformUnavailable", { error: runtime.view.error })}</div>}
       {runtime.view.notice && (
         <button type="button" className="plugin-platform-notice" onClick={runtime.actions.clearNotice}>{runtime.view.notice}</button>
       )}

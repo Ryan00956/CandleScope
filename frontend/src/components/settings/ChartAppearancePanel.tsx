@@ -3,18 +3,26 @@ import type {
     ChartTheme,
     PriceBoxSizeMode,
 } from "../../features/settings/chartAppearanceSettings.js";
+import {
+    LOCALE_OPTIONS,
+    setLocale,
+    t,
+    type LocaleId,
+    type MessageKey,
+} from "../../i18n/index.js";
+import { useLocale } from "../../i18n/useLocale.js";
 
 interface ThemeOption {
     value: ChartTheme;
     icon: string;
-    label: string;
+    labelKey: MessageKey;
 }
 
 const THEME_OPTIONS: ThemeOption[] = [
-    { value: "dark", icon: "🌙", label: "深色" },
-    { value: "light", icon: "☀️", label: "亮色" },
-    { value: "system", icon: "🌓", label: "跟随系统" },
-    { value: "custom", icon: "🎨", label: "自定义" },
+    { value: "dark", icon: "🌙", labelKey: "settings.appearance.theme.dark" },
+    { value: "light", icon: "☀️", labelKey: "settings.appearance.theme.light" },
+    { value: "system", icon: "🌓", labelKey: "settings.appearance.theme.system" },
+    { value: "custom", icon: "🎨", labelKey: "settings.appearance.theme.custom" },
 ];
 
 function priceBoxSizeMode(value: string): PriceBoxSizeMode {
@@ -27,15 +35,36 @@ export interface ChartAppearancePanelProps {
 }
 
 export default function ChartAppearancePanel({ settings, onUpdate }: ChartAppearancePanelProps) {
+    useLocale();
     const handleUpdate = <K extends keyof ChartSettings>(key: K, value: ChartSettings[K]) => {
         onUpdate({ ...settings, [key]: value });
+    };
+    const handleLocaleChange = (locale: LocaleId) => {
+        setLocale(locale);
+        handleUpdate("locale", locale);
     };
 
     return (
         <>
             <div className="st-group">
-                <div className="st-group-title">视觉主题</div>
-                <div className="st-group-desc">选择界面的整体视觉风格，可跟随系统亮/暗色自动切换</div>
+                <div className="st-group-title">{t("settings.language.title")}</div>
+                <div className="st-group-desc">{t("settings.language.description")}</div>
+                <select
+                    className="st-select"
+                    value={settings.locale || "zh-CN"}
+                    onChange={(event) => handleLocaleChange(event.target.value === "en" ? "en" : "zh-CN")}
+                    aria-label={t("settings.language.title")}
+                    data-settings-locale="true"
+                >
+                    {LOCALE_OPTIONS.map((option) => (
+                        <option key={option.id} value={option.id}>{option.nativeLabel}</option>
+                    ))}
+                </select>
+            </div>
+
+            <div className="st-group">
+                <div className="st-group-title">{t("settings.appearance.themeTitle")}</div>
+                <div className="st-group-desc">{t("settings.appearance.themeDescription")}</div>
                 <div className="st-theme-grid st-appearance-theme-grid">
                     {THEME_OPTIONS.map((theme) => (
                         <button
@@ -44,7 +73,7 @@ export default function ChartAppearancePanel({ settings, onUpdate }: ChartAppear
                             onClick={() => handleUpdate('theme', theme.value)}
                         >
                             <span className="st-theme-icon">{theme.icon}</span>
-                            <span className="st-theme-label">{theme.label}</span>
+                            <span className="st-theme-label">{t(theme.labelKey)}</span>
                         </button>
                     ))}
                 </div>
@@ -52,7 +81,7 @@ export default function ChartAppearancePanel({ settings, onUpdate }: ChartAppear
 
             {settings.theme === 'custom' && (
                 <div className="st-group">
-                    <div className="st-group-title">自定义背景色</div>
+                    <div className="st-group-title">{t("settings.appearance.customBg")}</div>
                     <div className="st-color-row">
                         <input
                             type="color"
@@ -65,27 +94,27 @@ export default function ChartAppearancePanel({ settings, onUpdate }: ChartAppear
             )}
 
             <div className="st-group">
-                <div className="st-group-title">涨跌颜色方案</div>
-                <div className="st-group-desc">设置 K 线涨跌配色，也可以自定义</div>
+                <div className="st-group-title">{t("settings.appearance.colorScheme")}</div>
+                <div className="st-group-desc">{t("settings.appearance.colorSchemeDescription")}</div>
                 <div className="st-preset-row">
                     <button
                         className="st-preset-btn"
                         onClick={() => onUpdate({ ...settings, upColor: '#22c55e', downColor: '#ef4444' })}
                     >
-                        <span style={{ color: '#22c55e', fontWeight: 700 }}>● 绿涨</span>
-                        <span style={{ color: '#ef4444', fontWeight: 700 }}>● 红跌</span>
+                        <span style={{ color: '#22c55e', fontWeight: 700 }}>● {t("settings.appearance.greenUp")}</span>
+                        <span style={{ color: '#ef4444', fontWeight: 700 }}>● {t("settings.appearance.redDown")}</span>
                     </button>
                     <button
                         className="st-preset-btn"
                         onClick={() => onUpdate({ ...settings, upColor: '#ef4444', downColor: '#22c55e' })}
                     >
-                        <span style={{ color: '#ef4444', fontWeight: 700 }}>● 红涨</span>
-                        <span style={{ color: '#22c55e', fontWeight: 700 }}>● 绿跌</span>
+                        <span style={{ color: '#ef4444', fontWeight: 700 }}>● {t("settings.appearance.redUp")}</span>
+                        <span style={{ color: '#22c55e', fontWeight: 700 }}>● {t("settings.appearance.greenDown")}</span>
                     </button>
                 </div>
                 <div className="st-custom-colors">
                     <div className="st-color-item">
-                        <span>上涨颜色</span>
+                        <span>{t("settings.appearance.upColor")}</span>
                         <div className="st-color-row">
                             <input
                                 type="color"
@@ -96,7 +125,7 @@ export default function ChartAppearancePanel({ settings, onUpdate }: ChartAppear
                         </div>
                     </div>
                     <div className="st-color-item">
-                        <span>下跌颜色</span>
+                        <span>{t("settings.appearance.downColor")}</span>
                         <div className="st-color-row">
                             <input
                                 type="color"
@@ -111,24 +140,24 @@ export default function ChartAppearancePanel({ settings, onUpdate }: ChartAppear
 
             {settings.chartType === 'renko' && (
                 <div className="st-group">
-                    <div className="st-group-title">Renko 砖块</div>
+                    <div className="st-group-title">{t("settings.appearance.renkoTitle")}</div>
                     <div className="st-group-desc">
-                        使用源周期收盘价生成合成砖块。ATR 模式会在进入图表时确定固定砖高；传统模式使用手动砖高。
+                        {t("settings.appearance.renkoDescription")}
                     </div>
                     <label className="st-field">
-                        <span>砖高计算</span>
+                        <span>{t("settings.appearance.boxSizeMode")}</span>
                         <select
                             className="st-select"
                             value={settings.renkoBoxSizeMode || 'atr'}
                             onChange={(event) => handleUpdate('renkoBoxSizeMode', priceBoxSizeMode(event.target.value))}
                         >
-                            <option value="atr">ATR 自动</option>
-                            <option value="traditional">传统固定砖高</option>
+                            <option value="atr">{t("settings.appearance.atrAuto")}</option>
+                            <option value="traditional">{t("settings.appearance.traditionalBox")}</option>
                         </select>
                     </label>
                     {(settings.renkoBoxSizeMode || 'atr') === 'atr' ? (
                         <label className="st-field">
-                            <span>ATR 长度</span>
+                            <span>{t("settings.appearance.atrLength")}</span>
                             <input
                                 className="st-input"
                                 type="number"
@@ -141,7 +170,7 @@ export default function ChartAppearancePanel({ settings, onUpdate }: ChartAppear
                         </label>
                     ) : (
                         <label className="st-field">
-                            <span>固定砖高</span>
+                            <span>{t("settings.appearance.fixedBox")}</span>
                             <input
                                 className="st-input"
                                 type="number"
@@ -153,31 +182,31 @@ export default function ChartAppearancePanel({ settings, onUpdate }: ChartAppear
                         </label>
                     )}
                     <div className="st-group-desc">
-                        Renko 价格是合成值，不应用作精确成交价或回测成交价。
+                        {t("settings.appearance.renkoFooter")}
                     </div>
                 </div>
             )}
 
             {settings.chartType === 'point-and-figure' && (
                 <div className="st-group">
-                    <div className="st-group-title">Point &amp; Figure 点数图</div>
+                    <div className="st-group-title">{t("settings.appearance.pointFigureTitle")}</div>
                     <div className="st-group-desc">
-                        使用源周期收盘价生成严格交替的 X/O 列。ATR 模式在进入图表时确定固定箱格；传统模式使用手动箱格。
+                        {t("settings.appearance.pointFigureDescription")}
                     </div>
                     <label className="st-field">
-                        <span>箱格计算</span>
+                        <span>{t("settings.appearance.pointFigureBoxMode")}</span>
                         <select
                             className="st-select"
                             value={settings.pointFigureBoxSizeMode || 'atr'}
                             onChange={(event) => handleUpdate('pointFigureBoxSizeMode', priceBoxSizeMode(event.target.value))}
                         >
-                            <option value="atr">ATR 自动</option>
-                            <option value="traditional">传统固定箱格</option>
+                            <option value="atr">{t("settings.appearance.atrAuto")}</option>
+                            <option value="traditional">{t("settings.appearance.traditionalPointFigureBox")}</option>
                         </select>
                     </label>
                     {(settings.pointFigureBoxSizeMode || 'atr') === 'atr' ? (
                         <label className="st-field">
-                            <span>ATR 长度</span>
+                            <span>{t("settings.appearance.atrLength")}</span>
                             <input
                                 className="st-input"
                                 type="number"
@@ -190,7 +219,7 @@ export default function ChartAppearancePanel({ settings, onUpdate }: ChartAppear
                         </label>
                     ) : (
                         <label className="st-field">
-                            <span>固定箱格</span>
+                            <span>{t("settings.appearance.fixedPointFigureBox")}</span>
                             <input
                                 className="st-input"
                                 type="number"
@@ -202,7 +231,7 @@ export default function ChartAppearancePanel({ settings, onUpdate }: ChartAppear
                         </label>
                     )}
                     <label className="st-field">
-                        <span>反转格数</span>
+                        <span>{t("settings.appearance.reversalBoxes")}</span>
                         <input
                             className="st-input"
                             type="number"
@@ -214,31 +243,31 @@ export default function ChartAppearancePanel({ settings, onUpdate }: ChartAppear
                         />
                     </label>
                     <div className="st-group-desc">
-                        点数图是合成价格结构；V1 不支持 High/Low 路径、Percentage 和 One Step Back，也不应用作精确成交价。
+                        {t("settings.appearance.pointFigureFooter")}
                     </div>
                 </div>
             )}
 
             {settings.chartType === 'kagi' && (
                 <div className="st-group">
-                    <div className="st-group-title">Kagi 卡吉图</div>
+                    <div className="st-group-title">{t("settings.appearance.kagiTitle")}</div>
                     <div className="st-group-desc">
-                        使用源周期收盘价生成无时间比例的转折线。突破前肩切换为 Yang 粗线，跌破前腰切换为 Yin 细线；粗细与涨跌方向独立。
+                        {t("settings.appearance.kagiDescription")}
                     </div>
                     <label className="st-field">
-                        <span>反转距离</span>
+                        <span>{t("settings.appearance.reversalDistance")}</span>
                         <select
                             className="st-select"
                             value={settings.kagiReversalMode || 'atr'}
                             onChange={(event) => handleUpdate('kagiReversalMode', priceBoxSizeMode(event.target.value))}
                         >
-                            <option value="atr">ATR 自动</option>
-                            <option value="traditional">传统固定距离</option>
+                            <option value="atr">{t("settings.appearance.atrAuto")}</option>
+                            <option value="traditional">{t("settings.appearance.traditionalDistance")}</option>
                         </select>
                     </label>
                     {(settings.kagiReversalMode || 'atr') === 'atr' ? (
                         <label className="st-field">
-                            <span>ATR 长度</span>
+                            <span>{t("settings.appearance.atrLength")}</span>
                             <input
                                 className="st-input"
                                 type="number"
@@ -251,7 +280,7 @@ export default function ChartAppearancePanel({ settings, onUpdate }: ChartAppear
                         </label>
                     ) : (
                         <label className="st-field">
-                            <span>固定反转距离</span>
+                            <span>{t("settings.appearance.fixedReversalDistance")}</span>
                             <input
                                 className="st-input"
                                 type="number"
@@ -263,19 +292,19 @@ export default function ChartAppearancePanel({ settings, onUpdate }: ChartAppear
                         </label>
                     )}
                     <div className="st-group-desc">
-                        Kagi 是合成价格结构；V1 使用 Close，不支持 Percentage，也不应用作精确成交价或回测成交价。
+                        {t("settings.appearance.kagiFooter")}
                     </div>
                 </div>
             )}
 
             {settings.chartType === 'line-break' && (
                 <div className="st-group">
-                    <div className="st-group-title">Line Break 新价线</div>
+                    <div className="st-group-title">{t("settings.appearance.lineBreakTitle")}</div>
                     <div className="st-group-desc">
-                        使用源周期收盘价与最近若干条合成线的高低区间比较；只有严格突破区间才生成新线。
+                        {t("settings.appearance.lineBreakDescription")}
                     </div>
                     <label className="st-field">
-                        <span>参考线数量</span>
+                        <span>{t("settings.appearance.lineBreakCount")}</span>
                         <input
                             className="st-input"
                             type="number"
@@ -287,30 +316,30 @@ export default function ChartAppearancePanel({ settings, onUpdate }: ChartAppear
                         />
                     </label>
                     <div className="st-group-desc">
-                        常用设置为 3。最新未收盘源 K 触发的 line 可能随价格回撤消失；合成价格不应用作精确成交价或回测成交价。
+                        {t("settings.appearance.lineBreakFooter")}
                     </div>
                 </div>
             )}
 
             <div className="st-group">
-                <div className="st-group-title">显示时区</div>
-                <div className="st-group-desc">图表坐标轴及十字线时间标签使用的时区</div>
+                <div className="st-group-title">{t("settings.appearance.timezoneTitle")}</div>
+                <div className="st-group-desc">{t("settings.appearance.timezoneDescription")}</div>
                 <select
                     className="st-select"
                     value={settings.timezone || 'Local'}
                     onChange={(event) => handleUpdate('timezone', event.target.value)}
                 >
-                    <option value="Local">本地时间 (Browser Default)</option>
-                    <optgroup label="常用地区 (Common)">
-                        <option value="UTC">UTC (世界协调时间)</option>
-                        <option value="America/New_York">纽约 (New York - EST/EDT)</option>
-                        <option value="Europe/London">伦敦 (London - GMT/BST)</option>
-                        <option value="Asia/Shanghai">北京/上海 (Shanghai - CST)</option>
-                        <option value="Asia/Tokyo">东京 (Tokyo - JST)</option>
-                        <option value="Asia/Singapore">新加坡 (Singapore)</option>
-                        <option value="Asia/Hong_Kong">香港 (Hong Kong)</option>
+                    <option value="Local">{t("settings.appearance.timezoneLocal")}</option>
+                    <optgroup label={t("settings.appearance.timezoneCommon")}>
+                        <option value="UTC">{t("settings.appearance.timezoneUtc")}</option>
+                        <option value="America/New_York">{t("settings.appearance.timezoneNewYork")}</option>
+                        <option value="Europe/London">{t("settings.appearance.timezoneLondon")}</option>
+                        <option value="Asia/Shanghai">{t("settings.appearance.timezoneShanghai")}</option>
+                        <option value="Asia/Tokyo">{t("settings.appearance.timezoneTokyo")}</option>
+                        <option value="Asia/Singapore">{t("settings.appearance.timezoneSingapore")}</option>
+                        <option value="Asia/Hong_Kong">{t("settings.appearance.timezoneHongKong")}</option>
                     </optgroup>
-                    <optgroup label="所有时区 (All Timezones)">
+                    <optgroup label={t("settings.appearance.timezoneAll")}>
                         {Intl.supportedValuesOf('timeZone').map((timezone) => (
                             <option key={timezone} value={timezone}>{timezone.replace('_', ' ')}</option>
                         ))}

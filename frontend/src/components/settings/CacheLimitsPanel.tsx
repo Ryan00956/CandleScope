@@ -1,4 +1,6 @@
 import { useEffect, useState } from "react";
+import { t } from "../../i18n/index.js";
+import { useLocale } from "../../i18n/useLocale.js";
 import type {
     CacheRowLimits,
     ChartSettings,
@@ -9,24 +11,24 @@ const CACHE_TIER_KEYS: CacheTierKey[] = ["minutes", "hours", "daily"];
 
 interface CacheTier {
     key: CacheTierKey;
-    label: string;
-    desc: string;
+    labelKey: "settings.cache.minutes" | "settings.cache.hours" | "settings.cache.daily";
+    descKey: "settings.cache.minutesDesc" | "settings.cache.hoursDesc" | "settings.cache.dailyDesc";
     representativeSec: number;
 }
 
 interface CachePreset {
     key: string;
-    label: string;
+    labelKey: "settings.cache.compact" | "settings.cache.standard" | "settings.cache.generous" | "settings.cache.unlimited";
+    descKey: "settings.cache.compactDesc" | "settings.cache.standardDesc" | "settings.cache.generousDesc" | "settings.cache.unlimitedDesc";
     icon: string;
-    desc: string;
     limits: CacheRowLimits;
 }
 
 const EPHEMERAL_CACHE_OPTIONS = [
-    { value: 3600, label: '1 小时', desc: '3,600 根' },
-    { value: 14400, label: '4 小时', desc: '14,400 根' },
-    { value: 43200, label: '12 小时', desc: '43,200 根' },
-    { value: 86400, label: '24 小时', desc: '86,400 根' },
+    { value: 3600, labelKey: "settings.cache.hour1" as const, bars: 3600 },
+    { value: 14400, labelKey: "settings.cache.hour4" as const, bars: 14400 },
+    { value: 43200, labelKey: "settings.cache.hour12" as const, bars: 43200 },
+    { value: 86400, labelKey: "settings.cache.hour24" as const, bars: 86400 },
 ];
 
 const DEFAULT_EPHEMERAL_BARS = 86400;
@@ -34,41 +36,52 @@ const DEFAULT_FRONTEND_CACHE_BUDGET_BYTES = 64 * 1024 * 1024;
 
 const DB_TIERS: CacheTier[] = [
     {
-        key: 'minutes', label: '分钟级',
-        desc: '1 分钟 – 59 分钟  (1m, 5m, 15m, 45m …)',
+        key: 'minutes',
+        labelKey: 'settings.cache.minutes',
+        descKey: 'settings.cache.minutesDesc',
         representativeSec: 60,
     },
     {
-        key: 'hours', label: '小时级',
-        desc: '1 小时 – 23 小时  (1h, 2h, 4h, 12h …)',
+        key: 'hours',
+        labelKey: 'settings.cache.hours',
+        descKey: 'settings.cache.hoursDesc',
         representativeSec: 3600,
     },
     {
-        key: 'daily', label: '天级+',
-        desc: '≥ 1 天  (1d, 3d, 1w, 1M …)',
+        key: 'daily',
+        labelKey: 'settings.cache.daily',
+        descKey: 'settings.cache.dailyDesc',
         representativeSec: 86400,
     },
 ];
 
 const DB_PRESETS: CachePreset[] = [
     {
-        key: 'compact', label: '紧凑', icon: '🟢',
-        desc: '节省磁盘，保留较少历史',
+        key: 'compact',
+        labelKey: 'settings.cache.compact',
+        descKey: 'settings.cache.compactDesc',
+        icon: '🟢',
         limits: { minutes: 50000, hours: 20000, daily: 0 },
     },
     {
-        key: 'standard', label: '标准', icon: '🔵',
-        desc: '推荐设置，平衡存储与可用性',
+        key: 'standard',
+        labelKey: 'settings.cache.standard',
+        descKey: 'settings.cache.standardDesc',
+        icon: '🔵',
         limits: { minutes: 200000, hours: 50000, daily: 0 },
     },
     {
-        key: 'generous', label: '宽裕', icon: '🟡',
-        desc: '保留更多历史，占用更多磁盘',
+        key: 'generous',
+        labelKey: 'settings.cache.generous',
+        descKey: 'settings.cache.generousDesc',
+        icon: '🟡',
         limits: { minutes: 500000, hours: 100000, daily: 0 },
     },
     {
-        key: 'unlimited', label: '无限制', icon: '⚪',
-        desc: '不自动清理，数据库持续增长',
+        key: 'unlimited',
+        labelKey: 'settings.cache.unlimited',
+        descKey: 'settings.cache.unlimitedDesc',
+        icon: '⚪',
         limits: { minutes: 0, hours: 0, daily: 0 },
     },
 ];
@@ -76,12 +89,12 @@ const DB_PRESETS: CachePreset[] = [
 const DEFAULT_DB_LIMITS: CacheRowLimits = { minutes: 200000, hours: 50000, daily: 0 };
 
 function barsToHumanTime(bars: number, representativeSec: number): string {
-    if (bars === 0) return '不清理';
+    if (bars === 0) return t("settings.cache.noCleanup");
     const totalSec = bars * representativeSec;
-    if (totalSec < 3600) return `≈ ${Math.round(totalSec / 60)} 分钟`;
-    if (totalSec < 86400) return `≈ ${(totalSec / 3600).toFixed(1)} 小时`;
-    if (totalSec < 86400 * 365) return `≈ ${Math.round(totalSec / 86400)} 天`;
-    return `≈ ${(totalSec / (86400 * 365)).toFixed(0)} 年+`;
+    if (totalSec < 3600) return t("settings.cache.approxMinutes", { count: Math.round(totalSec / 60) });
+    if (totalSec < 86400) return t("settings.cache.approxHours", { count: (totalSec / 3600).toFixed(1) });
+    if (totalSec < 86400 * 365) return t("settings.cache.approxDays", { count: Math.round(totalSec / 86400) });
+    return t("settings.cache.approxYears", { count: (totalSec / (86400 * 365)).toFixed(0) });
 }
 
 function barsToStorageSize(bars: number): string {
@@ -135,6 +148,7 @@ export default function CacheLimitsPanel({
     showAdvanced,
     onToggleAdvanced,
 }: CacheLimitsPanelProps) {
+    const locale = useLocale();
     const currentPreset = settings.cachePreset || 'standard';
     const currentLimits = settings.cacheLimits || { ...DEFAULT_DB_LIMITS };
     const currentEphemeralBars = settings.ephemeralCacheBars ?? DEFAULT_EPHEMERAL_BARS;
@@ -222,12 +236,11 @@ export default function CacheLimitsPanel({
         <>
             <div className="st-group">
                 <div className="st-group-title">
-                    <span>秒级内存缓存</span>
-                    <span className="st-badge st-badge-memory">内存</span>
+                    <span>{t("settings.cache.ephemeralTitle")}</span>
+                    <span className="st-badge st-badge-memory">{t("settings.cache.memory")}</span>
                 </div>
                 <div className="st-group-desc">
-                    秒级 K 线（如 1s）仅存在于内存缓存中，<strong>不写入数据库</strong>。
-                    进程退出后自动丢弃，下次启动重新从交易所接收。
+                    {t("settings.cache.ephemeralDesc")}
                 </div>
 
                 <div className="st-ephemeral-cards">
@@ -237,40 +250,39 @@ export default function CacheLimitsPanel({
                             className={`st-ephemeral-card ${currentEphemeralBars === option.value ? 'active' : ''}`}
                             onClick={() => handleEphemeralChange(option.value)}
                         >
-                            <span className="st-ephemeral-label">{option.label}</span>
-                            <span className="st-ephemeral-desc">{option.desc}</span>
+                            <span className="st-ephemeral-label">{t(option.labelKey)}</span>
+                            <span className="st-ephemeral-desc">{t("settings.cache.bars", { count: option.bars.toLocaleString(locale) })}</span>
                         </button>
                     ))}
                 </div>
 
                 <div className="st-ephemeral-summary">
                     <span className="st-ephemeral-stat">
-                        📊 缓存容量: <strong>{currentEphemeralBars.toLocaleString()}</strong> 根
+                        📊 {t("settings.cache.capacity")} <strong>{currentEphemeralBars.toLocaleString(locale)}</strong>
                     </span>
                     <span className="st-ephemeral-stat">
-                        ⏱ 约覆盖: <strong>{barsToHumanTime(currentEphemeralBars, 1).replace('≈ ', '')}</strong>
+                        ⏱ {t("settings.cache.coverage")} <strong>{barsToHumanTime(currentEphemeralBars, 1).replace('≈ ', '')}</strong>
                     </span>
                     <span className="st-ephemeral-stat">
-                        💾 内存占用: <strong>{barsToMemorySize(currentEphemeralBars)}</strong> / 交易对
+                        💾 {t("settings.cache.memoryUse")} <strong>{barsToMemorySize(currentEphemeralBars)}</strong> {t("settings.cache.perSymbol")}
                     </span>
                 </div>
             </div>
 
             <div className="st-group">
                 <div className="st-group-title">
-                    <span>数据库存储策略</span>
-                    <span className="st-badge st-badge-db">持久化</span>
+                    <span>{t("settings.cache.dbTitle")}</span>
+                    <span className="st-badge st-badge-db">{t("settings.cache.persistent")}</span>
                 </div>
                 <div className="st-group-desc">
-                    分钟级及以上 K 线持久化到数据库。SQLite 预算用于 DB + WAL 水位与清理规划；
-                    SHM 仅展示、不计入可回收压力。自动删除数据库行默认关闭，只有后端显式启用后才会执行；VACUUM 始终手动。
+                    {t("settings.cache.dbDesc")}
                 </div>
 
                 <div className="st-tier-table">
                     <div className="st-tier-row">
                         <div className="st-tier-col-name">
-                            <span className="st-tier-label">前端缓存预算</span>
-                            <span className="st-tier-desc">浏览器内 warm/cold K 线与指标缓存</span>
+                            <span className="st-tier-label">{t("settings.cache.frontendBudget")}</span>
+                            <span className="st-tier-desc">{t("settings.cache.frontendBudgetDesc")}</span>
                         </div>
                         <div className="st-tier-col-limit">
                             <input
@@ -289,7 +301,7 @@ export default function CacheLimitsPanel({
                                         setFrontendBudgetDraft(String(bytesToMbInput(currentFrontendBudget)));
                                     }
                                 }}
-                                title="前端缓存最大估算内存 MB"
+                                title={t("settings.cache.frontendBudgetTitle")}
                             />
                         </div>
                         <span className="st-tier-col-time">MB</span>
@@ -297,8 +309,8 @@ export default function CacheLimitsPanel({
                     </div>
                     <div className="st-tier-row">
                         <div className="st-tier-col-name">
-                            <span className="st-tier-label">SQLite 数据库预算</span>
-                            <span className="st-tier-desc">DB + WAL 规划水位；留空表示不设置预算</span>
+                            <span className="st-tier-label">{t("settings.cache.sqliteBudget")}</span>
+                            <span className="st-tier-desc">{t("settings.cache.sqliteBudgetDesc")}</span>
                         </div>
                         <div className="st-tier-col-limit">
                             <input
@@ -308,7 +320,7 @@ export default function CacheLimitsPanel({
                                 min={0}
                                 max={16384}
                                 step={0.25}
-                                placeholder="未设置"
+                                placeholder={t("settings.cache.unset")}
                                 onChange={(event) => setSqliteBudgetDraft(event.target.value)}
                                 onBlur={commitSqliteBudget}
                                 onKeyDown={(event) => {
@@ -318,11 +330,11 @@ export default function CacheLimitsPanel({
                                         setSqliteBudgetDraft(bytesToGbInput(currentSqliteBudget));
                                     }
                                 }}
-                                title="SQLite DB + WAL 规划预算（GB）；自动删除需后端显式启用"
+                                title={t("settings.cache.sqliteBudgetTitle")}
                             />
                         </div>
                         <span className="st-tier-col-time">GB</span>
-                        <span className="st-tier-col-size">{currentSqliteBudget ? barsToStorageSize(Math.floor(currentSqliteBudget / 200)) : '未设置'}</span>
+                        <span className="st-tier-col-size">{currentSqliteBudget ? barsToStorageSize(Math.floor(currentSqliteBudget / 200)) : t("settings.cache.unset")}</span>
                     </div>
                 </div>
 
@@ -334,32 +346,31 @@ export default function CacheLimitsPanel({
                             onClick={() => handlePresetChange(preset.key)}
                         >
                             <span className="st-preset-icon">{preset.icon}</span>
-                            <span className="st-preset-name">{preset.label}</span>
-                            <span className="st-preset-desc">{preset.desc}</span>
+                            <span className="st-preset-name">{t(preset.labelKey)}</span>
+                            <span className="st-preset-desc">{t(preset.descKey)}</span>
                         </button>
                     ))}
                 </div>
 
                 {isCustomPreset && (
                     <div className="st-info-box" style={{ marginTop: 12 }}>
-                        <span>🔧 当前使用自定义配置，不匹配任何预设</span>
+                        <span>🔧 {t("settings.cache.custom")}</span>
                     </div>
                 )}
             </div>
 
             <div className="st-group">
                 <div className="st-group-title-row">
-                    <div className="st-group-title" style={{ marginBottom: 0 }}>高级行数上限 / 保护策略</div>
+                    <div className="st-group-title" style={{ marginBottom: 0 }}>{t("settings.cache.advanced")}</div>
                     <button
                         className={`st-advanced-toggle ${showAdvanced ? 'active' : ''}`}
                         onClick={onToggleAdvanced}
                     >
-                        {showAdvanced ? '收起高级 ▴' : '高级 ▾'}
+                        {showAdvanced ? t("settings.cache.hideAdvanced") : t("settings.cache.showAdvanced")}
                     </button>
                 </div>
                 <div className="st-group-desc">
-                    这些上限只在启用后作为额外硬规则。清理规划仍会优先参考冷热、活跃订阅、自定义周期和 storage intent 风险；
-                    自动行删除能力仍由后端独立控制。
+                    {t("settings.cache.advancedDesc")}
                 </div>
 
                 <label className="st-info-box" style={{ marginTop: 0 }}>
@@ -368,23 +379,23 @@ export default function CacheLimitsPanel({
                         checked={rowLimitsEnabled}
                         onChange={(event) => handleRowLimitsEnabledChange(event.target.checked)}
                     />
-                    <span>启用每系列行数上限</span>
+                    <span>{t("settings.cache.enableRowLimits")}</span>
                 </label>
 
                 <div className="st-tier-table">
                     <div className="st-tier-header">
-                        <span className="st-tier-col-name">级别</span>
-                        <span className="st-tier-col-limit">最大根数</span>
-                        <span className="st-tier-col-time">≈ 对应时长</span>
-                        <span className="st-tier-col-size">≈ 磁盘占用 / 系列</span>
+                        <span className="st-tier-col-name">{t("settings.cache.tier")}</span>
+                        <span className="st-tier-col-limit">{t("settings.cache.maxBars")}</span>
+                        <span className="st-tier-col-time">{t("settings.cache.duration")}</span>
+                        <span className="st-tier-col-size">{t("settings.cache.disk")}</span>
                     </div>
                     {DB_TIERS.map((tier) => {
                         const limit = currentLimits[tier.key] ?? 0;
                         return (
                             <div key={tier.key} className="st-tier-row">
                                 <div className="st-tier-col-name">
-                                    <span className="st-tier-label">{tier.label}</span>
-                                    <span className="st-tier-desc">{tier.desc}</span>
+                                    <span className="st-tier-label">{t(tier.labelKey)}</span>
+                                    <span className="st-tier-desc">{t(tier.descKey)}</span>
                                 </div>
                                 <div className="st-tier-col-limit">
                                     {showAdvanced && rowLimitsEnabled && tier.key !== 'daily' ? (
@@ -395,11 +406,11 @@ export default function CacheLimitsPanel({
                                             min={0}
                                             step={1000}
                                             onChange={(event) => handleLimitChange(tier.key, Math.max(0, parseInt(event.target.value) || 0))}
-                                            title="0 = 不清理"
+                                            title={t("settings.cache.zeroNoCleanup")}
                                         />
                                     ) : (
                                         <span className={`st-tier-value ${limit === 0 ? 'unlimited' : ''}`}>
-                                            {!rowLimitsEnabled ? '关闭' : limit === 0 ? '∞' : limit.toLocaleString()}
+                                            {!rowLimitsEnabled ? t("settings.cache.off") : limit === 0 ? '∞' : limit.toLocaleString(locale)}
                                         </span>
                                     )}
                                 </div>
@@ -416,7 +427,7 @@ export default function CacheLimitsPanel({
 
                 {showAdvanced && (
                     <div className="st-advanced-hint">
-                        <span>输入 <strong>0</strong> 表示该级别不使用行数上限。SQLite 预算只定义规划水位，不会自行开启自动行删除。</span>
+                        <span>{t("settings.cache.zeroHint")}</span>
                     </div>
                 )}
             </div>

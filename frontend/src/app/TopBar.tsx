@@ -16,6 +16,8 @@ import type { SymbolSearchProps } from "../features/symbol-search/SymbolSearch.j
 import type { AdvancedMarketRuntimeView } from "../features/advanced-market-data/advancedMarketDataTypes.js";
 import type { ReplayEntryCapabilityView } from "../features/replay/useReplayEntryCapability.js";
 import { useAdvancedMarketSummary } from "../features/advanced-market-data/useAdvancedMarketSnapshots.js";
+import { t } from "../i18n/index.js";
+import { useLocale } from "../i18n/useLocale.js";
 import MarketTopBarFrame from "./MarketTopBarFrame.js";
 
 export interface TopBarSymbolSearchModel extends Omit<SymbolSearchProps, "onSelect"> {
@@ -71,6 +73,7 @@ function TopBar({
   } = controls;
   const { displayData, isUp, priceChange } = buildMarketSummary(marketSummary.displayData);
   const advancedSummary = useAdvancedMarketSummary(advancedMarketData);
+  useLocale();
   const basisText = advancedSummary.basis == null
     ? "--"
     : `${advancedSummary.basis >= 0 ? "+" : "-"}${formatPrice(Math.abs(advancedSummary.basis))}`;
@@ -89,7 +92,7 @@ function TopBar({
           onFocus={loadReplayLauncherDialog}
           onClick={onOpenReplayLauncher}
         >
-          K 线回放
+          {t("shell.replay")}
         </button>
         )}
         {(replayEntry.state === "checking" || replayEntry.state === "disabled") && (
@@ -100,7 +103,7 @@ function TopBar({
           disabled
           title={replayEntry.reason}
         >
-          K 线回放
+          {t("shell.replay")}
         </button>
         )}
       </>}
@@ -116,6 +119,8 @@ function TopBar({
       controls={<>
         <button
         className="settings-btn"
+        title={t("shell.settings")}
+        aria-label={t("shell.settings")}
         onPointerEnter={loadSettingsModal}
         onMouseOver={loadSettingsModal}
         onMouseEnter={loadSettingsModal}
@@ -139,7 +144,7 @@ function TopBar({
         <button
         className={`indicator-toggle-btn ${indicatorPanelOpen ? "active" : ""}`}
         onClick={onToggleIndicatorPanel}
-        title="指标 (Indicators)"
+        title={t("shell.indicators")}
       >
         📊
         {activeIndicatorCount > 0 && (
@@ -150,7 +155,7 @@ function TopBar({
         <button
         className={`indicator-toggle-btn alert-toggle-btn ${alertPanelOpen ? "active" : ""}`}
         onClick={onToggleAlertPanel}
-        title="警报 (Alerts)"
+        title={t("shell.alerts")}
       >
         🔔
         </button>
@@ -169,18 +174,18 @@ function TopBar({
       marketMetrics={advancedMarketData.summaryEnabled && (
         <div
           className={`advanced-market-summary advanced-market-summary-${advancedSummary.connectionStatus}`}
-          aria-label="Derivatives market summary"
+          aria-label={t("shell.derivativesSummary")}
         >
           <div className="advanced-market-chip" data-market-metric="mark-price">
-            <span className="advanced-market-chip-label">Mark</span>
+            <span className="advanced-market-chip-label">{t("shell.mark")}</span>
             <span className="advanced-market-chip-value">{formatPrice(advancedSummary.markPrice)}</span>
           </div>
           <div className="advanced-market-chip" data-market-metric="index-price">
-            <span className="advanced-market-chip-label">Index</span>
+            <span className="advanced-market-chip-label">{t("shell.index")}</span>
             <span className="advanced-market-chip-value">{formatPrice(advancedSummary.indexPrice)}</span>
           </div>
           <div className="advanced-market-chip" data-market-metric="basis">
-            <span className="advanced-market-chip-label">Basis</span>
+            <span className="advanced-market-chip-label">{t("shell.basis")}</span>
             <span className="advanced-market-chip-value">{basisText}</span>
             {advancedSummary.basisBps != null && (
               <span className="advanced-market-chip-suffix">

@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
+import { t } from "../../i18n/index.js";
+import { useLocale } from "../../i18n/useLocale.js";
 import { useChartSurfaceRuntime } from "../../chart-adapter/useChartSurfaceRuntime.js";
 import {
   useChartSettingsRuntime,
@@ -41,13 +43,13 @@ function ReplayStatusSurface({
       <section className="training-hub-shell">
         <header className="training-hub-heading">
           <div>
-            <span className="training-hub-kicker">RUN-CENTRIC REPLAY</span>
+            <span className="training-hub-kicker">{t("replay.kicker.runCentric")}</span>
             <h1>{title}</h1>
             <p>{message}</p>
           </div>
           <div className="training-hub-heading-actions">
-            {retry !== undefined && <button type="button" onClick={retry}>重试</button>}
-            <a href="/replay.html">返回训练大厅</a>
+            {retry !== undefined && <button type="button" onClick={retry}>{t("replay.retry")}</button>}
+            <a href="/replay.html">{t("replay.backToHub")}</a>
           </div>
         </header>
       </section>
@@ -135,26 +137,26 @@ function ReplayTrainingRunApp({
       setRun(loaded);
     }).catch((reason: unknown) => {
       if (reason instanceof DOMException && reason.name === "AbortError") return;
-      setError(reason instanceof Error ? reason.message : "回放 Run 读取失败");
+      setError(reason instanceof Error ? reason.message : t("replay.runLoadFailed"));
     });
     return () => controller.abort();
   }, [attempt, runId]);
 
   if (error !== null) {
-    return <ReplayStatusSurface title="无法打开回放" message={error} retry={() => {
+    return <ReplayStatusSurface title={t("replay.openFailed")} message={error} retry={() => {
       setRun(null);
       setError(null);
       setAttempt((value) => value + 1);
     }} />;
   }
   if (run === null) {
-    return <ReplayStatusSurface title="正在打开回放" message={`正在解析 Run ${runId} 的当前商品与内部数据轨道…`} />;
+    return <ReplayStatusSurface title={t("replay.opening")} message={t("replay.openingMessage", { runId })} />;
   }
   if (run.state === "AWAITING_MARKET" || run.resume_action === "SELECT_MARKET") {
     return <ReplayInitialMarketPicker run={run} onInitialized={setRun} />;
   }
   if (run.adapter_session_id === null) {
-    return <ReplayStatusSurface title="回放状态不完整" message="Run 已有时钟，但当前 Viewer 没有可用的 MarketTrack。" />;
+    return <ReplayStatusSurface title={t("replay.incomplete")} message={t("replay.incompleteMessage")} />;
   }
   return (
     <ReplayInitializedRun
@@ -169,6 +171,7 @@ function ReplayTrainingRunApp({
 
 /** Run-centric replay composition root. */
 export default function ReplayApp({ entry }: ReplayAppProps) {
+  useLocale();
   const chartSettingsRuntime = useChartSettingsRuntime();
   if (entry.kind === "configure") return <ReplayTrainingHubApp />;
   if (entry.kind === "run") {
@@ -180,5 +183,5 @@ export default function ReplayApp({ entry }: ReplayAppProps) {
       />
     );
   }
-  return <ReplayStatusSurface title="回放地址无效" message={entry.message} />;
+  return <ReplayStatusSurface title={t("replay.invalidUrl")} message={entry.message} />;
 }

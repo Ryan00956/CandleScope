@@ -1,5 +1,8 @@
 import { useEffect, useState } from "react";
 
+import { t } from "../../../i18n/index.js";
+import { useLocale } from "../../../i18n/useLocale.js";
+import type { LocaleId } from "../../../i18n/locale.js";
 import { defaultReplayV2Api } from "../replayV2Api.js";
 import type {
   ReplayTrainingResultItem,
@@ -14,11 +17,15 @@ interface ReplayTrainingResultsPanelProps {
   readonly onClose: () => void;
 }
 
-function decimal(value: string | null, digits = 2): string {
+function numberLocale(locale: LocaleId): string {
+  return locale === "en" ? "en-US" : "zh-CN";
+}
+
+function decimal(value: string | null, digits = 2, locale: LocaleId): string {
   if (value === null) return "--";
   const parsed = Number(value);
   return Number.isFinite(parsed)
-    ? parsed.toLocaleString("zh-CN", { maximumFractionDigits: digits })
+    ? parsed.toLocaleString(numberLocale(locale), { maximumFractionDigits: digits })
     : value;
 }
 
@@ -27,11 +34,11 @@ function percent(value: string): string {
   return Number.isFinite(parsed) ? `${(parsed * 100).toFixed(1)}%` : "--";
 }
 
-function duration(valueMs: number): string {
-  if (valueMs < 60_000) return `${Math.round(valueMs / 1_000)} 秒`;
-  if (valueMs < 3_600_000) return `${Math.round(valueMs / 60_000)} 分钟`;
-  if (valueMs < 86_400_000) return `${(valueMs / 3_600_000).toFixed(1)} 小时`;
-  return `${(valueMs / 86_400_000).toFixed(1)} 天`;
+function duration(valueMs: number, locale: LocaleId): string {
+  if (valueMs < 60_000) return t("replay.results.sec", { count: Math.round(valueMs / 1_000) }, locale);
+  if (valueMs < 3_600_000) return t("replay.results.min", { count: Math.round(valueMs / 60_000) }, locale);
+  if (valueMs < 86_400_000) return t("replay.results.hour", { count: (valueMs / 3_600_000).toFixed(1) }, locale);
+  return t("replay.results.day", { count: (valueMs / 86_400_000).toFixed(1) }, locale);
 }
 
 function TradeRow({
@@ -49,21 +56,22 @@ function TradeRow({
   readonly onJump: () => void;
   readonly onFork: () => void;
 }) {
+  const locale = useLocale();
   const plan = item.plans[0] ?? null;
   const pnl = Number(item.gross_realized_pnl);
   return (
     <article className="replay-training-result-row" data-pnl={pnl > 0 ? "profit" : pnl < 0 ? "loss" : "flat"}>
       <header>
-        <strong>{item.symbol} · {item.position_side === "BUY" ? "多" : "空"}</strong>
-        <span>{decimal(item.gross_realized_pnl)} {item.settlement_asset} · {item.r_multiple === null ? "无计划 R" : `${decimal(item.r_multiple)}R`}</span>
+        <strong>{item.symbol} · {item.position_side === "BUY" ? t("replay.results.long") : t("replay.results.short")}</strong>
+        <span>{decimal(item.gross_realized_pnl, 2, locale)} {item.settlement_asset} · {item.r_multiple === null ? t("replay.results.noPlanR") : `${decimal(item.r_multiple, 2, locale)}R`}</span>
       </header>
       <dl>
-        <div><dt>入场 / 出场</dt><dd>{decimal(item.entry_price, 8)} / {decimal(item.exit_price, 8)}</dd></div>
-        <div><dt>MAE / MFE</dt><dd>{decimal(item.mae)} / {decimal(item.mfe)} {item.settlement_asset}</dd></div>
-        <div><dt>持仓</dt><dd>{duration(item.holding_duration_ms)}</dd></div>
-        <div><dt>数量</dt><dd>{decimal(item.quantity, 8)}</dd></div>
-        <div><dt>初始风险</dt><dd>{decimal(item.initial_risk_amount)} {item.settlement_asset}</dd></div>
-        <div><dt>计划</dt><dd>{plan === null ? "未记录" : `${decimal(plan.risk_amount)} ${item.settlement_asset} · ${decimal(plan.reward_risk_ratio)} R:R`}</dd></div>
+        <div><dt>{t("replay.results.entryExit")}</dt><dd>{decimal(item.entry_price, 8, locale)} / {decimal(item.exit_price, 8, locale)}</dd></div>
+        <div><dt>MAE / MFE</dt><dd>{decimal(item.mae, 2, locale)} / {decimal(item.mfe, 2, locale)} {item.settlement_asset}</dd></div>
+        <div><dt>{t("replay.results.hold")}</dt><dd>{duration(item.holding_duration_ms, locale)}</dd></div>
+        <div><dt>{t("replay.results.qty")}</dt><dd>{decimal(item.quantity, 8, locale)}</dd></div>
+        <div><dt>{t("replay.results.risk")}</dt><dd>{decimal(item.initial_risk_amount, 2, locale)} {item.settlement_asset}</dd></div>
+        <div><dt>{t("replay.results.plan")}</dt><dd>{plan === null ? t("replay.results.unrecorded") : `${decimal(plan.risk_amount, 2, locale)} ${item.settlement_asset} · ${decimal(plan.reward_risk_ratio, 2, locale)} R:R`}</dd></div>
       </dl>
       {plan !== null && <p title={plan.plan_hash}>{plan.reason}</p>}
       <footer>
@@ -71,12 +79,12 @@ function TradeRow({
           type="button"
           disabled={!canReview || item.review_event_id === null || jumping}
           onClick={onJump}
-        >{jumping ? "定位中…" : "跳到对应 K 线"}</button>
+        >{jumping ? t("replay.results.jumping") : t("replay.results.jump")}</button>
         <button
           type="button"
           disabled={!canReview || item.review_event_id === null || forking}
           onClick={onFork}
-        >{forking ? "Fork 中…" : "从这里 Fork"}</button>
+        >{forking ? t("replay.results.forking") : t("replay.results.fork")}</button>
       </footer>
     </article>
   );
@@ -88,6 +96,7 @@ export default function ReplayTrainingResultsPanel({
   trainingState,
   onClose,
 }: ReplayTrainingResultsPanelProps) {
+  const locale = useLocale();
   const [results, setResults] = useState<ReplayTrainingResultsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -103,7 +112,7 @@ export default function ReplayTrainingResultsPanel({
       setResults(response);
     }).catch((cause: unknown) => {
       if (controller.signal.aborted) return;
-      setError(cause instanceof Error ? cause.message : "训练成绩加载失败");
+      setError(cause instanceof Error ? cause.message : t("replay.results.loadFailed"));
     }).finally(() => {
       if (!controller.signal.aborted) setLoading(false);
     });
@@ -132,7 +141,7 @@ export default function ReplayTrainingResultsPanel({
       }
       onClose();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "无法定位到成交 K 线");
+      setError(cause instanceof Error ? cause.message : t("replay.results.jumpFailed"));
     } finally {
       setJumpingId(null);
     }
@@ -146,7 +155,7 @@ export default function ReplayTrainingResultsPanel({
       const response = await integrityRuntime.actions.forkReview(item.review_event_id);
       setForkedRunId(response.run.run_id);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "无法从成交事件 Fork");
+      setError(cause instanceof Error ? cause.message : t("replay.results.forkFailed"));
     } finally {
       setForkingId(null);
     }
@@ -158,34 +167,34 @@ export default function ReplayTrainingResultsPanel({
     <section className="replay-training-results-panel" data-replay-panel="training-results">
       <header>
         <div>
-          <span className="training-hub-kicker">TRAINING RESULTS</span>
-          <h2>训练成绩</h2>
-          <p>逐笔结果来自已揭示成交路径；MAE/MFE 为保守的 mark-to-market 路径值。</p>
+          <span className="training-hub-kicker">{t("replay.kicker.results")}</span>
+          <h2>{t("replay.results.title")}</h2>
+          <p>{t("replay.results.hint")}</p>
         </div>
         <div>
-          <button type="button" disabled={loading} onClick={() => load()}>刷新</button>
-          <button type="button" onClick={onClose}>关闭</button>
+          <button type="button" disabled={loading} onClick={() => load()}>{t("replay.hub.refresh")}</button>
+          <button type="button" onClick={onClose}>{t("replay.hub.close")}</button>
         </div>
       </header>
 
       {summary !== null && (
         <dl className="replay-training-result-summary">
-          <div><dt>胜率</dt><dd>{percent(summary.win_rate)}</dd></div>
-          <div><dt>盈亏比</dt><dd>{decimal(summary.payoff_ratio)}</dd></div>
-          <div><dt>最大回撤</dt><dd>{decimal(summary.max_drawdown)} {summaryAsset}</dd></div>
-          <div><dt>净已实现</dt><dd>{decimal(summary.net_realized_pnl)} {summaryAsset}</dd></div>
-          <div><dt>平均 R</dt><dd>{summary.average_r_multiple === null ? "--" : `${decimal(summary.average_r_multiple)}R`}</dd></div>
-          <div><dt>平均持仓</dt><dd>{duration(summary.average_holding_duration_ms)}</dd></div>
-          <div><dt>平均 MAE</dt><dd>{decimal(summary.average_mae)} {summaryAsset}</dd></div>
-          <div><dt>平均 MFE</dt><dd>{decimal(summary.average_mfe)} {summaryAsset}</dd></div>
+          <div><dt>{t("replay.results.winRate")}</dt><dd>{percent(summary.win_rate)}</dd></div>
+          <div><dt>{t("replay.results.payoff")}</dt><dd>{decimal(summary.payoff_ratio, 2, locale)}</dd></div>
+          <div><dt>{t("replay.results.drawdown")}</dt><dd>{decimal(summary.max_drawdown, 2, locale)} {summaryAsset}</dd></div>
+          <div><dt>{t("replay.results.net")}</dt><dd>{decimal(summary.net_realized_pnl, 2, locale)} {summaryAsset}</dd></div>
+          <div><dt>{t("replay.results.avgR")}</dt><dd>{summary.average_r_multiple === null ? "--" : `${decimal(summary.average_r_multiple, 2, locale)}R`}</dd></div>
+          <div><dt>{t("replay.results.avgHold")}</dt><dd>{duration(summary.average_holding_duration_ms, locale)}</dd></div>
+          <div><dt>{t("replay.results.avgMae")}</dt><dd>{decimal(summary.average_mae, 2, locale)} {summaryAsset}</dd></div>
+          <div><dt>{t("replay.results.avgMfe")}</dt><dd>{decimal(summary.average_mfe, 2, locale)} {summaryAsset}</dd></div>
         </dl>
       )}
 
-      {!canReview && <p className="replay-training-results-notice">暂停训练后，才能跳转 K 线或从该事件 Fork。</p>}
-      {forkedRunId !== null && <p className="replay-training-results-notice">已创建 Fork：{forkedRunId}</p>}
+      {!canReview && <p className="replay-training-results-notice">{t("replay.results.pauseToJump")}</p>}
+      {forkedRunId !== null && <p className="replay-training-results-notice">{t("replay.results.forked", { id: forkedRunId })}</p>}
       {error !== null && <p className="replay-training-results-error" role="alert">{error}</p>}
-      {loading && results === null && <p>正在读取训练成绩…</p>}
-      {!loading && results !== null && results.items.length === 0 && <p>暂无已平仓交易。完成一次平仓后，这里会生成逐笔结果。</p>}
+      {loading && results === null && <p>{t("replay.results.loading")}</p>}
+      {!loading && results !== null && results.items.length === 0 && <p>{t("replay.results.empty")}</p>}
       <div className="replay-training-result-list">
         {results?.items.map((item) => (
           <TradeRow
@@ -199,7 +208,7 @@ export default function ReplayTrainingResultsPanel({
           />
         ))}
       </div>
-      {results?.truncated && <p>仅显示最近 {results.returned_count} 笔，汇总指标仍覆盖全部交易。</p>}
+      {results?.truncated && <p>{t("replay.results.truncated", { count: results.returned_count })}</p>}
     </section>
   );
 }

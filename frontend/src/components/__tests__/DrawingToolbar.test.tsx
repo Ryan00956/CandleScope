@@ -3,14 +3,25 @@ import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
+import { getLocale, setLocale } from "../../i18n/index.js";
 import DrawingToolbar from "../DrawingToolbar.js";
 
 function buttonTag(html: string, attribute: string): string {
   return html.match(new RegExp(`<button[^>]*${attribute}[^>]*>`))?.[0] ?? "";
 }
 
+function renderInEnglish(element: React.ReactNode): string {
+  const previousLocale = getLocale();
+  try {
+    setLocale("en");
+    return renderToStaticMarkup(element);
+  } finally {
+    setLocale(previousLocale);
+  }
+}
+
 test("engine wait disables drawing tools without hiding chart, cursor, or export controls", () => {
-  const html = renderToStaticMarkup(
+  const html = renderInEnglish(
     <DrawingToolbar
       activeTool="cursor-crosshair"
       drawingInteractionReady={false}
@@ -33,7 +44,7 @@ test("engine wait disables drawing tools without hiding chart, cursor, or export
 });
 
 test("continuous drawing toggle exposes its selected state beside the snap toggle", () => {
-  const html = renderToStaticMarkup(
+  const html = renderInEnglish(
     <DrawingToolbar
       activeTool="line-segment"
       drawingContinuousEnabled

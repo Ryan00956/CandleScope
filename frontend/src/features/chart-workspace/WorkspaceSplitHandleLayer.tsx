@@ -1,4 +1,5 @@
 import type { RefObject } from "react";
+import { t } from "../../i18n/index.js";
 import type { WorkspaceLayoutGeometry } from "./chartWorkspaceGeometry.js";
 import WorkspaceSplitHandle from "./WorkspaceSplitHandles.js";
 
@@ -18,7 +19,7 @@ export default function WorkspaceSplitHandleLayer({
   onCommit,
 }: WorkspaceSplitHandleLayerProps) {
   return (
-    <div className="workspace-split-handle-layer" aria-label="布局分隔线">
+    <div className="workspace-split-handle-layer" aria-label={t("workspace.splitLayer")}>
       {geometry.splits.map((split) => (
         <WorkspaceSplitHandle
           key={split.splitId}

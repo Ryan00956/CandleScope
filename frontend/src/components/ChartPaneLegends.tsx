@@ -1,4 +1,6 @@
 import { memo, useCallback, useMemo, useSyncExternalStore } from "react";
+import { t } from "../i18n/index.js";
+import { useLocale } from "../i18n/useLocale.js";
 import { formatIndicatorNotional } from "../chart-adapter/seriesLifecycle.js";
 import type { IndicatorLine, MainSeriesCrosshairValue } from "../chart-adapter/chartAdapterTypes.js";
 import type { IndicatorSubPane } from "../features/indicators/indicatorPaneProjection.js";
@@ -116,6 +118,7 @@ export const MainChartLegend = memo(function MainChartLegend({
   lines,
   seriesStore,
 }: MainChartLegendProps) {
+  useLocale();
   const storeVersion = useSeriesStoreVersion(seriesStore);
   const crosshairTime = useSyncExternalStore(
     crosshairStore.subscribe,
@@ -159,8 +162,17 @@ export const MainChartLegend = memo(function MainChartLegend({
   if (!mainData && indicatorEntries.length === 0) return null;
   const isUp = marketSummary?.isUp ?? true;
   const ariaLabel = mainData && marketSummary
-    ? `主图信息：开盘 ${formatPrice(mainData.open)}，最高 ${formatPrice(mainData.high)}，最低 ${formatPrice(mainData.low)}，收盘 ${formatPrice(mainData.close)}，成交量 ${formatVolume(mainData.volume)}，涨跌 ${formatPriceDiff(mainData.close - mainData.open)}，涨跌幅 ${marketSummary.priceChange.toFixed(2)}%，振幅 ${marketSummary.amplitude}%`
-    : "主图指标信息";
+    ? t("legend.mainAria", {
+      open: formatPrice(mainData.open),
+      high: formatPrice(mainData.high),
+      low: formatPrice(mainData.low),
+      close: formatPrice(mainData.close),
+      volume: formatVolume(mainData.volume),
+      diff: formatPriceDiff(mainData.close - mainData.open),
+      change: marketSummary.priceChange.toFixed(2),
+      amplitude: marketSummary.amplitude,
+    })
+    : t("legend.indicatorsAria");
 
   return (
     <div className="chart-main-legend pane-overlay-anchor" data-pane-id="main" role="group" aria-label={ariaLabel}>
@@ -173,14 +185,14 @@ export const MainChartLegend = memo(function MainChartLegend({
           <span><span className="chart-legend-key">Vol</span>{formatVolume(mainData.volume)}</span>
           {marketSummary && (
             <span>
-              <span className="chart-legend-key">涨跌</span>
+              <span className="chart-legend-key">{t("legend.change")}</span>
               <strong>
                 {isUp ? "+" : "-"}{formatPriceDiff(mainData.close - mainData.open)} / {isUp ? "+" : ""}{marketSummary.priceChange.toFixed(2)}%
               </strong>
             </span>
           )}
           {marketSummary && (
-            <span><span className="chart-legend-key">振幅</span>{marketSummary.amplitude}%</span>
+            <span><span className="chart-legend-key">{t("legend.amplitude")}</span>{marketSummary.amplitude}%</span>
           )}
         </span>
       )}
@@ -204,6 +216,7 @@ const IndicatorPaneLabel = memo(function IndicatorPaneLabel({
   lines: readonly IndicatorLine[];
   pane: IndicatorSubPane;
 }) {
+  useLocale();
   const entries = useMemo(
     () => resolveChartPaneLegendValues(lines, crosshairTime),
     [crosshairTime, lines],
@@ -225,7 +238,7 @@ const IndicatorPaneLabel = memo(function IndicatorPaneLabel({
     >
       <span className="chart-pane-label-heading">{pane.label}</span>
       {entries.length > 0 && <LegendValues entries={entries} showLineNames={entries.length > 1} />}
-      {noHistoricalData && <span className="chart-pane-label-status">该 K 线无数据</span>}
+      {noHistoricalData && <span className="chart-pane-label-status">{t("legend.noData")}</span>}
     </div>
   );
 });

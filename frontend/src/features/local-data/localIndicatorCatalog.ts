@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import type {
   IndicatorDefinition,
   IndicatorPreset,
@@ -45,7 +46,7 @@ function asBuiltinPreset(preset: CatalogIndicator): IndicatorPreset {
     || typeof preset.engineName !== "string"
     || typeof preset.script !== "string"
   ) {
-    throw new Error("本地离线模式只接受共享目录中的内置指标");
+    throw new Error(t("local.err.builtinOnly"));
   }
   return preset as IndicatorPreset;
 }
@@ -68,13 +69,13 @@ export function resolveLocalIndicatorSupport(
   if (indicator.is_builtin !== true || typeof indicator.engineName !== "string") {
     return {
       supported: false,
-      reason: "离线 profile 未启动自定义脚本运行时",
+      reason: t("local.err.offlineNoScript"),
     };
   }
   if (indicator.engineName.toUpperCase() === "VOL" && !manifest.volume_available) {
     return {
       supported: false,
-      reason: "当前数据集没有 volume 列",
+      reason: t("local.err.noVolume"),
     };
   }
   return { supported: true, reason: null };

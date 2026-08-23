@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { t } from "../../i18n/index.js";
 import {
   fetchProxySettings,
   testProxyConnection,
@@ -101,9 +102,12 @@ export function useProxySettingsRuntime({ isOpen }: { isOpen: boolean }): ProxyS
       const res = await updateProxySettings({ mode: proxyMode, custom_proxy: customProxy });
       const record = isRecord(res) ? res : {};
       setEffectiveProxy(stringField(record, "effective_proxy"));
-      setProxySaveMsg({ ok: true, text: "代理设置已保存 ✓" });
+      setProxySaveMsg({ ok: true, text: t("settings.proxy.saved") });
     } catch (err: unknown) {
-      setProxySaveMsg({ ok: false, text: `保存失败: ${errorMessage(err)}` });
+      setProxySaveMsg({
+        ok: false,
+        text: t("settings.proxy.saveFailed", { error: errorMessage(err) }),
+      });
     } finally {
       setProxyLoading(false);
     }
@@ -116,7 +120,10 @@ export function useProxySettingsRuntime({ isOpen }: { isOpen: boolean }): ProxyS
       const res = await testProxyConnection({ mode: proxyMode, custom_proxy: customProxy });
       setProxyTestResult(isRecord(res) ? res : {});
     } catch (err: unknown) {
-      setProxyTestResult({ success: false, message: `请求失败: ${errorMessage(err)}` });
+      setProxyTestResult({
+        success: false,
+        message: t("settings.proxy.requestFailed", { error: errorMessage(err) }),
+      });
     } finally {
       setProxyLoading(false);
     }

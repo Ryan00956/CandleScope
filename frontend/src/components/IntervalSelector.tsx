@@ -1,11 +1,14 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { t, type LocaleId } from "../i18n/index.js";
+import { useLocale } from "../i18n/useLocale.js";
 import {
   canResolveIntervalFromNativeValues,
   canonicalizeIntervalValue,
   formatIntervalDescription,
   formatSecondsCompact,
-  getIntervalGroupLabelZh,
+  getIntervalGroupLabel,
   groupIntervalsByDuration,
+  INTERVAL_UNIT_MESSAGE_KEYS,
   INTERVAL_UNITS,
   intervalSemanticSignature,
   intervalsSemanticallyEquivalent,
@@ -45,10 +48,10 @@ interface InlineMessage {
 }
 
 const QUICK_PRESETS = ["7m", "45m", "90m", "2h", "3d", "2w"];
-const TAB_OPTIONS: Array<{ key: IntervalTab; label: string }> = [
-  { key: "common", label: "常用" },
-  { key: "custom", label: "自定义" },
-  { key: "all", label: "全部" },
+const TAB_OPTIONS: Array<{ key: IntervalTab; labelKey: "interval.tab.common" | "interval.tab.custom" | "interval.tab.all" }> = [
+  { key: "common", labelKey: "interval.tab.common" },
+  { key: "custom", labelKey: "interval.tab.custom" },
+  { key: "all", labelKey: "interval.tab.all" },
 ];
 const MAX_TOOLBAR_CUSTOMS = 4;
 
@@ -117,18 +120,19 @@ function createStatusForValue(
   capabilityLoading: boolean,
   intervalAvailability?: (value: IntervalString) => boolean,
   unavailableIntervalMessage?: (value: IntervalString) => string,
+  locale: LocaleId = "zh-CN",
 ): IntervalStatus {
   const normalized = canonicalizeIntervalValue(value);
   const seconds = parseIntervalSeconds(normalized);
   const signature = intervalSemanticSignature(normalized);
   if (!normalized || !seconds) {
-    return { ok: false, kind: "invalid", text: "请输入大于 0 的数字，并选择 s/m/h/d/w/M 单位。" };
+    return { ok: false, kind: "invalid", text: t("interval.invalidInput", {}, locale) };
   }
   if (capabilityLoading) {
-    return { ok: false, kind: "invalid", text: "交易所周期能力正在加载，请稍候。" };
+    return { ok: false, kind: "invalid", text: t("interval.capabilityLoading", {}, locale) };
   }
   if (!capabilityReady) {
-    return { ok: false, kind: "invalid", text: "当前交易所没有可用的历史 K 线能力。" };
+    return { ok: false, kind: "invalid", text: t("interval.noHistoryCapability", {}, locale) };
   }
   const available = intervalAvailability
     ? intervalAvailability(normalized)
@@ -138,16 +142,16 @@ function createStatusForValue(
       ok: false,
       kind: "invalid",
       text: unavailableIntervalMessage?.(normalized)
-        ?? "当前市场没有可精确拼接该周期的历史 K 线基准周期。",
+        ?? t("interval.cannotCompose", {}, locale),
     };
   }
   if (nativeValueSet.has(signature)) {
-    return { ok: false, kind: "native", text: "这是交易所原生周期，可直接选择。" };
+    return { ok: false, kind: "native", text: t("interval.nativeHint", {}, locale) };
   }
   if (customValueSet.has(signature)) {
-    return { ok: false, kind: "exists", text: "该自定义周期已添加，可直接选择。" };
+    return { ok: false, kind: "exists", text: t("interval.existsHint", {}, locale) };
   }
-  return { ok: true, kind: "new", text: `将添加 ${formatIntervalDescription(normalized)} 自定义周期。` };
+  return { ok: true, kind: "new", text: t("interval.willAdd", { desc: formatIntervalDescription(normalized) }, locale) };
 }
 
 export interface IntervalSelectorProps {
@@ -189,6 +193,7 @@ function IntervalSelector({
   intervalAvailability,
   unavailableIntervalMessage: unavailableIntervalMessageOverride,
 }: IntervalSelectorProps) {
+  const locale = useLocale();
   const [open, setOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<IntervalTab>("common");
   const [search, setSearch] = useState("");
@@ -248,6 +253,7 @@ function IntervalSelector({
       capabilityLoading,
       intervalAvailability,
       unavailableIntervalMessageOverride,
+      locale,
     ),
     [
       capabilityLoading,
@@ -256,6 +262,7 @@ function IntervalSelector({
       intervalAvailability,
       nativeValueSet,
       nativeValues,
+      locale,
       search,
       unavailableIntervalMessageOverride,
     ],
@@ -276,6 +283,7 @@ function IntervalSelector({
       capabilityLoading,
       intervalAvailability,
       unavailableIntervalMessageOverride,
+      locale,
     ),
     [
       capabilityLoading,
@@ -284,6 +292,7 @@ function IntervalSelector({
       formValue,
       intervalAvailability,
       nativeValueSet,
+      locale,
       nativeValues,
       unavailableIntervalMessageOverride,
     ],
@@ -299,12 +308,12 @@ function IntervalSelector({
 
   const unavailableMessage = useCallback((value: IntervalString): string => (
     capabilityLoading
-      ? "交易所周期能力正在加载，请稍候。"
+      ? t("interval.capabilityLoading", {}, locale)
       : capabilityReady
         ? unavailableIntervalMessageOverride?.(value)
-          ?? `当前市场没有可精确拼接 ${value} 的历史 K 线基准周期。`
-        : "当前交易所没有可用的历史 K 线能力。"
-  ), [capabilityLoading, capabilityReady, unavailableIntervalMessageOverride]);
+          ?? t("interval.cannotComposeValue", { value }, locale)
+        : t("interval.noHistoryCapability", {}, locale)
+  ), [capabilityLoading, capabilityReady, locale, unavailableIntervalMessageOverride]);
 
   const visibleItems = useMemo(() => {
     if (activeTab === "custom") {
@@ -387,6 +396,7 @@ function IntervalSelector({
       capabilityLoading,
       intervalAvailability,
       unavailableIntervalMessageOverride,
+      locale,
     );
     if (status.kind === "native" || status.kind === "exists") {
       selectInterval(normalized);
@@ -399,10 +409,10 @@ function IntervalSelector({
 
     const result = onCreateCustomInterval(normalized);
     if (result?.ok === false) {
-      setInlineMessage({ type: "error", text: result.message || "添加失败" });
+      setInlineMessage({ type: "error", text: result.message || t("interval.addFailed", {}, locale) });
       return;
     }
-    setInlineMessage({ type: "success", text: `${normalized} 已添加并切换` });
+    setInlineMessage({ type: "success", text: t("interval.addedAndSwitched", { value: normalized }, locale) });
     setOpen(false);
     setSearch("");
   }, [
@@ -410,6 +420,7 @@ function IntervalSelector({
     capabilityReady,
     customValueSet,
     intervalAvailability,
+    locale,
     nativeValueSet,
     nativeValues,
     onCreateCustomInterval,
@@ -450,7 +461,7 @@ function IntervalSelector({
 
   const handleClear = useCallback(() => {
     if (customIntervalRecords.length === 0) return;
-    if (!window.confirm("清空所有自定义周期？此操作可以通过撤销最近删除恢复单项，但不会批量恢复。")) return;
+    if (!window.confirm(t("interval.confirmClear"))) return;
     onClearCustomIntervals();
   }, [customIntervalRecords.length, onClearCustomIntervals]);
 
@@ -464,7 +475,7 @@ function IntervalSelector({
         onClick={() => selectInterval(item.value)}
         title={readOnlyReason ?? (!available
           ? unavailableMessage(item.value)
-          : item.isCustom ? `自定义周期：${formatIntervalDescription(item.value)}` : item.value)}
+          : item.isCustom ? t("interval.customNamed", { desc: formatIntervalDescription(item.value) }) : item.value)}
         type="button"
         disabled={!available || readOnlyReason !== null}
         aria-disabled={!available || readOnlyReason !== null}
@@ -497,16 +508,16 @@ function IntervalSelector({
         >
           <span className="interval-panel-main">
             <span className="interval-panel-value">{item.value}</span>
-            {item.isCustom && <span className="interval-panel-badge">自定义</span>}
-            {record?.pinned && <span className="interval-panel-badge pinned">置顶</span>}
-            {intervalsSemanticallyEquivalent(interval, item.value) && <span className="interval-panel-badge active">当前</span>}
-            {!available && <span className="interval-panel-badge unavailable">当前市场不可用</span>}
+            {item.isCustom && <span className="interval-panel-badge">{t("interval.badge.custom")}</span>}
+            {record?.pinned && <span className="interval-panel-badge pinned">{t("interval.badge.pinned")}</span>}
+            {intervalsSemanticallyEquivalent(interval, item.value) && <span className="interval-panel-badge active">{t("interval.badge.current")}</span>}
+            {!available && <span className="interval-panel-badge unavailable">{t("interval.badge.unavailable")}</span>}
           </span>
           <span className="interval-panel-meta">
             <span>{formatIntervalDescription(item.value)}</span>
-            <span>{getIntervalGroupLabelZh(seconds)}</span>
+            <span>{getIntervalGroupLabel(seconds)}</span>
             <span>{formatSecondsCompact(seconds)}</span>
-            {record && record.usageCount > 0 && <span>使用 {record.usageCount}</span>}
+            {record && record.usageCount > 0 && <span>{t("interval.used", { count: record.usageCount })}</span>}
           </span>
         </button>
         {item.isCustom && (
@@ -515,7 +526,7 @@ function IntervalSelector({
               type="button"
               className={clsx("interval-row-action", record?.pinned && "active")}
               onClick={() => onTogglePinCustomInterval(item.value)}
-              title={record?.pinned ? "取消置顶" : "置顶到工具栏"}
+              title={record?.pinned ? t("interval.unpin") : t("interval.pin")}
             >
               {record?.pinned ? "★" : "☆"}
             </button>
@@ -523,9 +534,9 @@ function IntervalSelector({
               type="button"
               className="interval-row-action danger"
               onClick={() => handleRemove(item.value)}
-              title={`删除 ${item.value}`}
+              title={t("interval.deleteNamed", { value: item.value })}
             >
-              删除
+              {t("interval.delete")}
             </button>
           </div>
         )}
@@ -540,7 +551,7 @@ function IntervalSelector({
       data-readonly={readOnlyReason === null ? "false" : "true"}
       title={readOnlyReason ?? undefined}
     >
-      <nav className="toolbar" id="toolbar" aria-label="时间周期工具栏">
+      <nav className="toolbar" id="toolbar" aria-label={t("interval.toolbar")}>
         {nativeGroups.map((group, gi) => (
           <div key={group.label} className="toolbar-group-wrap">
             {gi > 0 && <div className="toolbar-divider" />}
@@ -567,24 +578,24 @@ function IntervalSelector({
           disabled={readOnlyReason !== null}
           aria-expanded={open}
           aria-haspopup="dialog"
-          title={readOnlyReason ?? "打开周期选择与自定义周期管理"}
+          title={readOnlyReason ?? t("interval.openPicker")}
         >
-          <span className="interval-more-label">周期</span>
+          <span className="interval-more-label">{t("interval.label")}</span>
           <span className="interval-more-value">{interval}</span>
           <span className="interval-more-caret">▾</span>
         </button>
       </nav>
 
       {open && (
-        <div className="interval-panel" role="dialog" aria-label="周期选择器">
+        <div className="interval-panel" role="dialog" aria-label={t("interval.picker")}>
           <div className="interval-panel-header">
             <div>
-              <div className="interval-panel-title">周期选择</div>
-              <div className="interval-panel-subtitle">选择、添加、置顶或删除自定义 K 线周期</div>
+              <div className="interval-panel-title">{t("interval.title")}</div>
+              <div className="interval-panel-subtitle">{t("interval.subtitle")}</div>
             </div>
             <div className="interval-panel-current">
-              当前 <strong>{interval}</strong>
-              <button type="button" className="interval-panel-close" onClick={() => setOpen(false)} aria-label="关闭周期面板">×</button>
+              {t("interval.current")} <strong>{interval}</strong>
+              <button type="button" className="interval-panel-close" onClick={() => setOpen(false)} aria-label={t("interval.closePanel")}>×</button>
             </div>
           </div>
 
@@ -596,10 +607,10 @@ function IntervalSelector({
               onChange={(event) => { setSearch(event.target.value); setHighlightIndex(0); }}
               onKeyDown={handleSearchKeyDown}
               className="interval-panel-search"
-              placeholder="搜索周期，或输入 45m 后回车创建"
+              placeholder={t("interval.searchPlaceholder")}
             />
             {search && (
-              <button type="button" className="interval-search-clear" onClick={() => setSearch("")}>清除</button>
+              <button type="button" className="interval-search-clear" onClick={() => setSearch("")}>{t("interval.clear")}</button>
             )}
           </div>
 
@@ -611,7 +622,7 @@ function IntervalSelector({
                 className={clsx("interval-panel-tab", activeTab === tab.key && "active")}
                 onClick={() => { setActiveTab(tab.key); setHighlightIndex(0); }}
               >
-                {tab.label}
+                {t(tab.labelKey)}
                 {tab.key === "custom" && <span>{effectiveCustomRecords.length}</span>}
               </button>
             ))}
@@ -621,8 +632,8 @@ function IntervalSelector({
             <section className="interval-create-card">
               <div className="interval-create-header">
                 <div>
-                  <div className="interval-section-title">新增自定义周期</div>
-                  <div className="interval-section-desc">不用记格式，输入数字并选择单位即可。</div>
+                  <div className="interval-section-title">{t("interval.createTitle")}</div>
+                  <div className="interval-section-desc">{t("interval.createDesc")}</div>
                 </div>
                 <div className="interval-preview-pill">{formValue || "--"}</div>
               </div>
@@ -635,16 +646,16 @@ function IntervalSelector({
                   value={amount}
                   onChange={(event) => setAmount(event.target.value)}
                   className="interval-number-input"
-                  aria-label="周期数字"
+                  aria-label={t("interval.numberAria")}
                 />
-                <div className="interval-unit-tabs" aria-label="周期单位">
+                <div className="interval-unit-tabs" aria-label={t("interval.unitAria")}>
                   {INTERVAL_UNITS.map((item) => (
                     <button
                       key={item.value}
                       type="button"
                       className={clsx("interval-unit-tab", unit === item.value && "active")}
                       onClick={() => setUnit(item.value)}
-                      title={item.label}
+                      title={t(item.labelKey)}
                     >
                       {item.shortLabel}
                     </button>
@@ -656,7 +667,7 @@ function IntervalSelector({
                   onClick={() => createOrSelectInterval(formValue)}
                   disabled={!formStatus.ok && formStatus.kind === "invalid"}
                 >
-                  {formStatus.kind === "native" || formStatus.kind === "exists" ? "选择" : "添加并切换"}
+                  {formStatus.kind === "native" || formStatus.kind === "exists" ? t("interval.select") : t("interval.addAndSwitch")}
                 </button>
               </div>
 
@@ -665,7 +676,7 @@ function IntervalSelector({
               </div>
 
               <div className="interval-presets">
-                <span>快捷：</span>
+                <span>{t("interval.quick")}</span>
                 {QUICK_PRESETS.map((preset) => {
                   const status = createStatusForValue(
                     preset,
@@ -676,6 +687,7 @@ function IntervalSelector({
                     capabilityLoading,
                     intervalAvailability,
                     unavailableIntervalMessageOverride,
+                    locale,
                   );
                   const disabled = status.kind === "invalid";
                   return (
@@ -695,7 +707,7 @@ function IntervalSelector({
 
             {search && normalizedSearch && searchCreateStatus.ok && (
               <button type="button" className="interval-create-suggestion" onClick={() => createOrSelectInterval(normalizedSearch)}>
-                创建并切换到 <strong>{normalizedSearch}</strong>
+                {t("interval.createAndSwitch")} <strong>{normalizedSearch}</strong>
                 <span>{formatIntervalDescription(normalizedSearch)}</span>
               </button>
             )}
@@ -713,19 +725,19 @@ function IntervalSelector({
               <div className="interval-list-header">
                 <div>
                   <div className="interval-section-title">
-                    {activeTab === "custom" ? "自定义周期" : activeTab === "all" ? "全部周期" : "常用周期"}
+                    {activeTab === "custom" ? t("interval.customTitle") : activeTab === "all" ? t("interval.allTitle") : t("interval.commonTitle")}
                   </div>
                   <div className="interval-section-desc">
-                    {visibleAvailableCount} 个当前可用周期，{visibleItems.length} 个已显示；Enter 选择，高亮行可用方向键移动。
+                    {t("interval.listHint", { available: visibleAvailableCount, shown: visibleItems.length })}
                   </div>
                 </div>
                 {activeTab === "custom" && effectiveCustomRecords.length > 0 && (
-                  <button type="button" className="interval-clear-all" onClick={handleClear}>清空</button>
+                  <button type="button" className="interval-clear-all" onClick={handleClear}>{t("interval.clearAll")}</button>
                 )}
               </div>
 
               {visibleGroups.length === 0 ? (
-                <div className="interval-empty-state">没有匹配的周期。可以在上方创建一个新的自定义周期。</div>
+                <div className="interval-empty-state">{t("interval.empty")}</div>
               ) : (
                 <div className="interval-groups">
                   {visibleGroups.map((group) => {
@@ -736,7 +748,7 @@ function IntervalSelector({
                     }
                     return (
                       <div key={group.label} className="interval-panel-group">
-                        <div className="interval-group-label">{group.labelZh}</div>
+                        <div className="interval-group-label">{getIntervalGroupLabel(group.items[0]?.seconds ?? 0)}</div>
                         {group.items.map((item, index) => renderIntervalRow(item, baseIndex + index))}
                       </div>
                     );

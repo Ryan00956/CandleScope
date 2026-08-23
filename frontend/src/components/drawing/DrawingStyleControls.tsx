@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { flushSync } from "react-dom";
+import { t } from "../../i18n/index.js";
+import { useLocale } from "../../i18n/useLocale.js";
 
 const FONT_SIZES = [10, 12, 14, 16, 18, 20, 24, 28, 32];
 const COLOR_INPUT_FALLBACK_COMMIT_MS = 400;
@@ -170,14 +172,15 @@ export default function DrawingStyleControls({
   textFontSize,
   textItalic,
 }: DrawingStyleControlsProps) {
+  useLocale();
   return (
     <>
       {showPenOptions && (
         <>
-          <div className="drawing-tool-option" title={`${freehandOptionLabel} color`}>
+          <div className="drawing-tool-option" title={t("drawing.settings.freehandColor", { tool: freehandOptionLabel })}>
             <DrawingColorPicker color={penColor} onColorCommit={onPenColorChange} />
           </div>
-          <div className="drawing-tool-option" title={`${freehandOptionLabel} size: ${penSize}px`}>
+          <div className="drawing-tool-option" title={t("drawing.settings.freehandSize", { tool: freehandOptionLabel, size: penSize })}>
             <input
               type="range"
               className="drawing-size-slider"
@@ -192,10 +195,10 @@ export default function DrawingStyleControls({
 
       {(showLineOptions || showShapeOptions || showFibonacciOptions) && (
         <>
-          <div className="drawing-tool-option" title="Line color">
+          <div className="drawing-tool-option" title={t("drawing.settings.lineColor")}>
             <DrawingColorPicker color={penColor} onColorCommit={onPenColorChange} />
           </div>
-          <div className="drawing-tool-option" title={`Line width: ${penSize}px`}>
+          <div className="drawing-tool-option" title={t("drawing.settings.lineWidth", { size: penSize })}>
             <input
               type="range"
               className="drawing-size-slider"
@@ -210,10 +213,10 @@ export default function DrawingStyleControls({
 
       {showTextOptions && (
         <>
-          <div className="drawing-tool-option" title="Text color">
+          <div className="drawing-tool-option" title={t("drawing.settings.textColor")}>
             <DrawingColorPicker color={penColor} onColorCommit={onPenColorChange} />
           </div>
-          <div className="drawing-tool-option" title="Font size">
+          <div className="drawing-tool-option" title={t("drawing.settings.fontSize")}>
             <select
               className="drawing-font-size-select"
               value={textFontSize}
@@ -228,7 +231,7 @@ export default function DrawingStyleControls({
             <button
               className={`drawing-tool-btn drawing-format-btn ${textBold ? "active" : ""}`}
               onClick={() => onTextBoldChange?.(!textBold)}
-              title="Bold"
+              title={t("drawing.settings.bold")}
               style={{ fontWeight: "bold", fontSize: 14, minWidth: 28 }}
             >
               B
@@ -238,7 +241,7 @@ export default function DrawingStyleControls({
             <button
               className={`drawing-tool-btn drawing-format-btn ${textItalic ? "active" : ""}`}
               onClick={() => onTextItalicChange?.(!textItalic)}
-              title="Italic"
+              title={t("drawing.settings.italic")}
               style={{ fontStyle: "italic", fontSize: 14, minWidth: 28 }}
             >
               I
@@ -248,11 +251,11 @@ export default function DrawingStyleControls({
       )}
 
       {showPositionOptions && (
-        <div className="drawing-tool-option" title="Position size">
+        <div className="drawing-tool-option" title={t("drawing.settings.positionSize")}>
           <button
             className="drawing-tool-btn drawing-format-btn position-settings-trigger"
             onClick={onOpenPositionSettings}
-            title="Position settings"
+            title={t("drawing.settings.position")}
             style={{ fontSize: 11, minWidth: 50 }}
           >
             ${formatPositionSize(positionSize)}

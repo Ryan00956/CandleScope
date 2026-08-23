@@ -8,6 +8,7 @@ import type {
   PluginChartLayer,
   PluginCommandFileInput,
   PluginCommandContribution,
+  PluginContributionLocalization,
   PluginDeclarativeViewRenderer,
   PluginFieldFormat,
   PluginJsonSchema,
@@ -33,6 +34,7 @@ import type {
   PluginRuntimeDiff,
   PluginRuntimeSupply,
   PluginSettingsContribution,
+  PluginSchemaLocalization,
   PluginUiSnapshot,
   PluginViewContribution,
   PluginViewProjection,
@@ -84,6 +86,7 @@ const VIEW_SLOTS = new Set<PluginViewSlot>(["sidePanel", "bottomPanel", "statusA
 const VIEW_RENDERERS = new Set<PluginDeclarativeViewRenderer>(["table", "list", "detail", "status"]);
 const SANDBOX_VIEW_SLOTS = new Set(["sidePanel", "bottomPanel"] as const);
 const FIELD_FORMATS = new Set<PluginFieldFormat>(["text", "number", "percent", "price", "boolean", "timestamp"]);
+const LOCALE_ID = /^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/;
 
 type RecordValue = Record<string, unknown>;
 
@@ -231,7 +234,149 @@ function contributionBase(value: RecordValue, path: string, pluginId: string) {
     entrypointId: string(value.entrypointId, `${path}.entrypointId`, 128),
     available: boolean(value.available, `${path}.available`),
     ...(value.unavailableReason === undefined ? {} : { unavailableReason: string(value.unavailableReason, `${path}.unavailableReason`, 128) }),
+    ...(value.localizations === undefined ? {} : { localizations: contributionLocalizations(value.localizations, `${path}.localizations`) }),
   };
+}
+
+function schemaLocalization(value: unknown, path: string, depth = 0): PluginSchemaLocalization {
+  if (depth > 8) fail(path);
+  const data = record(value, path);
+  exact(data, [], ["title", "description", "enumLabels", "properties", "items"], path);
+  const result: PluginSchemaLocalization = {};
+  if (data.title !== undefined) result.title = string(data.title, `${path}.title`, 256);
+  if (data.description !== undefined) result.description = string(data.description, `${path}.description`, 2_048);
+  if (data.enumLabels !== undefined) {
+    result.enumLabels = array(data.enumLabels, `${path}.enumLabels`, 64)
+      .map((label, index) => string(label, `${path}.enumLabels[${index}]`, 256));
+    if (!result.enumLabels.length) fail(`${path}.enumLabels`);
+  }
+  if (data.properties !== undefined) {
+    const properties = record(data.properties, `${path}.properties`);
+    if (!Object.keys(properties).length || Object.keys(properties).length > 128) fail(`${path}.properties`);
+    result.properties = Object.fromEntries(Object.entries(properties).map(([key, localized]) => {
+      if (!FIELD.test(key)) fail(`${path}.properties.${key}`);
+      return [key, schemaLocalization(localized, `${path}.properties.${key}`, depth + 1)];
+    }));
+  }
+  if (data.items !== undefined) result.items = schemaLocalization(data.items, `${path}.items`, depth + 1);
+  if (!Object.keys(result).length) fail(path);
+  return result;
+}
+
+function localizedLabels(value: unknown, path: string): Record<string, string> {
+  const data = record(value, path);
+  if (!Object.keys(data).length || Object.keys(data).length > 64) fail(path);
+  return Object.fromEntries(Object.entries(data).map(([key, label]) => {
+    if (!PAPER_ACCOUNT_ID.test(key)) fail(`${path}.${key}`);
+    return [key, string(label, `${path}.${key}`, 256)];
+  }));
+}
+
+function contributionLocalizations(
+  value: unknown,
+  path: string,
+): Record<string, PluginContributionLocalization> {
+  const data = record(value, path);
+  const locales = Object.keys(data);
+  if (!locales.length || locales.length > 16 || new Set(locales.map((locale) => locale.toLowerCase())).size !== locales.length) fail(path);
+  return Object.fromEntries(locales.map((locale) => {
+    if (!LOCALE_ID.test(locale)) fail(`${path}.${locale}`);
+    const localized = record(data[locale], `${path}.${locale}`);
+    exact(localized, [], ["title", "schema", "fields", "emptyState", "displayName", "marketTypes", "accounts"], `${path}.${locale}`);
+    const parsed: PluginContributionLocalization = {
+      ...(localized.title === undefined ? {} : { title: string(localized.title, `${path}.${locale}.title`, 256) }),
+      ...(localized.schema === undefined ? {} : { schema: schemaLocalization(localized.schema, `${path}.${locale}.schema`) }),
+      ...(localized.fields === undefined ? {} : { fields: localizedLabels(localized.fields, `${path}.${locale}.fields`) }),
+      ...(localized.emptyState === undefined ? {} : { emptyState: string(localized.emptyState, `${path}.${locale}.emptyState`, 256) }),
+      ...(localized.displayName === undefined ? {} : { displayName: string(localized.displayName, `${path}.${locale}.displayName`, 128) }),
+      ...(localized.marketTypes === undefined ? {} : { marketTypes: localizedLabels(localized.marketTypes, `${path}.${locale}.marketTypes`) }),
+      ...(localized.accounts === undefined ? {} : { accounts: localizedLabels(localized.accounts, `${path}.${locale}.accounts`) }),
+    };
+    if (!Object.keys(parsed).length) fail(`${path}.${locale}`);
+    return [locale, parsed];
+  }));
+}
+
+function validateSchemaLocalizationTargets(
+  localized: PluginSchemaLocalization,
+  schemaValue: unknown,
+  path: string,
+): void {
+  const schemaData = record(schemaValue, path);
+  if (localized.enumLabels) {
+    const values = array(schemaData.enum, `${path}.enum`, 64);
+    if (localized.enumLabels.length !== values.length) fail(`${path}.enumLabels`);
+  }
+  if (localized.properties) {
+    const properties = record(schemaData.properties, `${path}.properties`);
+    for (const [name, child] of Object.entries(localized.properties)) {
+      if (!(name in properties)) fail(`${path}.properties.${name}`);
+      validateSchemaLocalizationTargets(child, properties[name], `${path}.properties.${name}`);
+    }
+  }
+  if (localized.items) {
+    if (schemaData.items === undefined) fail(`${path}.items`);
+    validateSchemaLocalizationTargets(localized.items, schemaData.items, `${path}.items`);
+  }
+}
+
+function validateLocalizedLabelTargets(
+  labels: Record<string, string> | undefined,
+  knownIds: Set<string>,
+  path: string,
+): void {
+  if (labels && Object.keys(labels).some((id) => !knownIds.has(id))) fail(path);
+}
+
+function validateContributionLocalizationTargets(
+  localizations: Record<string, PluginContributionLocalization> | undefined,
+  kind: string,
+  config: RecordValue,
+  path: string,
+): void {
+  if (!localizations) return;
+  for (const [locale, localized] of Object.entries(localizations)) {
+    const localizedPath = `${path}.localizations.${locale}`;
+    const allowed = new Set<keyof PluginContributionLocalization>(["title"]);
+    if (kind === "command/1" && config.inputSchema !== undefined) allowed.add("schema");
+    if (kind === "settings/1") allowed.add("schema");
+    if (kind === "view/1" && config.renderer !== "sandbox") {
+      allowed.add("fields");
+      allowed.add("emptyState");
+    }
+    if (kind === "symbol-provider/1") {
+      allowed.add("displayName");
+      allowed.add("marketTypes");
+    }
+    if (kind === "account-provider/1") allowed.add("accounts");
+    if (Object.keys(localized).some((key) => !allowed.has(key as keyof PluginContributionLocalization))) fail(localizedPath);
+
+    if (localized.schema) {
+      validateSchemaLocalizationTargets(
+        localized.schema,
+        kind === "settings/1" ? config.schema : config.inputSchema,
+        `${localizedPath}.schema`,
+      );
+    }
+    if (localized.fields) {
+      const ids = new Set(array(config.fields, `${path}.configuration.fields`, 64).map((field, index) => (
+        string(record(field, `${path}.configuration.fields[${index}]`).field, `${path}.configuration.fields[${index}].field`, 64)
+      )));
+      validateLocalizedLabelTargets(localized.fields, ids, `${localizedPath}.fields`);
+    }
+    if (localized.marketTypes) {
+      const ids = new Set(array(config.marketTypes, `${path}.configuration.marketTypes`, 32).map((market, index) => (
+        string(record(market, `${path}.configuration.marketTypes[${index}]`).id, `${path}.configuration.marketTypes[${index}].id`, 64)
+      )));
+      validateLocalizedLabelTargets(localized.marketTypes, ids, `${localizedPath}.marketTypes`);
+    }
+    if (localized.accounts) {
+      const ids = new Set(array(config.accounts, `${path}.configuration.accounts`, 32).map((account, index) => (
+        string(record(account, `${path}.configuration.accounts[${index}]`).id, `${path}.configuration.accounts[${index}].id`, 64)
+      )));
+      validateLocalizedLabelTargets(localized.accounts, ids, `${localizedPath}.accounts`);
+    }
+  }
 }
 
 function providerStringList(
@@ -426,9 +571,10 @@ function contribution(value: unknown, path: string, pluginId: string): PluginCat
   const data = record(value, path);
   const kind = string(data.kind, `${path}.kind`, 64);
   if (!["command/1", "settings/1", "view/1", "symbol-provider/1", "market-data-provider/1", "account-provider/1", "order-executor/1"].includes(kind)) return null;
-  exact(data, ["id", "localId", "kind", "title", "entrypointId", "configuration", "available"], ["unavailableReason"], path);
+  exact(data, ["id", "localId", "kind", "title", "entrypointId", "configuration", "available"], ["unavailableReason", "localizations"], path);
   const base = contributionBase(data, path, pluginId);
   const config = record(data.configuration, `${path}.configuration`);
+  validateContributionLocalizationTargets(base.localizations, kind, config, path);
   if (kind === "account-provider/1") {
     return paperAccountContribution(config, `${path}.configuration`, base);
   }

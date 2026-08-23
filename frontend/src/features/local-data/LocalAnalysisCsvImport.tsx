@@ -1,4 +1,6 @@
 import { useState } from "react";
+import { t, type MessageKey } from "../../i18n/index.js";
+import { useLocale } from "../../i18n/useLocale.js";
 import { resolveLocalEventTimes } from "./localDataApi.js";
 import {
   MAX_EVENT_CSV_BYTES,
@@ -35,13 +37,13 @@ interface ImportReport {
   rejected: readonly EventCsvRejection[];
 }
 
-const MAPPING_LABELS: Readonly<Record<keyof EventCsvMapping, string>> = {
-  time: "时间列（必选）",
-  price: "价格列",
-  kind: "类型列",
-  label: "标题列",
-  note: "备注列",
-  color: "颜色列",
+const MAPPING_LABEL_KEYS: Readonly<Record<keyof EventCsvMapping, MessageKey>> = {
+  time: "local.csvTimeCol",
+  price: "local.csvPriceCol",
+  kind: "local.csvKindCol",
+  label: "local.csvLabelCol",
+  note: "local.csvNoteCol",
+  color: "local.csvColorCol",
 };
 
 const EMPTY_MAPPING: EventCsvMapping = {
@@ -64,6 +66,7 @@ export default function LocalAnalysisCsvImport({
   storageError: string | null;
   onError(message: string): void;
 }) {
+  useLocale();
   const [loaded, setLoaded] = useState<LoadedEventCsv | null>(null);
   const [mapping, setMapping] = useState<EventCsvMapping>(EMPTY_MAPPING);
   const [timestampUnit, setTimestampUnit] = useState<EventCsvTimestampUnit>("auto");
@@ -76,13 +79,13 @@ export default function LocalAnalysisCsvImport({
     setBusy(true);
     setReport(null);
     try {
-      if (file.size > MAX_EVENT_CSV_BYTES) throw new Error("事件 CSV 不能超过 16 MB");
+      if (file.size > MAX_EVENT_CSV_BYTES) throw new Error(t("local.csvOversize"));
       const bytes = await file.arrayBuffer();
       let text: string;
       try {
         text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
       } catch {
-        throw new Error("事件 CSV 必须使用 UTF-8 编码");
+        throw new Error(t("local.csvUtf8"));
       }
       const document = parseEventCsvText(text);
       const hash = await sha256EventCsv(bytes);
@@ -91,7 +94,7 @@ export default function LocalAnalysisCsvImport({
     } catch (reason) {
       setLoaded(null);
       setMapping(EMPTY_MAPPING);
-      onError(reason instanceof Error ? reason.message : "事件 CSV 读取失败");
+      onError(reason instanceof Error ? reason.message : t("local.csvReadFailed"));
     } finally {
       setBusy(false);
     }
@@ -117,7 +120,7 @@ export default function LocalAnalysisCsvImport({
       prepared.accepted.forEach((row, index) => {
         const resolved = resolution.results[index];
         if (resolved === undefined || !resolved.matched || resolved.bar_open_ms === undefined) {
-          rejected.push({ rowNumber: row.rowNumber, reason: "时间没有对应到数据集中的 K 线（可能位于缺口或范围外）" });
+          rejected.push({ rowNumber: row.rowNumber, reason: t("local.csvNoBar") });
           return;
         }
         drafts.push({
@@ -139,7 +142,7 @@ export default function LocalAnalysisCsvImport({
       const result = eventStore.importBatch(drafts);
       setReport({ imported: result.imported, skipped: result.skipped, rejected });
     } catch (reason) {
-      onError(reason instanceof Error ? reason.message : "事件 CSV 导入失败");
+      onError(reason instanceof Error ? reason.message : t("local.csvImportFailed"));
     } finally {
       setBusy(false);
     }
@@ -147,11 +150,11 @@ export default function LocalAnalysisCsvImport({
 
   return (
     <details className="local-analysis-csv-import">
-      <summary>导入事件 CSV</summary>
+      <summary>{t("local.csvImport")}</summary>
       <div className="local-analysis-csv-body">
-        <p>只要求时间列。价格、类型、标题、备注和颜色均可选，其他列会原样保留。</p>
+        <p>{t("local.csvHint")}</p>
         <label className="local-analysis-csv-file">
-          事件文件
+          {t("local.csvFile")}
           <input
             type="file"
             accept=".csv,text/csv"
@@ -167,40 +170,40 @@ export default function LocalAnalysisCsvImport({
           <>
             <div className="local-analysis-csv-meta">
               <strong>{loaded.fileName}</strong>
-              <small>{loaded.document.rows.length} 条 · SHA-256 {loaded.hash.slice(0, 12)}</small>
+              <small>{t("local.csvCount", { count: loaded.document.rows.length, hash: loaded.hash.slice(0, 12) })}</small>
             </div>
             <div className="local-analysis-csv-grid">
-              {(Object.keys(MAPPING_LABELS) as (keyof EventCsvMapping)[]).map((key) => (
+              {(Object.keys(MAPPING_LABEL_KEYS) as (keyof EventCsvMapping)[]).map((key) => (
                 <label key={key}>
-                  {MAPPING_LABELS[key]}
+                  {t(MAPPING_LABEL_KEYS[key])}
                   <select
-                    aria-label={MAPPING_LABELS[key]}
+                    aria-label={t(MAPPING_LABEL_KEYS[key])}
                     value={mapping[key] ?? ""}
                     onChange={(event) => setMapping({ ...mapping, [key]: event.target.value || null })}
                   >
-                    <option value="">{key === "time" ? "请选择" : "不映射"}</option>
+                    <option value="">{key === "time" ? t("local.csvPick") : t("local.csvUnmapped")}</option>
                     {loaded.document.headers.map((header) => <option value={header} key={header}>{header}</option>)}
                   </select>
                 </label>
               ))}
               <label>
-                时间格式
+                {t("local.csvTimeFmt")}
                 <select value={timestampUnit} onChange={(event) => setTimestampUnit(event.target.value as EventCsvTimestampUnit)}>
-                  <option value="auto">自动：秒 / 毫秒 / 带时区 ISO</option>
-                  <option value="s">Unix 秒</option>
-                  <option value="ms">Unix 毫秒</option>
-                  <option value="iso">ISO（必须带 Z 或偏移）</option>
+                  <option value="auto">{t("local.csvAuto")}</option>
+                  <option value="s">{t("local.unixS")}</option>
+                  <option value="ms">{t("local.unixMs")}</option>
+                  <option value="iso">{t("local.csvIsoZ")}</option>
                 </select>
               </label>
               <label>
-                K 线对应方式
+                {t("local.csvBarMatch")}
                 <select value={resolutionMode} onChange={(event) => setResolutionMode(event.target.value as LocalEventTimeResolutionMode)}>
-                  <option value="containing">归到所在 K 线（推荐）</option>
-                  <option value="exact">只接受 K 线开盘时间</option>
+                  <option value="containing">{t("local.csvContaining")}</option>
+                  <option value="exact">{t("local.csvExact")}</option>
                 </select>
               </label>
               <label>
-                无类型时使用
+                {t("local.csvDefaultKind")}
                 <select value={defaultKind} onChange={(event) => setDefaultKind(event.target.value as LocalAnalysisEventKind)}>
                   {LOCAL_ANALYSIS_EVENT_KINDS.map((kind) => (
                     <option value={kind} key={kind}>{LOCAL_ANALYSIS_KIND_LABELS[kind]}</option>
@@ -209,7 +212,7 @@ export default function LocalAnalysisCsvImport({
               </label>
             </div>
 
-            <div className="local-analysis-csv-preview" aria-label="事件 CSV 预览">
+            <div className="local-analysis-csv-preview" aria-label={t("local.csvPreview")}>
               <table>
                 <thead><tr>{loaded.document.headers.map((header) => <th key={header}>{header}</th>)}</tr></thead>
                 <tbody>{loaded.document.rows.slice(0, 3).map((row) => (
@@ -217,25 +220,25 @@ export default function LocalAnalysisCsvImport({
                 ))}</tbody>
               </table>
             </div>
-            <small className="local-analysis-csv-time-note">不带时区的日期文本会被拒绝，避免因电脑时区不同而把事件放错 K 线。</small>
+            <small className="local-analysis-csv-time-note">{t("local.csvTzNote")}</small>
             <button
               type="button"
               className="local-analysis-csv-submit"
               disabled={busy || storageError !== null || mapping.time === null}
               onClick={() => { void importEvents(); }}
             >
-              {busy ? "正在校验…" : "校验并导入"}
+              {busy ? t("local.csvValidating") : t("local.csvImportBtn")}
             </button>
           </>
         )}
 
         {report !== null && (
           <div className="local-analysis-csv-report" role="status">
-            <strong>已导入 {report.imported} 条</strong>
-            <span>重复跳过 {report.skipped} 条 · 拒绝 {report.rejected.length} 条</span>
+            <strong>{t("local.csvImported", { count: report.imported })}</strong>
+            <span>{t("local.csvSkipped", { skipped: report.skipped, rejected: report.rejected.length })}</span>
             {report.rejected.length > 0 && (
               <ul>{report.rejected.slice(0, 20).map((item) => (
-                <li key={`${item.rowNumber}:${item.reason}`}>第 {item.rowNumber} 行：{item.reason}</li>
+                <li key={`${item.rowNumber}:${item.reason}`}>{t("local.csvRow", { row: item.rowNumber, reason: item.reason })}</li>
               ))}</ul>
             )}
           </div>

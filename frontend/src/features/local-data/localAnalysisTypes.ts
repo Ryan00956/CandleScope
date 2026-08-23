@@ -1,3 +1,5 @@
+import { t } from "../../i18n/index.js";
+
 export const LOCAL_ANALYSIS_EVENT_KINDS = [
   "note",
   "signal",
@@ -60,12 +62,27 @@ export interface LocalAnalysisFocusRequest {
   time: number;
 }
 
+export function localAnalysisKindLabel(kind: LocalAnalysisEventKind): string {
+  switch (kind) {
+    case "note":
+      return t("local.kind.note");
+    case "signal":
+      return t("local.kind.signal");
+    case "entry":
+      return t("local.kind.entry");
+    case "exit":
+      return t("local.kind.exit");
+    case "custom":
+      return t("local.kind.custom");
+  }
+}
+
 export const LOCAL_ANALYSIS_KIND_LABELS: Readonly<Record<LocalAnalysisEventKind, string>> = {
-  note: "备注",
-  signal: "信号",
-  entry: "开仓",
-  exit: "平仓",
-  custom: "自定义",
+  get note() { return localAnalysisKindLabel("note"); },
+  get signal() { return localAnalysisKindLabel("signal"); },
+  get entry() { return localAnalysisKindLabel("entry"); },
+  get exit() { return localAnalysisKindLabel("exit"); },
+  get custom() { return localAnalysisKindLabel("custom"); },
 };
 
 export const LOCAL_ANALYSIS_KIND_COLORS: Readonly<Record<LocalAnalysisEventKind, string>> = {

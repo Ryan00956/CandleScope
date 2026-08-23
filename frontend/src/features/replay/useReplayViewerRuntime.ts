@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { t } from "../../i18n/index.js";
 
 import type { WindowDelta, WindowDeltaType } from "../market-data/klineContracts.js";
 import { WINDOW_DELTA_TYPES } from "../market-data/window/windowDeltas.js";
@@ -497,7 +498,7 @@ export function useReplayViewerRuntime(
       if (targetChanged) prepareViewerSeries(next);
     } catch (cause) {
       setViewerState(null);
-      setError(cause instanceof Error ? cause.message : "展示周期重建失败");
+      setError(cause instanceof Error ? cause.message : t("replay.rt.displayRebuild"));
       return false;
     }
     viewerRef.current = next;
@@ -541,7 +542,7 @@ export function useReplayViewerRuntime(
       setMarketTracks(tracksResponse);
     }).catch((cause: unknown) => {
       if (cause instanceof DOMException && cause.name === "AbortError") return;
-      setError(cause instanceof Error ? cause.message : "ViewerState 加载失败");
+      setError(cause instanceof Error ? cause.message : t("replay.rt.viewerLoad"));
     }).finally(() => {
       if (!abort.signal.aborted) setLoading(false);
     });
@@ -563,7 +564,7 @@ export function useReplayViewerRuntime(
       .catch((cause: unknown) => {
         if (cause instanceof DOMException && cause.name === "AbortError") return;
         setPeriodSummary(null);
-        setSummaryError(cause instanceof Error ? cause.message : "摘要状态加载失败");
+        setSummaryError(cause instanceof Error ? cause.message : t("replay.rt.summaryLoad"));
       });
     return () => abort.abort();
   }, [reloadRevision, viewerState?.run_id]);
@@ -708,7 +709,7 @@ export function useReplayViewerRuntime(
             || request.signal.aborted
             || (cause instanceof DOMException && cause.name === "AbortError")) return;
           seriesStore.clear({ source: "replay-viewer-source-bucket-error" });
-          setError(cause instanceof Error ? cause.message : "交易所周期 K 线重建失败");
+          setError(cause instanceof Error ? cause.message : t("replay.rt.exchangeBars"));
         }).finally(() => {
           requestGate.finish(request);
         });
@@ -766,7 +767,7 @@ export function useReplayViewerRuntime(
         setError(null);
       } catch (cause) {
         seriesStore.clear({ source: "replay-viewer-error" });
-        setError(cause instanceof Error ? cause.message : "展示周期重建失败");
+        setError(cause instanceof Error ? cause.message : t("replay.rt.displayRebuild"));
       }
     };
     const projectionScheduler = createReplayViewerProjectionScheduler(rebuild);
@@ -888,7 +889,7 @@ export function useReplayViewerRuntime(
         if (!converged) runtime.actions.requestResync("v2-display-advance-ack-timeout");
         void refreshMarketTracks(command.run_id).catch((cause: unknown) => {
           setMarketTracks(null);
-          setError(cause instanceof Error ? cause.message : "市场轨道状态刷新失败");
+          setError(cause instanceof Error ? cause.message : t("replay.rt.tracksRefresh"));
         });
       } else {
         await refreshMarketTracks(command.run_id);
@@ -901,7 +902,7 @@ export function useReplayViewerRuntime(
       // synchronously before its first await, then restores them only from an
       // authoritative response when the server becomes available again.
       void failClosedAndRefreshMarketTracks(command.run_id);
-      setError(cause instanceof Error ? cause.message : "回放控制失败");
+      setError(cause instanceof Error ? cause.message : t("replay.rt.control"));
       throw cause;
     } finally {
       setControlPending((current) => current?.command_id === command.command_id ? null : current);
@@ -950,7 +951,7 @@ export function useReplayViewerRuntime(
         setError(null);
         return null;
       }
-      setError(cause instanceof Error ? cause.message : "展示周期切换失败");
+      setError(cause instanceof Error ? cause.message : t("replay.rt.intervalSwitch"));
       throw cause;
     } finally {
       if (viewerCommandRef.current === command.command_id) {
@@ -998,7 +999,7 @@ export function useReplayViewerRuntime(
       return result;
     } catch (cause) {
       await failClosedAndRefreshMarketTracks(command.run_id);
-      setError(cause instanceof Error ? cause.message : "MarketTrack 操作失败");
+      setError(cause instanceof Error ? cause.message : t("replay.rt.trackOp"));
       throw cause;
     } finally {
       if (viewerCommandRef.current === command.command_id) {
@@ -1081,7 +1082,7 @@ export function useReplayViewerRuntime(
       return result;
     } catch (cause) {
       await failClosedAndRefreshMarketTracks(command.run_id);
-      setError(cause instanceof Error ? cause.message : "组合纸面交易失败");
+      setError(cause instanceof Error ? cause.message : t("replay.rt.paper"));
       throw cause;
     } finally {
       if (viewerCommandRef.current === command.command_id) {
@@ -1158,7 +1159,7 @@ export function useReplayViewerRuntime(
       await refreshMarketTracks(runId);
     } catch (cause) {
       await failClosedAndRefreshMarketTracks(runId);
-      setError(cause instanceof Error ? cause.message : "历史盘口 resync 失败");
+      setError(cause instanceof Error ? cause.message : t("replay.rt.bookResync"));
       throw cause;
     } finally {
       setViewerPending(false);
@@ -1177,7 +1178,7 @@ export function useReplayViewerRuntime(
       return audit;
     } catch (cause) {
       await failClosedAndRefreshMarketTracks(runId);
-      setError(cause instanceof Error ? cause.message : "独立账户审计失败");
+      setError(cause instanceof Error ? cause.message : t("replay.rt.audit"));
       throw cause;
     } finally {
       setViewerPending(false);
@@ -1201,7 +1202,7 @@ export function useReplayViewerRuntime(
         status: prepared.status,
       });
     } catch (cause) {
-      setSummaryError(cause instanceof Error ? cause.message : "摘要准备失败");
+      setSummaryError(cause instanceof Error ? cause.message : t("replay.rt.summaryPrep"));
       throw cause;
     } finally {
       setSummaryPreparing(false);

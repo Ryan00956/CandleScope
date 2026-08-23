@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import type { RefObject } from "react";
 import type { ToolbarVariant } from "./drawingToolbarDefinitions.js";
+import { drawingVariantDescription, drawingVariantLabel } from "./drawingToolbarI18n.js";
 
 export interface ToolFlyoutProps<TId extends string = string> {
   variants: readonly ToolbarVariant<TId>[];
@@ -43,6 +44,8 @@ export default function ToolFlyout<TId extends string>({
     <div className={`tool-flyout ${className}`.trim()} ref={menuRef}>
       {variants.map((variant) => {
         const disabled = Boolean(isVariantDisabled?.(variant));
+        const label = drawingVariantLabel(variant);
+        const description = drawingVariantDescription(variant);
         return (
           <button
             type="button"
@@ -59,9 +62,9 @@ export default function ToolFlyout<TId extends string>({
           >
             <span className="tool-flyout-icon">{variant.icon}</span>
             <span className="tool-flyout-label">
-              <span className="tool-flyout-label-main">{variant.label}</span>
-              {variant.description && (
-                <span className="tool-flyout-description">{variant.description}</span>
+              <span className="tool-flyout-label-main">{label}</span>
+              {description && (
+                <span className="tool-flyout-description">{description}</span>
               )}
             </span>
             {currentId === variant.id && <span className="tool-flyout-check">&#10003;</span>}

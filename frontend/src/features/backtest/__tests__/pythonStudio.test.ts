@@ -4,8 +4,8 @@ import { describe, it } from "node:test";
 import {
   PYTHON_STUDIO_STORAGE_KEY,
   PYTHON_TEMPLATES,
-  TRUSTED_LOCAL_CONFIRM_LABEL,
-  TRUSTED_LOCAL_FACTS,
+  trustedLocalConfirmLabel,
+  trustedLocalFacts,
   assertRequiredBundleFiles,
   assessCoverage,
   canStartTrustedLocal,
@@ -113,10 +113,10 @@ describe("python studio mapping and state", () => {
     assert.equal(canStartTrustedLocal({ trustedFlagEnabled: false, confirmed: true }), false);
     assert.equal(canStartTrustedLocal({ trustedFlagEnabled: true, confirmed: false }), false);
     assert.equal(canStartTrustedLocal({ trustedFlagEnabled: true, confirmed: true }), true);
-    assert.match(TRUSTED_LOCAL_CONFIRM_LABEL, /权限事实/);
-    assert.ok(TRUSTED_LOCAL_FACTS.some((fact) => fact.includes("AppContainer")));
+    assert.match(trustedLocalConfirmLabel(), /权限事实/);
+    assert.ok(trustedLocalFacts().some((fact) => fact.includes("AppContainer")));
     assert.doesNotMatch(studio, />继续</);
-    assert.match(studio, /TRUSTED_LOCAL_CONFIRM_LABEL/);
+    assert.match(studio, /trustedLocalConfirmLabel/);
     assert.match(studio, /python-trusted-facts/);
   });
 
@@ -200,7 +200,7 @@ describe("python studio shipped surface", () => {
     for (const token of [
       "<PythonStudioPanel",
       "python-host-owns-report",
-      "创建并启动 Python Study V2",
+      "backtest.createPythonStudy",
       "composePythonExport",
       "restorePythonStudioState",
     ]) {

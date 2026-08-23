@@ -33,6 +33,8 @@ import type {
 } from "../useReplaySharedIndicatorRuntime.js";
 import type { ReplayRuntime } from "../useReplayRuntime.js";
 import type { ReplayViewerRuntime } from "../useReplayViewerRuntime.js";
+import { t } from "../../../i18n/index.js";
+import { useLocale } from "../../../i18n/useLocale.js";
 
 export interface ReplayRightMarketRailProps {
   readonly runtime: ReplayRuntime;
@@ -55,6 +57,7 @@ function ReplayRightMarketRail({
   downColor,
   formatTime,
 }: ReplayRightMarketRailProps) {
+  const locale = useLocale();
   const selectedTrackId = viewer.viewerState?.selected_track_id ?? null;
   const selectedTrack = viewer.marketTracks?.tracks.find(
     (track) => track.track_id === selectedTrackId,
@@ -67,59 +70,59 @@ function ReplayRightMarketRail({
   const views = useMemo<MarketRailViewDescriptor[]>(() => [
     {
       id: REPLAY_RAIL_VIEW_IDS.watchlist,
-      title: "自选",
+      title: t("replay.rail.watchlist", {}, locale),
       icon: <WatchlistRailIcon />,
       order: 10,
       sizing: "flex",
       defaultHeight: 260,
       minHeight: MARKET_RAIL_MIN_SIDEBAR_HEIGHT,
-      collapsedSummary: "回放标的",
+      collapsedSummary: t("replay.rail.watchlistSummary", {}, locale),
     },
     {
       id: REPLAY_RAIL_VIEW_IDS.paper,
-      title: "下单",
+      title: t("replay.rail.paper", {}, locale),
       icon: <PaperRailIcon />,
       order: 20,
       sizing: "fixed",
       defaultHeight: MARKET_DOCK_DEFAULT_HEIGHT,
       minHeight: MARKET_DOCK_MIN_HEIGHT,
       maxHeight: MARKET_DOCK_MAX_HEIGHT,
-      collapsedSummary: "纸面委托",
+      collapsedSummary: t("replay.rail.paperSummary", {}, locale),
     },
     {
       id: REPLAY_RAIL_VIEW_IDS.account,
-      title: "仓位",
+      title: t("replay.rail.account", {}, locale),
       icon: <AccountRailIcon />,
       order: 30,
       sizing: "fixed",
       defaultHeight: MARKET_DOCK_DEFAULT_HEIGHT,
       minHeight: 180,
       maxHeight: MARKET_DOCK_MAX_HEIGHT,
-      collapsedSummary: "仓位与账户",
+      collapsedSummary: t("replay.rail.accountSummary", {}, locale),
     },
     {
       id: REPLAY_RAIL_VIEW_IDS.activity,
-      title: "市场",
+      title: t("replay.rail.activity", {}, locale),
       icon: <ActivityRailIcon />,
       order: 40,
       sizing: "fixed",
       defaultHeight: MARKET_DOCK_DEFAULT_HEIGHT,
       minHeight: MARKET_DOCK_MIN_HEIGHT,
       maxHeight: MARKET_DOCK_MAX_HEIGHT,
-      collapsedSummary: "回放市场数据",
+      collapsedSummary: t("replay.rail.activitySummary", {}, locale),
     },
     {
       id: REPLAY_RAIL_VIEW_IDS.capabilities,
-      title: "能力",
+      title: t("replay.rail.capabilities", {}, locale),
       icon: <CapabilityRailIcon />,
       order: 50,
       sizing: "fixed",
       defaultHeight: 280,
       minHeight: 160,
       maxHeight: MARKET_DOCK_MAX_HEIGHT,
-      collapsedSummary: "数据能力",
+      collapsedSummary: t("replay.rail.capabilitiesSummary", {}, locale),
     },
-  ], []);
+  ], [locale]);
 
   const onToggleView = useCallback((viewId: string) => {
     actions.toggleView(viewId as ReplayRailViewId);
@@ -156,10 +159,10 @@ function ReplayRightMarketRail({
     }
 
     const title =
-      viewId === REPLAY_RAIL_VIEW_IDS.paper ? "下单"
-        : viewId === REPLAY_RAIL_VIEW_IDS.account ? "仓位"
-          : viewId === REPLAY_RAIL_VIEW_IDS.activity ? "市场"
-            : viewId === REPLAY_RAIL_VIEW_IDS.capabilities ? "能力"
+      viewId === REPLAY_RAIL_VIEW_IDS.paper ? t("replay.rail.paper", {}, locale)
+        : viewId === REPLAY_RAIL_VIEW_IDS.account ? t("replay.rail.account", {}, locale)
+          : viewId === REPLAY_RAIL_VIEW_IDS.activity ? t("replay.rail.activity", {}, locale)
+            : viewId === REPLAY_RAIL_VIEW_IDS.capabilities ? t("replay.rail.capabilities", {}, locale)
               : viewId;
     const dockAttr =
       viewId === REPLAY_RAIL_VIEW_IDS.paper ? "paper"
@@ -172,7 +175,7 @@ function ReplayRightMarketRail({
         className="replay-market-dock"
         style={{ height: "100%" }}
         data-active-dock={dockAttr}
-        aria-label={`回放${title}`}
+        aria-label={t("replay.rail.dockAria", { title }, locale)}
       >
         <header className="replay-market-dock-tabs">
           <span className="ob-title">{title}</span>
@@ -180,7 +183,7 @@ function ReplayRightMarketRail({
             type="button"
             className="replay-market-dock-collapse"
             onClick={() => closeView(viewId)}
-            aria-label={`折叠${title}面板`}
+            aria-label={t("replay.rail.collapse", { title }, locale)}
           >×</button>
         </header>
         <div className="replay-market-dock-body">
@@ -222,13 +225,14 @@ function ReplayRightMarketRail({
     onToggleView,
     preferences.openViewIds,
     runtime,
+    locale,
     viewer,
   ]);
 
   return (
     <MarketRightRailFrame
       source="replay"
-      ariaLabel="回放自选与市场侧栏"
+      ariaLabel={t("replay.rail.sidebarAria")}
       views={views}
       openViewIds={preferences.openViewIds}
       panelCollapsed={preferences.panelCollapsed}

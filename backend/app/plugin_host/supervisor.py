@@ -585,6 +585,7 @@ class EntrypointSupervisor:
         *,
         user_action: bool,
         trace_id: str,
+        locale: str | None = None,
     ) -> dict[str, Any]:
         generation, descriptor = self._active_snapshot()
         declared = {item.id for item in descriptor.contributions}
@@ -600,6 +601,7 @@ class EntrypointSupervisor:
                 user_action=user_action,
                 generation=generation,
                 trace_id=trace_id,
+                locale=locale,
             )
             invocation = InvokeRequest(contribution_id, input_value, request_context)
         except PlatformContractError as exc:

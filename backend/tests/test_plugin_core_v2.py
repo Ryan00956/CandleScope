@@ -13,6 +13,7 @@ from fastapi import FastAPI
 from candlescope_plugin_sdk.platform_v2 import (
     CapabilityGrant,
     HostCallRequest,
+    PlatformContractError,
     PluginManifest,
     RequestContext,
 )
@@ -60,7 +61,13 @@ def _core_manifest() -> PluginManifest:
                 "requiresUserAction": True,
                 "inputSchema": {
                     "type": "object",
-                    "properties": {"name": {"type": "string", "maxLength": 32}},
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "enum": ["CandleScope", "Trader"],
+                            "maxLength": 32,
+                        }
+                    },
                     "required": ["name"],
                     "additionalProperties": False,
                 },
@@ -142,6 +149,71 @@ def test_core_contribution_contracts_are_strict_and_catalog_safe() -> None:
     ]["minimum"] = 1
     with pytest.raises(CorePluginError, match="invalid shape"):
         core_contributions(PluginManifest.from_wire(invalid_bounds))
+
+
+def test_contribution_localizations_are_catalog_safe_and_target_declared_ui() -> None:
+    value = _core_manifest().to_wire()
+    value["contributions"][0]["configuration"]["localizations"] = {
+        "zh-CN": {
+            "title": "命令",
+            "schema": {
+                "title": "命令参数",
+                "properties": {
+                    "name": {
+                        "title": "名称",
+                        "enumLabels": ["蜡烛图", "交易者"],
+                    }
+                },
+            },
+        }
+    }
+    value["contributions"][1]["configuration"]["localizations"] = {
+        "zh": {
+            "title": "设置",
+            "schema": {"properties": {"enabled": {"title": "启用"}}},
+        }
+    }
+    contributions = core_contributions(PluginManifest.from_wire(value))
+    command = contributions[0].to_catalog()
+    assert command["localizations"]["zh-CN"]["title"] == "命令"
+    assert (
+        command["localizations"]["zh-CN"]["schema"]["properties"]["name"][
+            "title"
+        ]
+        == "名称"
+    )
+    assert command["localizations"]["zh-CN"]["schema"]["properties"]["name"][
+        "enumLabels"
+    ] == ["蜡烛图", "交易者"]
+    assert "executable" not in json.dumps(command)
+
+    unknown_target = json.loads(json.dumps(value))
+    unknown_target["contributions"][0]["configuration"]["localizations"][
+        "zh-CN"
+    ]["schema"]["properties"] = {"executable": {"title": "禁止"}}
+    with pytest.raises(CorePluginError, match="do not match"):
+        core_contributions(PluginManifest.from_wire(unknown_target))
+
+    wrong_surface = json.loads(json.dumps(value))
+    wrong_surface["contributions"][0]["configuration"]["localizations"][
+        "zh-CN"
+    ]["fields"] = {"name": "名称"}
+    with pytest.raises(CorePluginError, match="invalid shape"):
+        core_contributions(PluginManifest.from_wire(wrong_surface))
+
+    mismatched_enum_labels = json.loads(json.dumps(value))
+    mismatched_enum_labels["contributions"][0]["configuration"]["localizations"][
+        "zh-CN"
+    ]["schema"]["properties"]["name"]["enumLabels"] = ["蜡烛图"]
+    with pytest.raises(CorePluginError, match="enum labels"):
+        core_contributions(PluginManifest.from_wire(mismatched_enum_labels))
+
+    malformed_carrier = json.loads(json.dumps(value))
+    malformed_carrier["contributions"][0]["configuration"]["localizations"] = [
+        "zh-CN"
+    ]
+    with pytest.raises(PlatformContractError, match="must be an object"):
+        PluginManifest.from_wire(malformed_carrier)
 
 
 def test_settings_bind_merges_new_defaults_without_overwriting_saved_values(
@@ -756,7 +828,7 @@ async def test_catalog_is_public_but_mutations_require_local_management_guard(
             invoked = await client.post(
                 "/api/v2/plugins/manage/commands/candlescope.hello-command.hello/invoke",
                 headers=guard.trusted_headers(user_action="invoke-hello"),
-                json={"input": {"name": "API"}},
+                json={"input": {"name": "API"}, "locale": "zh-CN"},
             )
             assert invoked.status_code == 200
             assert invoked.json()["result"]["message"] == "Hello, API!"

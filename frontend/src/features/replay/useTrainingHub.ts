@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useSyncExternalStore } from "react";
+import { t } from "../../i18n/index.js";
 import { ReplayApiError } from "./replayApi.js";
 import type { ReplayCapabilities, ReplayCatalog } from "./replayTypes.js";
 import type { ReplaySegmentPreparePlan } from "./replaySegmentTypes.js";
@@ -504,7 +505,7 @@ export class TrainingHubLifecycle {
     if (this.api.deleteRun === undefined) {
       this.error = {
         code: "TRAINING_RUN_DELETE_UNAVAILABLE",
-        message: "当前客户端不支持删除训练存档",
+        message: t("core.error.replayDeleteUnsupported"),
       };
       this.publish();
       return;
@@ -612,7 +613,7 @@ export class TrainingHubLifecycle {
     const errors = [...evaluation.errors];
     const ranges = catalog.entries.flatMap((entry) => entry.eligible_ranges);
     if (catalog.entries.length === 0 || ranges.length === 0) {
-      errors.push("当前历史源没有可用覆盖商品");
+      errors.push(t("core.error.replayNoCoverageProducts"));
     } else if (draft.startMode === "MANUAL" && (
       draft.requestedStartMs === null
       || !ranges.some((range) => (
@@ -621,7 +622,7 @@ export class TrainingHubLifecycle {
         && (draft.requestedStartMs! - range.first_start_ms) % range.interval_ms === 0
       ))
     )) {
-      errors.push("开始时间不在当前历史源的可用覆盖范围");
+      errors.push(t("core.error.replayStartOutsideCoverage"));
     } else if (draft.startMode === "RANDOM"
       && draft.randomRangeStartMs !== null
       && draft.randomRangeEndMs !== null
@@ -633,7 +634,7 @@ export class TrainingHubLifecycle {
             % range.interval_ms);
         return alignedFirst <= last;
       })) {
-      errors.push("随机区间与当前历史源的可用覆盖范围不相交");
+      errors.push(t("core.error.replayRandomOutsideCoverage"));
     }
     return {
       ...evaluation,

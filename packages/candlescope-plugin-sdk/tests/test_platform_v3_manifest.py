@@ -92,6 +92,41 @@ def test_v2_python_module_normalizes_without_changing_its_round_trip() -> None:
     }
 
 
+def test_v3_contribution_localizations_are_explicit_and_strict() -> None:
+    value = _read(FIXTURES / "valid-python-module.json")
+    value["contributions"] = [
+        {
+            "id": "run",
+            "kind": "command/1",
+            "title": "Run",
+            "entrypoint": "main",
+            "configuration": {
+                "requiresUserAction": True,
+                "placements": ["commandPalette"],
+            },
+            "localizations": {"zh-CN": {"title": "运行"}},
+        }
+    ]
+    jsonschema.validate(value, manifest_schema_v3())
+    parsed = PluginManifest.from_wire(value)
+    assert parsed.contributions[0].localizations == {"zh-CN": {"title": "运行"}}
+    assert parsed.to_wire() == value
+
+    embedded = copy.deepcopy(value)
+    embedded["contributions"][0]["configuration"]["localizations"] = embedded[
+        "contributions"
+    ][0].pop("localizations")
+    with pytest.raises(PlatformContractError, match="manifest v3"):
+        PluginManifest.from_wire(embedded)
+
+    invalid = copy.deepcopy(value)
+    invalid["contributions"][0]["localizations"]["zh-CN"]["executable"] = (
+        "python.exe"
+    )
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(invalid, manifest_schema_v3())
+
+
 def test_v3_unknown_kind_unknown_field_and_duplicate_entrypoint_fail_closed() -> None:
     base = _read(FIXTURES / "valid-java-jar.json")
     unknown_kind = copy.deepcopy(base)

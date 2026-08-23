@@ -67,7 +67,7 @@ test("v2 workspace owns the same source-neutral market slots without legacy repl
   assert.match(workspace, /ReplayRightMarketRail/);
   assert.match(workspace, /ReplayBottomControlDock/);
   assert.doesNotMatch(workspace, /ReplayRightRail/);
-  assert.match(workspace, /ReviewMode 只读图表工具/);
+  assert.match(workspace, /replay\.shell\.reviewTools/);
   assert.match(workspace, /review === null \? viewer\.seriesStore : reviewSeriesStore/);
   assert.match(workspace, /aria-controls="replay-integrity-drawer"/);
   assert.match(workspace, /integrityOpen &&/);
@@ -130,7 +130,7 @@ test("Phase 13 workspace projects ViewerState and exposes capability-driven adva
   assert.match(controls, /data-replay-action="advance-base"/);
   assert.match(controls, /data-replay-action="advance-source-event"/);
   assert.match(controls, /phase3Command\("advance"/);
-  assert.match(controls, /下一聚合成交/);
+  assert.match(controls, /replay\.control\.nextAgg/);
   assert.doesNotMatch(controls, /phase3Command\("step_(?:display|base|event)"/);
   assert.match(controls, /data-replay-action="cancel-advance"/);
   assert.match(viewerRuntime, /type === "advance"/);
@@ -210,7 +210,7 @@ test("Phase 8 workspace exposes explainable plans and fail-closed aggregate trad
   const hook = source("src/features/replay/useReplayTradeFlow.ts");
   assert.match(controls, /data-replay-fast-forward-plan/);
   assert.match(controls, /data-replay-equivalence/);
-  assert.match(rail, /\["flow", "订单流"\]/);
+  assert.match(rail, /replay\.dock\.flow/);
   assert.match(rail, /AGGREGATE_TRADE_NOT_RAW_TRADE|tradeFlow\.fidelity/);
   assert.match(rail, /UNSUPPORTED_SOURCE_MODE/);
   assert.match(hook, /CLEARED_FAIL_CLOSED/);
@@ -244,7 +244,7 @@ test("order-size capacity is independent from draft preview failures", () => {
   assert.match(rail, /sizeShareIntent === null[\s\S]*derivedSizeShare/);
   assert.match(rail, /const resolvedSizeInput = sizeShareIntent !== null/);
   assert.match(rail, /value=\{resolvedSizeInput\}/);
-  assert.match(rail, /aria-label="下单金额快速选择"/);
+  assert.match(rail, /replay\.paper\.sizeQuick/);
   assert.match(rail, /onLostPointerCapture=\{\(\) => setSliderDragging\(false\)\}/);
   assert.match(rail, /\|\| reduceOnlyUnavailableMessage !== null/);
   assert.match(rail, /notice\?\.message \?\? reduceOnlyUnavailableMessage/);
@@ -259,20 +259,20 @@ test("right-rail trading workstation keeps positions and account history out of 
   assert.doesNotMatch(shell, /bottomPanel=/);
   assert.doesNotMatch(shell, /ReplayTradingWorkbench/);
   assert.match(marketRail, /<ReplayTradingWorkbench/);
-  assert.match(marketRail, /viewId === REPLAY_RAIL_VIEW_IDS\.account \? "仓位"/);
+  assert.match(marketRail, /viewId === REPLAY_RAIL_VIEW_IDS\.account \? t\("replay\.rail\.account"/);
   assert.match(rail, /data-replay-workbench="rail"/);
-  assert.match(rail, /\["open-orders", "当前"\]/);
-  assert.match(rail, /\["order-history", "历史"\]/);
+  assert.match(rail, /replay\.wb\.openOrders/);
+  assert.match(rail, /replay\.wb\.orderHistory/);
   assert.match(rail, /TERMINAL_ORDER_STATES\.has/);
   assert.match(rail, /defaultReplayV2Api\.reportRun/);
   assert.match(rail, /data-replay-action="close-partial"/);
   assert.match(rail, /aria-live="polite"/);
   assert.match(rail, /className="replay-position-card"/);
-  assert.match(rail, /维持保证金\{maintenanceTierExtrapolated \? "（末档外推≈）" : ""\}/);
-  assert.match(rail, /强平价格（模拟≈\{liquidationTierExtrapolated \? "，末档外推" : ""\}）/);
-  assert.match(rail, /存在仓位超过历史末档，按末档费率和速算扣除数外推≈/);
-  assert.match(rail, /标记价格（\{replayMarkFidelityLabel\(item\.mark_fidelity\)\}）/);
-  assert.match(rail, /破产价格（模拟≈）/);
+  assert.match(rail, /replay\.wb\.mm/);
+  assert.match(rail, /replay\.wb\.liqPrice/);
+  assert.match(rail, /replay\.wb\.mmLastTier/);
+  assert.match(rail, /replayMarkFidelityLabel\(item\.mark_fidelity\)/);
+  assert.match(rail, /replay\.wb\.bankruptcy/);
   assert.match(rail, /replayPositiveModelPrice\(item\.liquidation_price\)/);
   assert.match(rail, /className="replay-compact-record"/);
   assert.match(styles, /\.replay-trading-workbench\[data-replay-workbench="rail"\]/);
@@ -323,7 +323,7 @@ test("history paging stays non-blocking and uses viewer delta projection", () =>
     workspace,
     /loading=\{review === null\s*&&\s*\([^)]*history\.loading/s,
   );
-  assert.match(workspace, /history\.loading && <span>Loading older replay data/);
+  assert.match(workspace, /history\.loading && <span>\{t\("replay\.loadingOlder"\)\}<\/span>/);
   assert.match(runtime, /applyReplayViewerSeriesDelta/);
   assert.match(runtime, /pendingSourceDeltas\.push\(delta\)/);
   assert.match(historyRuntime, /replayHistoryFirstPageBeforeMs/);
@@ -351,7 +351,7 @@ test("history paging stays non-blocking and uses viewer delta projection", () =>
     workspace,
     /history\.historyEpoch !== null && !history\.hasMore && !history\.loading/,
   );
-  assert.match(controls, /训练已结束；获取复盘控制权后可揭示真实区间或添加日志/);
+  assert.match(controls, /replay\.control\.ended/);
 });
 
 test("viewer projection coalesces source bursts to one rebuild per browser frame", () => {
@@ -682,8 +682,8 @@ test("toolbar keeps idle time visible and scopes progress to an active cancelabl
 
   assert.match(controls, /const cancelableAdvancePending = replayAdvanceIsCancelable\(/);
   assert.match(controls, /\{cancelableAdvancePending && \(\s*<span className="replay-advance-progress"/s);
-  assert.match(controls, /aria-label="本次推进进度"/);
-  assert.match(controls, /advanceProgress === null \? "准备中…"/);
+  assert.match(controls, /aria-label=\{t\("replay\.control\.advanceProgress"\)\}/);
+  assert.match(controls, /advanceProgress === null \? t\("replay\.control\.preparing"\)/);
   assert.doesNotMatch(controls, /aria-label="回放进度"|持续训练|domainProgress/);
   assert.match(styles, /\.replay-advance-progress \{/);
 });

@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import { parseOrderBookSocketMessage } from "./orderBookParser.js";
 import type {
   OrderBookBook,
@@ -62,14 +63,14 @@ function numeric(value: unknown): number | null {
 }
 
 function describeStaleReason(reason: string | null): string {
-  if (!reason) return "后端正在重同步连续订单簿";
+  if (!reason) return t("orderBook.rt.resyncing");
   const normalized = reason.toLowerCase();
-  if (normalized === "initial_sync") return "正在同步完整订单簿";
+  if (normalized === "initial_sync") return t("orderBook.rt.initialSync");
   if (normalized.includes("gap") || normalized.includes("bridge") || normalized.includes("sequence")) {
-    return "检测到序列缺口，正在重新同步";
+    return t("orderBook.rt.seqGap");
   }
-  if (normalized.includes("reconnect")) return "上游连接恢复中，等待重新同步";
-  return "订单簿暂不可用，正在重新同步";
+  if (normalized.includes("reconnect")) return t("orderBook.rt.reconnectWait");
+  return t("orderBook.rt.resyncGeneric");
 }
 
 export class OrderBookStreamController {
@@ -360,7 +361,7 @@ export class OrderBookStreamController {
       if (this.stopped || !this.subscribed) return;
       this.store.publishStatus("stale", {
         clearBook: true,
-        message: "盘口快照长时间未更新",
+        message: t("orderBook.rt.staleSnapshot"),
       });
     }, this.staleAfterMs);
   }
@@ -377,7 +378,7 @@ export class OrderBookStreamController {
 
   private scheduleReconnect(error: unknown): void {
     if (this.stopped || this.reconnectTimer !== null) return;
-    const message = error instanceof Error ? error.message : "订单簿连接中断";
+    const message = error instanceof Error ? error.message : t("orderBook.rt.disconnected");
     this.store.publishStatus("reconnecting", { clearBook: true, message, error: message });
     const delay = this.reconnectDelayMs;
     this.reconnectDelayMs = Math.min(

@@ -1,3 +1,4 @@
+import { t } from "../../i18n/index.js";
 import { parseTradeFlowSocketMessage } from "./tradeFlowParser.js";
 import type {
   TradeFlowExternalStore,
@@ -127,7 +128,7 @@ export class TradeFlowStreamController {
     this.resetConnectionState();
     this.store.publishStatus(this.hasConnected ? "reconnecting" : "connecting", {
       clearRecords: true,
-      message: this.hasConnected ? "正在重新建立连续成交序列" : "正在连接逐笔成交流",
+      message: this.hasConnected ? t("trade.rt.reconnecting") : t("trade.rt.connecting"),
     });
     let socket: TradeFlowSocket;
     try {
@@ -169,7 +170,7 @@ export class TradeFlowStreamController {
           }
           this.assertIdentity(message.records);
           if (!this.store.replaceRecent(message.records)) {
-            this.failGap(socket, "近期成交快照不连续");
+            this.failGap(socket, t("trade.rt.snapshotGap"));
             return;
           }
           this.recentReceived = true;
@@ -183,19 +184,19 @@ export class TradeFlowStreamController {
             throw new Error("Received TradeFlow batch before the recent handoff");
           }
           if (!message.continuity || message.resyncRequired) {
-            this.failGap(socket, "后端标记成交批次不连续");
+            this.failGap(socket, t("trade.rt.batchDiscontinuous"));
             return;
           }
           // AppendBatchHub sequence is global and diagnostic. A subscription
           // filtered to one symbol can legitimately skip values when batches
           // for other identities contain no matching records.
           if (this.lastBatchSequence !== null && message.sequence <= this.lastBatchSequence) {
-            this.failGap(socket, "成交批次序号倒退");
+            this.failGap(socket, t("trade.rt.seqRewind"));
             return;
           }
           this.assertIdentity(message.records);
           if (!this.store.appendBatch(message.records)) {
-            this.failGap(socket, "聚合成交 ID 不连续");
+            this.failGap(socket, t("trade.rt.aggIdGap"));
             return;
           }
           this.lastBatchSequence = message.sequence;
@@ -410,7 +411,10 @@ export class TradeFlowStreamController {
 
   private retryLimitError(error: unknown): Error {
     return new Error(
-      `${this.errorMessage(error)}（自动重试已达上限 ${this.maxAutomaticRetries} 次）`,
+      t("trade.rt.retryLimit", {
+        error: this.errorMessage(error),
+        count: this.maxAutomaticRetries,
+      }),
     );
   }
 
@@ -451,7 +455,7 @@ export class TradeFlowStreamController {
   private errorMessage(error: unknown): string {
     return error instanceof Error && error.message
       ? error.message
-      : "TradeFlow 连接中断";
+      : t("trade.rt.disconnected");
   }
 
   private isOpen(socket: TradeFlowSocket): boolean {

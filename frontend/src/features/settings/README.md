@@ -1,6 +1,11 @@
 # Settings Feature
 
-`features/settings` owns chart appearance preferences, proxy settings, exchange registry display, cache limit sync, storage maintenance, and the current database tools surface.
+`features/settings` owns chart appearance preferences, interface locale,
+proxy settings, exchange registry display, cache limit sync, storage
+maintenance, and the current database tools surface.
+
+Locale persistence is `candlescope-settings.locale`. Message catalogs and
+`t()` live in `src/i18n`; this feature only stores and applies the locale.
 
 ## Public Contract
 

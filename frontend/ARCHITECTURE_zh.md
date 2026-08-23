@@ -40,7 +40,9 @@ Phase 10 后，`src/app` 拥有应用组合根和 Shell。Phase 11 后，原先�
 | `export/` | 导出选项、预览、导出服务和导出前绘图提交协作 |
 
 `src/runtime` 仅保留 app-wide performance marks，规则见
-[src/runtime/README.md](src/runtime/README.md)。Feature 边界规则见
+[src/runtime/README.md](src/runtime/README.md)。`src/i18n` 负责宿主 locale、
+文案 catalog 和 `t()`；settings 持久化 `locale` 并写入
+`document.documentElement.lang`。Feature 边界规则见
 [src/features/README.md](src/features/README.md)。
 
 ## 后端连接

@@ -30,6 +30,7 @@ import type {
   ChartWindowId,
   ChartWorkspaceSplitDirection,
 } from "../features/chart-workspace/chartWorkspaceTypes.js";
+import { chartLinkGroupDisplayName } from "../features/chart-workspace/chartWorkspaceI18n.js";
 import { chartCellStorageScope } from "../features/chart-workspace/chartWorkspaceLibrary.js";
 import type { ChartLinkCoordinator } from "../features/chart-workspace/chartLinkCoordinator.js";
 import {
@@ -66,6 +67,8 @@ import PluginPlatformSurfaces, { PluginUiErrorBoundary } from "../features/plugi
 import PluginPlatformToolbar from "../features/plugins/PluginPlatformToolbar.js";
 import PluginPlatformStatus from "../features/plugins/PluginPlatformStatus.js";
 import PluginLiveControl from "../features/plugins/PluginLiveControl.js";
+import { t } from "../i18n/index.js";
+import { useLocale } from "../i18n/useLocale.js";
 import { LIVE_RAIL_VIEW_IDS } from "../shared/marketRailLayout.js";
 import { ALERT_PANEL_OPEN_REQUEST_EVENT } from "../features/alerts/alertDeliveryClient.js";
 import { buildAppShellViewModel } from "./appShellViewModel.js";
@@ -185,7 +188,9 @@ function LiveChartCell({
   onActiveEnvironmentChange,
 }: LiveChartCellProps) {
   recordMultiChartCellRender(cell.id);
+  useLocale();
   const marketWorkspaceResources = useMarketDataWorkspaceResources();
+  const linkGroupName = linkGroup ? chartLinkGroupDisplayName(linkGroup) : null;
   const sectionRef = useRef<HTMLElement | null>(null);
   const [density, setDensity] = useState<WorkspaceCellDensity>("full");
   useLayoutEffect(() => {
@@ -614,7 +619,7 @@ function LiveChartCell({
         data-layout-role={layoutRole ?? "standard"}
         data-link-group={cell.linkGroupId ?? "none"}
         role="group"
-        aria-label={`${chartSession.view.symbol} ${chartSession.view.interval} 图表`}
+        aria-label={t("chart.aria", { symbol: chartSession.view.symbol, interval: chartSession.view.interval })}
         tabIndex={obscured ? -1 : active ? 0 : -1}
         onFocus={activate}
         onPointerDown={activate}
@@ -625,9 +630,9 @@ function LiveChartCell({
             type="button"
             className="multi-chart-cell-drag-handle"
             draggable={!layoutEditingDisabled && !maximized && layoutCellIds.length > 1}
-            aria-label={`拖动图 ${cell.id.slice("cell-".length)} 交换位置`}
+            aria-label={t("chart.dragAria", { n: cell.id.slice("cell-".length) })}
             aria-disabled={layoutEditingDisabled || maximized || layoutCellIds.length <= 1}
-            title={layoutCellIds.length > 1 ? "拖动到另一图表以交换位置" : "拆分后可拖动交换"}
+            title={layoutCellIds.length > 1 ? t("chart.dragTitle") : t("chart.dragNeedSplit")}
             onDragStart={(event) => {
               if (layoutEditingDisabled || maximized || layoutCellIds.length <= 1) {
                 event.preventDefault();
@@ -641,7 +646,7 @@ function LiveChartCell({
           </button>
           {layoutRole && (
             <span className={`multi-chart-cell-role role-${layoutRole}`}>
-              {layoutRole === "main" ? "主图" : "确认图"}
+              {layoutRole === "main" ? t("chart.roleMain") : t("chart.roleConfirm")}
             </span>
           )}
           <strong>{chartSession.view.symbol}</strong>
@@ -655,13 +660,13 @@ function LiveChartCell({
               data-link-group={linkGroup.id}
               style={{ "--chart-link-group-color": linkGroup.color } as CSSProperties}
               title={linkGroup.parentId
-                ? `${linkGroup.name} · 接收父组联动`
-                : `${linkGroup.name} · 根联动组`}
+                ? t("chart.linkChild", { name: linkGroupName ?? linkGroup.name })
+                : t("chart.linkRoot", { name: linkGroupName ?? linkGroup.name })}
             >
               <span className="multi-chart-cell-link-role" aria-hidden="true">
                 {linkGroup.parentId ? "↓" : "↔"}
               </span>
-              {linkGroup.name}
+              {linkGroupName}
             </span>
           )}
           <WorkspaceCellLayoutMenu
@@ -681,8 +686,8 @@ function LiveChartCell({
               toggleMaximize();
             }}
             onDoubleClick={(event) => event.stopPropagation()}
-            aria-label={maximized ? "还原图表" : "最大化图表"}
-            title={maximized ? "还原图表" : "最大化图表"}
+            aria-label={maximized ? t("chart.restore") : t("chart.maximize")}
+            title={maximized ? t("chart.restore") : t("chart.maximize")}
           >
             {maximized ? "↙" : "↗"}
           </button>

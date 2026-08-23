@@ -2,6 +2,7 @@ import type {
   DrawingExportLease,
   DrawingExportPrepareOptions,
 } from "../drawingInteractionController.js";
+import { t } from "../../../i18n/index.js";
 
 export interface DrawingExportReadyApi {
   prepareExport(options?: DrawingExportPrepareOptions): Promise<DrawingExportLease>;
@@ -31,9 +32,9 @@ export async function prepareDrawingExportFailClosed(
   if (loadedApi) return loadedApi.prepareExport(options);
   if (!present && !dependencies.drawingToolActive) return null;
   if (dependencies.engineLoadError) {
-    throw new Error("绘图引擎加载失败，已停止导出以避免遗漏绘图。", {
+    throw new Error(t("core.error.drawingLoad"), {
       cause: dependencies.engineLoadError,
     });
   }
-  throw new Error("绘图引擎仍在加载，已停止导出以避免遗漏绘图，请稍后重试。 ");
+  throw new Error(t("core.error.drawingLoading"));
 }

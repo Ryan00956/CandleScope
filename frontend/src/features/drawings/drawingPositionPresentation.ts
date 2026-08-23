@@ -2,6 +2,7 @@ import type {
   DrawingFrameSnapshot,
   DrawingFrameThemePalette,
 } from "../../chart-adapter/drawingFrameSnapshot.js";
+import { t } from "../../i18n/index.js";
 import { drawingPositionLevelColor } from "./drawingPositionColors.js";
 
 export interface DrawingPositionPanelLine {
@@ -96,7 +97,7 @@ export function drawingPositionPanelLines({
     themePalette,
   );
   const lines: DrawingPositionPanelLine[] = [Object.freeze({
-    label: "入场",
+    label: t("drawing.position.entry"),
     value: formatDrawingPositionPrice(entryPrice),
     extra: null,
     color: "#2196f3",
@@ -105,7 +106,7 @@ export function drawingPositionPanelLines({
     const percent = drawingPositionPnlPercent(entryPrice, tpPrice, isLong);
     const pnl = positionSize ? positionSize * percent / 100 : null;
     lines.push(Object.freeze({
-      label: "止盈",
+      label: t("drawing.position.takeProfit"),
       value: `${formatDrawingPositionPrice(tpPrice)} (${signedDrawingPositionValue(percent)}%)`,
       extra: pnl === null ? null : signedDrawingPositionValue(pnl),
       color: priceColor(tpPrice),
@@ -115,7 +116,7 @@ export function drawingPositionPanelLines({
     const percent = drawingPositionPnlPercent(entryPrice, slPrice, isLong);
     const pnl = positionSize ? positionSize * percent / 100 : null;
     lines.push(Object.freeze({
-      label: "止损",
+      label: t("drawing.position.stopLoss"),
       value: `${formatDrawingPositionPrice(slPrice)} (${signedDrawingPositionValue(percent)}%)`,
       extra: pnl === null ? null : signedDrawingPositionValue(pnl),
       color: priceColor(slPrice),
@@ -125,7 +126,7 @@ export function drawingPositionPanelLines({
     const percent = drawingPositionPnlPercent(entryPrice, currentPrice, isLong);
     const pnl = positionSize ? positionSize * percent / 100 : null;
     lines.push(Object.freeze({
-      label: "现价",
+      label: t("drawing.position.current"),
       value: `${formatDrawingPositionPrice(currentPrice)} (${signedDrawingPositionValue(percent)}%)`,
       extra: pnl === null ? null : signedDrawingPositionValue(pnl),
       color: priceColor(currentPrice),
@@ -135,14 +136,14 @@ export function drawingPositionPanelLines({
     const reward = Math.abs(tpPrice - entryPrice);
     const risk = Math.abs(slPrice - entryPrice);
     if (risk > 0) lines.push(Object.freeze({
-      label: "盈亏比",
+      label: t("drawing.position.rr"),
       value: `1 : ${(reward / risk).toFixed(2)}`,
       extra: null,
       color: "#ffab40",
     }));
   }
   if (positionSize) lines.push(Object.freeze({
-    label: "仓位",
+    label: t("drawing.position.size"),
     value: `$${positionSize.toFixed(0)}`,
     extra: null,
     color: "#b0bec5",

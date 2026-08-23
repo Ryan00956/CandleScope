@@ -5,6 +5,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { t } from "../../i18n/index.js";
 import type {
   ChartCellId,
   ChartWorkspaceCellRole,
@@ -106,8 +107,10 @@ export default function WorkspaceLayoutTree({
       )}
       {spaceWarning && assessment && (
         <div className="workspace-layout-space-warning" role="status" aria-live="polite">
-          当前空间不足：最小图表约 {Math.round(assessment.minimumCellWidth)} × {Math.round(assessment.minimumCellHeight)} px。
-          请放大窗口、降低图数或使用更高分辨率。
+          {t("workspace.spaceWarning", {
+            width: Math.round(assessment.minimumCellWidth),
+            height: Math.round(assessment.minimumCellHeight),
+          })}
         </div>
       )}
     </div>

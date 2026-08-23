@@ -35,6 +35,8 @@ import {
 import type {
   KlineBar,
 } from "../market-data/marketDataTypes.js";
+import { t } from "../../i18n/index.js";
+import { useLocale } from "../../i18n/useLocale.js";
 import type {
   ReplayRuntime,
 } from "./useReplayRuntime.js";
@@ -247,6 +249,7 @@ export function useReplaySharedIndicatorRuntime(
   viewer: ReplayViewerRuntime,
   runScope: string,
 ): ReplaySharedIndicatorRuntime {
+  const locale = useLocale();
   const seriesStore = viewer.seriesStore;
   const subscribeSeries = useCallback((listener: () => void) => (
     seriesStore.subscribe(() => listener())
@@ -401,12 +404,14 @@ export function useReplaySharedIndicatorRuntime(
       const preference = orderFlowPreferences[definition.key];
       return {
         ...definition,
+        name: t(definition.nameKey, {}, locale),
+        description: t(definition.descriptionKey, {}, locale),
         added: preference.added,
         visible: preference.visible,
         supported: orderFlowSupported,
         unsupportedReason: orderFlowSupported
           ? null
-          : "当前已揭示 K 线不含可信 taker buy/order-flow 字段",
+          : t("replay.rt.noTaker", {}, locale),
         status: !orderFlowSupported
           ? "dormant"
           : preference.added && preference.visible
@@ -415,12 +420,12 @@ export function useReplaySharedIndicatorRuntime(
               ? "dormant"
               : "idle",
         statusText: orderFlowSupported
-          ? "使用同一共享 K 线订单流投影；仅消费游标前已揭示数据"
+          ? t("replay.rt.sharedFlow", {}, locale)
           : null,
         error: null,
       };
     })
-  ), [orderFlowPreferences, orderFlowSupported]);
+  ), [locale, orderFlowPreferences, orderFlowSupported]);
   const view = useMemo(() => ({
     ...providedBars.view,
     subPanes: [

@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { t } from "../../i18n/index.js";
+import { useLocale } from "../../i18n/useLocale.js";
 
 import {
   buildAlertEventStreamUrl,
@@ -27,6 +29,7 @@ const TOAST_LIFETIME_MS = 15_000;
 const MAX_TOASTS = 5;
 
 export default function AlertNotificationCenter({ onOpenAlerts }: AlertNotificationCenterProps) {
+  useLocale();
   const [toasts, setToasts] = useState<AlertToast[]>([]);
   const seenDispatchesRef = useRef(new Set<string>());
   const seenEventsRef = useRef(new Set<string>());
@@ -107,18 +110,18 @@ export default function AlertNotificationCenter({ onOpenAlerts }: AlertNotificat
 
   if (toasts.length === 0) return null;
   return (
-    <div className="alert-toast-stack" role="region" aria-live="polite" aria-label="警报通知">
+    <div className="alert-toast-stack" role="region" aria-live="polite" aria-label={t("alert.toastRegion")}>
       {toasts.map((toast) => {
         const { notification } = toast;
         const symbol = notification.target.symbol || "--";
         return (
           <div className={`alert-toast ${toast.deliveryError ? "is-error" : ""}`} key={toast.id}>
             <button className="alert-toast-main" type="button" onClick={onOpenAlerts}>
-              <span className="alert-toast-kicker">{toast.deliveryError ? "通知投递失败" : `警报 · ${symbol}`}</span>
-              <strong>{notification.message || `${symbol} 命中规则`}</strong>
+              <span className="alert-toast-kicker">{toast.deliveryError ? t("alert.toastFailed") : t("alert.toastHit", { symbol })}</span>
+              <strong>{notification.message || t("alert.toastDefault", { symbol })}</strong>
               {toast.deliveryError && <small>{toast.deliveryError}</small>}
             </button>
-            <button className="alert-toast-close" type="button" onClick={() => dismiss(toast.id)} aria-label="关闭通知">×</button>
+            <button className="alert-toast-close" type="button" onClick={() => dismiss(toast.id)} aria-label={t("alert.toastClose")}>×</button>
           </div>
         );
       })}

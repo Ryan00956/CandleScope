@@ -1189,9 +1189,25 @@ class BacktestService:
             max_queued=queue_ceiling,
         )
         if inserted == "ACTIVE_LIMIT":
-            raise BacktestError("BUDGET_EXCEEDED", "active run ceiling reached")
+            raise BacktestError(
+                "RUN_CAPACITY_EXCEEDED",
+                "active run ceiling reached",
+                details={
+                    "retryable": True,
+                    "retry_after_ms": 1000,
+                    "capacity": "active",
+                },
+            )
         if inserted == "QUEUE_LIMIT":
-            raise BacktestError("BUDGET_EXCEEDED", "queued run ceiling reached")
+            raise BacktestError(
+                "RUN_CAPACITY_EXCEEDED",
+                "queued run ceiling reached",
+                details={
+                    "retryable": True,
+                    "retry_after_ms": 1000,
+                    "capacity": "queued",
+                },
+            )
         if inserted == "EXISTING":
             concurrent = self.repository.get_run_by_idempotency(idempotency_key)
             if concurrent is not None:
@@ -3703,13 +3719,29 @@ class BacktestService:
             for state in states
         )
         if active >= self.settings.max_active_runs:
-            raise BacktestError("BUDGET_EXCEEDED", "active run ceiling reached")
+            raise BacktestError(
+                "RUN_CAPACITY_EXCEEDED",
+                "active run ceiling reached",
+                details={
+                    "retryable": True,
+                    "retry_after_ms": 1000,
+                    "capacity": "active",
+                },
+            )
         queued = sum(state is RunState.QUEUED for state in states)
         queue_ceiling = self.settings.max_active_runs + (
             self.settings.max_concurrent_studies * self.settings.max_trials_per_study
         )
         if queued >= queue_ceiling:
-            raise BacktestError("BUDGET_EXCEEDED", "queued run ceiling reached")
+            raise BacktestError(
+                "RUN_CAPACITY_EXCEEDED",
+                "queued run ceiling reached",
+                details={
+                    "retryable": True,
+                    "retry_after_ms": 1000,
+                    "capacity": "queued",
+                },
+            )
 
     def _assert_execution_control(
         self,
@@ -3885,20 +3917,15 @@ class BacktestService:
                             "IDENTITY_MUTATION",
                             "archived strategy revision cannot create a new Run",
                         )
-                    smoke = self.repository.latest_strategy_smoke(
-                        str(payload["strategy_revision_id"])
+                    smoke = self.repository.strategy_smoke_for_snapshot(
+                        str(payload["strategy_revision_id"]),
+                        str(payload["dataset_id"]),
+                        str(payload["snapshot_hash"]),
                     )
                     if smoke is None:
                         raise StrategyProviderError(
                             "SMOKE_REQUIRED",
-                            "run the bounded Strategy smoke before creating a Run",
-                        )
-                    if str(smoke["dataset_id"]) != str(payload["dataset_id"]) or str(
-                        smoke["snapshot_hash"]
-                    ) != str(payload["snapshot_hash"]):
-                        raise StrategyProviderError(
-                            "SMOKE_REQUIRED",
-                            "rerun Strategy smoke for the selected immutable dataset snapshot",
+                            "run the bounded Strategy smoke for the selected immutable dataset snapshot before creating a Run",
                         )
                     base_revision = str(persisted_revision["base_revision_id"])
                     compiled_revision = json.loads(

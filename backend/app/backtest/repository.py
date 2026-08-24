@@ -211,6 +211,18 @@ class BacktestRepository:
         return dict(row) if row is not None else None
 
     @_locked
+    def strategy_smoke_for_snapshot(
+        self, revision_id: str, dataset_id: str, snapshot_hash: str
+    ) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM backtest_strategy_smokes "
+            "WHERE revision_id = ? AND dataset_id = ? AND snapshot_hash = ? "
+            "AND status = 'PASSED' ORDER BY created_at_ms DESC LIMIT 1",
+            (revision_id, dataset_id, snapshot_hash),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    @_locked
     def list_signal_trace(
         self, run_id: str, *, after: int, limit: int
     ) -> list[dict[str, Any]]:

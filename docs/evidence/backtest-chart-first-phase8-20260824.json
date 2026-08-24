@@ -1,0 +1,84 @@
+{
+  "schemaVersion": "candlescope.backtest-chart-first.phase8/1",
+  "generatedAt": "2026-08-24T14:00:00+08:00",
+  "status": "COMPLETE_READY_FOR_COMMIT",
+  "identity": {
+    "baseGitHead": "3874465a",
+    "branch": "codex/backtest-chart-first-ux",
+    "worktree": "H:\\program\\CandleScope-backtest-chart-first"
+  },
+  "scope": {
+    "phase": 8,
+    "phase9OrLaterCode": false,
+    "defaultFlagEnabled": false,
+    "push": false,
+    "merge": false,
+    "deploy": false,
+    "productionDataChanged": false
+  },
+  "flags": {
+    "VITE_CHART_STRATEGY_AUTO_RUN_ENABLED": "default_off"
+  },
+  "contract": {
+    "debounceMs": 600,
+    "workspaceMaxConcurrentAutoRuns": 2,
+    "fastReadyOnly": true,
+    "initialMountSchedulesRun": false,
+    "copySchedulesRun": false,
+    "manualPreemptsUnsubmittedAuto": true,
+    "preciseDownloadsAutomatically": false,
+    "completedIdentityReused": true,
+    "capacityCode": "RUN_CAPACITY_EXCEEDED",
+    "capacityHttpStatus": 429,
+    "infiniteRetry": false,
+    "smokeLookupIdentity": ["revision_id", "dataset_id", "snapshot_hash"]
+  },
+  "browser": {
+    "browser": "headed Chrome",
+    "driver": "repository-local Playwright CLI",
+    "viewport": { "width": 1440, "height": 900 },
+    "frontend": "temporary Vite preview on 127.0.0.1:15180",
+    "backend": "isolated LOCAL_OFFLINE backend on 127.0.0.1:18090",
+    "runApisIntercepted": false,
+    "marketHistoryRoute": "CONTROLLED_LOCAL_BARS_ONLY",
+    "consoleClaimedClean": false,
+    "expectedLocalOfflineFailuresPresent": true,
+    "fastAutoRun": "PASS",
+    "rapidTransitionFinalOnly": "PASS",
+    "preciseRequestCountAfterTransition": 0,
+    "fourCellMaxActive": 2,
+    "combinedVisualComparison": "PASS"
+  },
+  "fourCellConcurrency": {
+    "firstStartsMs": [1787550046552, 1787550046553],
+    "firstEndsMs": [1787550050575, 1787550050576],
+    "secondStartsMs": [1787550050584, 1787550050620],
+    "secondEndsMs": [1787550054600, 1787550054630],
+    "maxActive": 2
+  },
+  "checks": {
+    "backendBacktestFull": { "result": "PASS", "tests": 237, "failures": 0, "existingDeprecationWarnings": 4 },
+    "frontendBacktest": { "result": "PASS", "tests": 96, "suites": 3, "failures": 0 },
+    "frontendTypecheck": { "result": "PASS" },
+    "frontendLint": { "result": "PASS", "scope": "full frontend with isolated exact-lock tooling dependency" },
+    "frontendArchitecture": { "result": "PASS", "allowlistEntries": 0 },
+    "frontendI18n": { "result": "PASS", "catalogKeys": 3761, "sourceFiles": 611 },
+    "backendBlack": { "result": "PASS", "files": 4 },
+    "backendRuff": { "result": "PASS", "issues": 0 },
+    "frontendBuildFlagOff": { "result": "PASS_WITH_EXISTING_CHUNK_WARNING", "modules": 650 },
+    "frontendBuildFlagOn": { "result": "PASS_WITH_EXISTING_CHUNK_WARNING", "modules": 650 },
+    "typescriptBoundariesAfterToolingRepair": { "result": "PASS", "tests": 5, "failures": 0 }
+  },
+  "screenshots": [
+    { "path": "docs/evidence/backtest-chart-first-phase8/auto-completed-1440x900.png", "sha256": "888207186c4109b688f05ac59215a06819a91cfc0993e2e00f3912e1faca15fa" },
+    { "path": "docs/evidence/backtest-chart-first-phase8/four-cell-queue-1440x900.png", "sha256": "fc71656fb1c926ce1375718f9f491c223f4ab8826404f89ae1f3337c29ad09d7" },
+    { "path": "docs/evidence/backtest-chart-first-phase8/precise-paused-1440x900.png", "sha256": "7d0a8a6257520003b6a792ad32d0511c9730e2150a9c41b960b0f3091225b723" },
+    { "path": "docs/evidence/backtest-chart-first-phase8/reference-vs-actual.png", "sha256": "bd3b3829b4cb43b6f13d4818cdd914cbda7226f124afea175df8ecf8bafcdd25" }
+  ],
+  "knownNonPassAttempts": [
+    { "step": "multi-snapshot browser rerun", "result": "SMOKE_REQUIRED", "resolution": "exact snapshot smoke lookup plus regression" },
+    { "step": "full frontend suite", "result": "MISSING_SHARED_@BABEL_CORE", "resolution": "isolated exact lockfile tooling install; boundaries 5/5 and full lint pass" },
+    { "step": "exploratory whole-backend suite", "result": "MANUALLY_INTERRUPTED_SLOW_MANAGED_RUNTIME_RECOVERY_AT_53_PERCENT", "resolution": "required backtest domain 237/237 pass" }
+  ],
+  "decision": "PHASE8_COMPLETE_PHASE9_NOT_STARTED"
+}

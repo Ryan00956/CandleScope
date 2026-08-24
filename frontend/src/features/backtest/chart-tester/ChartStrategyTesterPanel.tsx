@@ -39,6 +39,7 @@ import type {
   ChartStrategyTesterStatus,
 } from "./chartStrategyTesterState.js";
 import type { ChartStrategyResultBundle } from "./chartStrategyResultCache.js";
+import type { ChartStrategyAutoRunPauseReason } from "./chartStrategyAutoRunCoordinator.js";
 import {
   ChartStrategyResultContextBar,
   ChartStrategyResultOverview,
@@ -88,7 +89,7 @@ function attachmentForDraft(
     quickPresetId: session.marketType === "spot"
       ? "CRYPTO_SPOT_STANDARD_V1"
       : "CRYPTO_PERP_STANDARD_V1",
-    autoRun: false,
+    autoRun: true,
   };
 }
 
@@ -129,6 +130,20 @@ function runStatusKey(status: ChartStrategyTesterStatus) {
   }
 }
 
+function autoRunPauseKey(reason: ChartStrategyAutoRunPauseReason) {
+  switch (reason) {
+    case "FLAG_DISABLED": return "chartTester.autoRun.pause.flag" as const;
+    case "USER_DISABLED": return "chartTester.autoRun.pause.user" as const;
+    case "WAITING_DEBOUNCE": return "chartTester.autoRun.pause.debounce" as const;
+    case "WORKSPACE_QUEUE": return "chartTester.autoRun.pause.queue" as const;
+    case "PRECISE_REQUIRES_MANUAL": return "chartTester.autoRun.pause.precise" as const;
+    case "NEEDS_DATA_CONFIRMATION": return "chartTester.autoRun.pause.data" as const;
+    case "UNSUPPORTED_CONTEXT": return "chartTester.autoRun.pause.unsupported" as const;
+    case "BACKEND_BUSY": return "chartTester.autoRun.pause.busy" as const;
+    case "DRAFT_UNAVAILABLE": return "chartTester.autoRun.pause.draft" as const;
+  }
+}
+
 export interface ChartStrategyTesterPanelProps {
   cellScope: string;
   session: ChartSession;
@@ -145,6 +160,7 @@ export interface ChartStrategyTesterPanelProps {
   resultLoading?: boolean;
   resultError?: string | null;
   comparison?: RecentRunCompareV1 | null;
+  autoRunPauseReason?: ChartStrategyAutoRunPauseReason | null;
   selectedExplanation?: TradeExplanationSelection | null;
   onSelectExplanation?(selection: TradeExplanationSelection): void;
   onCloseExplanation?(): void;
@@ -172,6 +188,7 @@ export default function ChartStrategyTesterPanel({
   resultLoading = false,
   resultError = null,
   comparison = null,
+  autoRunPauseReason = null,
   selectedExplanation = null,
   onSelectExplanation = () => undefined,
   onCloseExplanation = () => undefined,
@@ -304,7 +321,7 @@ export default function ChartStrategyTesterPanel({
       onEntryStateChange("error");
     }
     else if (saveState === "SAVING") onEntryStateChange("saving");
-    else if (runReady) onEntryStateChange("ready");
+    else if (runReady || runState.status === "COMPLETED") onEntryStateChange("ready");
     else onEntryStateChange("editing");
   }, [currentAttachment, onEntryStateChange, runReady, runState.status, saveState, visibleIssues.length]);
 
@@ -478,7 +495,7 @@ export default function ChartStrategyTesterPanel({
     if (code.includes("DATA") || code.includes("SNAPSHOT") || code.includes("CONTEXT")) {
       return { message: t("chartTester.error.data"), action: t("chartTester.error.action.retry") };
     }
-    if (code.includes("BUDGET")) {
+    if (code.includes("BUDGET") || code === "RUN_CAPACITY_EXCEEDED") {
       return { message: t("chartTester.error.busy"), action: t("chartTester.error.action.wait") };
     }
     return { message: t("chartTester.error.backend"), action: t("chartTester.error.action.retry") };
@@ -584,6 +601,12 @@ export default function ChartStrategyTesterPanel({
           locale={locale}
           stale={runState.status === "STALE" || !runState.projectionVisible}
         />
+      )}
+      {currentAttachment && autoRunPauseReason && (
+        <div className="chart-strategy-auto-run-status" role="status" data-auto-run-pause={autoRunPauseReason}>
+          <strong>{t("chartTester.autoRun.paused")}</strong>
+          <span>{t(autoRunPauseKey(autoRunPauseReason))}</span>
+        </div>
       )}
       {!result && resultLoading && (
         <div className="chart-strategy-result-loading" role="status">
@@ -783,6 +806,22 @@ export default function ChartStrategyTesterPanel({
 
         {activeTab === "settings" && currentAttachment && (
           <div className="chart-strategy-quick-settings" data-testid="chart-strategy-quick-settings">
+            <label className="chart-strategy-auto-run-setting">
+              <input
+                type="checkbox"
+                checked={currentAttachment.autoRun}
+                onChange={(event) => onAttachmentChange({
+                  ...currentAttachment,
+                  autoRun: event.currentTarget.checked,
+                })}
+              />
+              <span>{t("chartTester.autoRun.label")}</span>
+              <strong>{currentAttachment.autoRun
+                ? t(currentAttachment.fidelityPreference === "FAST"
+                  ? "chartTester.autoRun.enabled"
+                  : "chartTester.autoRun.preciseManual")
+                : t("chartTester.autoRun.disabled")}</strong>
+            </label>
             <div><span>{t("chartTester.settings.capital")}</span><strong>{accountPreset?.initial_cash ?? "10,000"} USDT</strong></div>
             <div><span>{t("chartTester.settings.position")}</span><strong>{t("chartTester.settings.positionValue", {
               percent: accountPreset?.equity_percent ?? "10",

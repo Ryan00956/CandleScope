@@ -283,8 +283,10 @@ def _require_python_strategy() -> None:
 
 
 def _error(exc: BacktestError) -> JSONResponse:
+    retryable_capacity = exc.code == "RUN_CAPACITY_EXCEEDED"
     return JSONResponse(
-        status_code=400,
+        status_code=429 if retryable_capacity else 400,
+        headers={"Retry-After": "1"} if retryable_capacity else None,
         content={
             "error": {"code": exc.code, "message": exc.message, "details": exc.details}
         },

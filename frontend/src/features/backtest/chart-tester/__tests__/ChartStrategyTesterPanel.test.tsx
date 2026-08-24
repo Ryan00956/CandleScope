@@ -95,6 +95,36 @@ test("stop observing appears only after a backend Run ID exists", () => {
   assert.match(render(queued), /data-testid="chart-strategy-stop-observing"/);
 });
 
+test("a paused auto-run reason is visible and actionable without exposing Run identity", () => {
+  const html = renderToStaticMarkup(
+    <ChartStrategyTesterPanel
+      cellScope="workspace\u0000cell-1"
+      session={session}
+      attachment={{ ...attachment, autoRun: true, fidelityPreference: "PRECISE" }}
+      draftStore={new StrategyDraftStore(createMemoryStrategyDraftAdapter())}
+      onAttachmentChange={() => undefined}
+      onEntryStateChange={() => undefined}
+      onRunRequest={() => undefined}
+      runState={createChartStrategyTesterState({
+        session,
+        attachment: { ...attachment, autoRun: true, fidelityPreference: "PRECISE" },
+        draftContentRevision: 1,
+      }, "workspace\u0000cell-1")}
+      resolution={null}
+      sourceDiagnostics={[]}
+      pendingDataDraftRevision={null}
+      autoRunPauseReason="PRECISE_REQUIRES_MANUAL"
+      onPrepareData={() => undefined}
+      onStopObserving={() => undefined}
+      onResumeObserving={() => undefined}
+      onSourceDirty={() => undefined}
+      onClose={() => undefined}
+    />,
+  );
+  assert.match(html, /data-auto-run-pause="PRECISE_REQUIRES_MANUAL"/);
+  assert.doesNotMatch(html, /bt_[A-Za-z0-9_-]+/);
+});
+
 test("panel height and active tab persist by cell scope without cross-cell copying", () => {
   const values = new Map<string, string>();
   const storage = {

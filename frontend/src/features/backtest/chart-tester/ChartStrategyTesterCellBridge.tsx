@@ -40,9 +40,18 @@ import { useLocale } from "../../../i18n/useLocale.js";
 import type { RecentRunCompareV1 } from "../backtestTypes.js";
 import {
   CHART_RUN_COMPARE_ENABLED,
+  CHART_STRATEGY_AUTO_RUN_ENABLED,
   CHART_TRADE_EXPLANATION_ENABLED,
 } from "./chartStrategyTesterFeature.js";
 import type { TradeExplanationSelection } from "./ChartStrategyResultViews.js";
+import type { StrategyDraftRecord } from "./StrategyDraftStore.js";
+import {
+  CHART_STRATEGY_AUTO_RUN_DEBOUNCE_MS,
+  chartStrategyAutoRunCoordinator,
+  shouldScheduleChartStrategyAutoRun,
+  type ChartStrategyAutoRunContext,
+  type ChartStrategyAutoRunPauseReason,
+} from "./chartStrategyAutoRunCoordinator.js";
 import "./chartStrategyTester.css";
 
 const runtimeFactory = new ChartStrategyTesterRuntimeFactory(true);
@@ -97,20 +106,54 @@ export default function ChartStrategyTesterCellBridge({
   const [selectedExplanation, setSelectedExplanation] = useState<TradeExplanationSelection | null>(null);
   const [pendingDataDraftRevision, setPendingDataDraftRevision] = useState<number | null>(null);
   const inFlightRef = useRef<Promise<void> | null>(null);
+  const inFlightOriginRef = useRef<"MANUAL" | "AUTO" | null>(null);
+  const inFlightSubmittedRef = useRef(false);
   const pendingDataRef = useRef<{
     request: ChartStrategyRunRequest;
     resolution: ChartContextResolution;
   } | null>(null);
   const activeIdentityRef = useRef<ResultProjectionIdentity | null>(null);
-  const [loadedDraftRevision, setLoadedDraftRevision] = useState<{
+  const [loadedDraftSnapshot, setLoadedDraftSnapshot] = useState<{
     draftId: string;
-    revision: number | null;
+    record: StrategyDraftRecord | null;
   } | null>(null);
   const activeDraftId = attachment?.strategyDraftId ?? null;
-  const draftContentRevision = activeDraftId !== null
-    && loadedDraftRevision?.draftId === activeDraftId
-    ? loadedDraftRevision.revision
+  const loadedDraft = activeDraftId !== null
+    && loadedDraftSnapshot?.draftId === activeDraftId
+    ? loadedDraftSnapshot.record
     : null;
+  const draftContentRevision = loadedDraft
+    ? strategyDraftContentRevision(loadedDraft.source)
+    : null;
+  const [autoRunPauseReason, setAutoRunPauseReason] = useState<ChartStrategyAutoRunPauseReason | null>(() => (
+    !CHART_STRATEGY_AUTO_RUN_ENABLED
+      ? "FLAG_DISABLED"
+      : attachment?.autoRun === false
+        ? "USER_DISABLED"
+        : attachment?.fidelityPreference === "PRECISE"
+          ? "PRECISE_REQUIRES_MANUAL"
+          : null
+  ));
+  const previousAutoContextRef = useRef<ChartStrategyAutoRunContext | null>(null);
+  const pendingAutoIntentRef = useRef<{ contextKey: string; generation: number } | null>(null);
+  const cancelAutoDebounceRef = useRef<(() => void) | null>(null);
+  const autoRunAttachmentKey = attachment?.strategyDraftId
+    ? JSON.stringify({
+      draftId: attachment.strategyDraftId,
+      parameters: attachment.parameters,
+      rangeMode: attachment.rangeMode,
+      customRange: attachment.customRange,
+      fidelityPreference: attachment.fidelityPreference,
+      quickPresetId: attachment.quickPresetId,
+    })
+    : null;
+  const autoRunContext = useMemo<ChartStrategyAutoRunContext>(() => ({
+    sessionKey: `${session.exchange}\u0000${session.marketType}\u0000${session.symbol}\u0000${session.interval}`,
+    attachmentKey: autoRunAttachmentKey,
+    enabled: attachment?.autoRun === true,
+  }), [attachment?.autoRun, autoRunAttachmentKey, session.exchange, session.interval,
+    session.marketType, session.symbol]);
+  const autoRunContextKey = `${autoRunContext.sessionKey}\u0000${autoRunContext.attachmentKey ?? ""}\u0000${autoRunContext.enabled ? "1" : "0"}`;
   const projectionSeriesStore = useMemo(() => seriesStore ?? new SeriesWindowStore({
     intervalSeconds: parseIntervalSeconds(session.interval),
     seriesKey: `chart-strategy:${cellScope}`,
@@ -257,16 +300,16 @@ export default function ChartStrategyTesterCellBridge({
     let cancelled = false;
     void draftStore.load(draftId).then((view) => {
       if (cancelled) return;
-      setLoadedDraftRevision({
+      setLoadedDraftSnapshot({
         draftId,
-        revision: view.record ? strategyDraftContentRevision(view.record.source) : null,
+        record: view.record,
       });
     });
     const unsubscribe = draftStore.subscribe((id, view) => {
       if (id === draftId) {
-        setLoadedDraftRevision({
+        setLoadedDraftSnapshot({
           draftId,
-          revision: view.record ? strategyDraftContentRevision(view.record.source) : null,
+          record: view.record,
         });
       }
     });
@@ -277,16 +320,19 @@ export default function ChartStrategyTesterCellBridge({
   }, [attachment?.strategyDraftId, draftStore]);
 
   useEffect(() => () => {
+    cancelAutoDebounceRef.current?.();
+    chartStrategyAutoRunCoordinator.releaseScope(workspaceId, cellScope);
     runtimeFactory.release(workspaceId, cellId);
-  }, [cellId, workspaceId]);
+  }, [cellId, cellScope, workspaceId]);
 
   const startRun = useCallback((
     request: ChartStrategyRunRequest,
     materializeResolution: ChartContextResolution | null = null,
-  ) => {
-    if (inFlightRef.current) return;
+    origin: "MANUAL" | "AUTO" = "MANUAL",
+  ): Promise<void> | null => {
+    if (inFlightRef.current) return null;
     const runtime = runtimeFactory.get(workspaceId, cellId);
-    if (!runtime) return;
+    if (!runtime) return null;
     const token = runtime.beginRequest("RESOLVING");
     const controller = new AbortController();
     const untrack = runtime.trackAbortController(controller);
@@ -297,6 +343,7 @@ export default function ChartStrategyTesterCellBridge({
       signal: controller.signal,
       materializeResolution,
       onStage(stage) {
+        if (origin === "AUTO") setAutoRunPauseReason(null);
         const status = stage === "QUEUED"
           ? "QUEUED"
           : stage === "RUNNING"
@@ -320,6 +367,7 @@ export default function ChartStrategyTesterCellBridge({
         if (current.generation === token.generation) setResolution(next);
       },
       onRunCreated(run, identity) {
+        inFlightSubmittedRef.current = true;
         activeIdentityRef.current = identity;
         runtime.dispatch({
           type: "REQUEST_STATUS",
@@ -341,16 +389,19 @@ export default function ChartStrategyTesterCellBridge({
         pendingDataRef.current = { request, resolution: outcome.resolution };
         setPendingDataDraftRevision(request.draftContentRevision);
         runtime.dispatch({ type: "REQUEST_STATUS", token, status: "NEEDS_DATA" });
+        if (origin === "AUTO") setAutoRunPauseReason("NEEDS_DATA_CONFIRMATION");
         return;
       }
       pendingDataRef.current = null;
       setPendingDataDraftRevision(null);
       if (outcome.kind === "UNSUPPORTED") {
         runtime.dispatch({ type: "REQUEST_STATUS", token, status: "UNSUPPORTED" });
+        if (origin === "AUTO") setAutoRunPauseReason("UNSUPPORTED_CONTEXT");
         return;
       }
       if (outcome.run.state === "COMPLETED") {
         runtime.dispatch({ type: "REQUEST_COMPLETED", token, identity: outcome.identity });
+        if (origin === "AUTO") setAutoRunPauseReason(null);
       } else {
         runtime.dispatch({
           type: "REQUEST_FAILED",
@@ -367,6 +418,9 @@ export default function ChartStrategyTesterCellBridge({
     }).catch((reason: unknown) => {
       if (controller.signal.aborted) return;
       const diagnostics = chartStrategyRunDiagnostics(reason);
+      if (origin === "AUTO" && diagnostics.code === "RUN_CAPACITY_EXCEEDED") {
+        setAutoRunPauseReason("BACKEND_BUSY");
+      }
       setSourceDiagnostics(diagnostics.sourceDiagnostics);
       runtime.dispatch({
         type: "REQUEST_FAILED",
@@ -379,33 +433,158 @@ export default function ChartStrategyTesterCellBridge({
       });
     }).finally(() => {
       untrack();
-      if (inFlightRef.current === task) inFlightRef.current = null;
+      if (inFlightRef.current === task) {
+        inFlightRef.current = null;
+        inFlightOriginRef.current = null;
+        inFlightSubmittedRef.current = false;
+      }
     });
+    inFlightOriginRef.current = origin;
+    inFlightSubmittedRef.current = false;
     inFlightRef.current = task;
+    return task;
   }, [cellId, onAttachmentChange, workspaceId]);
 
+  const cancelPendingAutoRun = useCallback(() => {
+    cancelAutoDebounceRef.current?.();
+    cancelAutoDebounceRef.current = null;
+    pendingAutoIntentRef.current = null;
+    chartStrategyAutoRunCoordinator.cancelPending(workspaceId, cellScope);
+  }, [cellScope, workspaceId]);
+
   const handleRunRequest = useCallback((request: ChartStrategyRunRequest) => {
+    cancelPendingAutoRun();
     pendingDataRef.current = null;
     setPendingDataDraftRevision(null);
     setResolution(null);
-    startRun(request);
-  }, [startRun]);
+    const existing = inFlightRef.current;
+    if (existing && inFlightOriginRef.current === "AUTO" && !inFlightSubmittedRef.current) {
+      runtimeFactory.get(workspaceId, cellId)?.abortRequests("manual Run preempted unsubmitted auto Run");
+      void existing.then(
+        () => { void startRun(request); },
+        () => { void startRun(request); },
+      );
+      return;
+    }
+    void startRun(request);
+  }, [cancelPendingAutoRun, cellId, startRun, workspaceId]);
 
   const handlePrepareData = useCallback(() => {
     const pending = pendingDataRef.current;
     if (!pending) return;
-    startRun(pending.request, pending.resolution);
-  }, [startRun]);
+    cancelPendingAutoRun();
+    void startRun(pending.request, pending.resolution);
+  }, [cancelPendingAutoRun, startRun]);
+
+  useEffect(() => {
+    const previous = previousAutoContextRef.current;
+    previousAutoContextRef.current = autoRunContext;
+    const runtime = runtimeFactory.get(workspaceId, cellId);
+    if (!runtime || !attachment) return undefined;
+    if (!CHART_STRATEGY_AUTO_RUN_ENABLED) {
+      cancelPendingAutoRun();
+      queueMicrotask(() => setAutoRunPauseReason("FLAG_DISABLED"));
+      return undefined;
+    }
+    if (!attachment.autoRun) {
+      cancelPendingAutoRun();
+      queueMicrotask(() => setAutoRunPauseReason("USER_DISABLED"));
+      return undefined;
+    }
+    if (attachment.fidelityPreference !== "FAST") {
+      cancelPendingAutoRun();
+      queueMicrotask(() => setAutoRunPauseReason("PRECISE_REQUIRES_MANUAL"));
+      return undefined;
+    }
+    if (shouldScheduleChartStrategyAutoRun(previous, autoRunContext)) {
+      pendingAutoIntentRef.current = {
+        contextKey: autoRunContextKey,
+        generation: runtime.snapshot().generation,
+      };
+    }
+    const pending = pendingAutoIntentRef.current;
+    if (!pending || pending.contextKey !== autoRunContextKey) return undefined;
+    const draftLoaded = loadedDraftSnapshot?.draftId === attachment.strategyDraftId;
+    if (!draftLoaded) return undefined;
+    if (!loadedDraft) {
+      pendingAutoIntentRef.current = null;
+      queueMicrotask(() => setAutoRunPauseReason("DRAFT_UNAVAILABLE"));
+      return undefined;
+    }
+    cancelAutoDebounceRef.current?.();
+    pending.generation = runtime.snapshot().generation;
+    const request: ChartStrategyRunRequest = {
+      cellScope,
+      session: { ...session },
+      draftId: loadedDraft.id,
+      draftContentRevision: strategyDraftContentRevision(loadedDraft.source),
+      displayName: loadedDraft.displayName,
+      language: loadedDraft.language,
+      source: loadedDraft.source,
+      attachment: {
+        ...attachment,
+        parameters: { ...attachment.parameters },
+        customRange: attachment.customRange ? { ...attachment.customRange } : null,
+      },
+    };
+    queueMicrotask(() => setAutoRunPauseReason("WAITING_DEBOUNCE"));
+    const timer = globalThis.setTimeout(() => {
+      const releaseTimer = cancelAutoDebounceRef.current;
+      cancelAutoDebounceRef.current = null;
+      releaseTimer?.();
+      const intent = pendingAutoIntentRef.current;
+      pendingAutoIntentRef.current = null;
+      const currentRuntime = runtimeFactory.get(workspaceId, cellId);
+      const latestContext = previousAutoContextRef.current;
+      if (!intent || intent.contextKey !== autoRunContextKey
+        || !latestContext?.enabled
+        || latestContext.sessionKey !== autoRunContext.sessionKey
+        || latestContext.attachmentKey !== autoRunContext.attachmentKey
+        || !currentRuntime
+        || currentRuntime.snapshot().generation !== intent.generation) return;
+      chartStrategyAutoRunCoordinator.enqueue({
+        workspaceId,
+        cellScope,
+        generation: intent.generation,
+        onQueueState(state) {
+          setAutoRunPauseReason(state === "QUEUED" ? "WORKSPACE_QUEUE" : null);
+        },
+        async execute() {
+          const activeRuntime = runtimeFactory.get(workspaceId, cellId);
+          const latest = previousAutoContextRef.current;
+          if (!activeRuntime || activeRuntime.snapshot().generation !== intent.generation
+            || latest?.sessionKey !== autoRunContext.sessionKey
+            || latest.attachmentKey !== autoRunContext.attachmentKey
+            || !latest.enabled) return;
+          const existing = inFlightRef.current;
+          if (existing) await existing.catch(() => undefined);
+          const refreshedRuntime = runtimeFactory.get(workspaceId, cellId);
+          if (!refreshedRuntime || refreshedRuntime.snapshot().generation !== intent.generation) return;
+          const task = startRun(request, null, "AUTO");
+          if (task) await task;
+        },
+      });
+    }, CHART_STRATEGY_AUTO_RUN_DEBOUNCE_MS);
+    cancelAutoDebounceRef.current = runtime.trackTimer(timer);
+    return () => {
+      if (pendingAutoIntentRef.current?.contextKey !== autoRunContextKey) return;
+      cancelAutoDebounceRef.current?.();
+      cancelAutoDebounceRef.current = null;
+    };
+  }, [attachment, autoRunContext, autoRunContextKey, cancelPendingAutoRun, cellId, cellScope,
+    loadedDraft, loadedDraftSnapshot?.draftId, session, startRun, workspaceId]);
 
   const handleStopObserving = useCallback(() => {
+    cancelPendingAutoRun();
     const runtime = runtimeFactory.get(workspaceId, cellId);
     if (!runtime) return;
     runtime.abortRequests("user stopped observing the Run; backend Run was not cancelled");
     runtime.dispatch({ type: "STOP_OBSERVING" });
     inFlightRef.current = null;
-  }, [cellId, workspaceId]);
+  }, [cancelPendingAutoRun, cellId, workspaceId]);
 
   const handleResumeObserving = useCallback(() => {
+    cancelPendingAutoRun();
     if (inFlightRef.current) return;
     const runtime = runtimeFactory.get(workspaceId, cellId);
     const runId = runtime?.snapshot().activeRunId;
@@ -458,7 +637,7 @@ export default function ChartStrategyTesterCellBridge({
       if (inFlightRef.current === task) inFlightRef.current = null;
     });
     inFlightRef.current = task;
-  }, [cellId, workspaceId]);
+  }, [cancelPendingAutoRun, cellId, workspaceId]);
 
   if (!active || !panelOpen || !bottomPanelHost) return null;
   return createPortal(
@@ -478,6 +657,7 @@ export default function ChartStrategyTesterCellBridge({
       resultLoading={resultLoading}
       resultError={resultError}
       comparison={comparison}
+      autoRunPauseReason={autoRunPauseReason}
       selectedExplanation={selectedExplanation}
       onSelectExplanation={(selection) => {
         if (CHART_TRADE_EXPLANATION_ENABLED) setSelectedExplanation(selection);

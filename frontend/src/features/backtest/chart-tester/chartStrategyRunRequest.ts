@@ -411,6 +411,9 @@ export async function runChartStrategyBacktest(options: {
   });
   options.onStage?.(created.state === "QUEUED" ? "QUEUED" : "RUNNING");
   options.onRunCreated?.(created, identity);
+  if (created.state === "COMPLETED") {
+    return { kind: "TERMINAL", frozen, revision, resolution: refreshed, run: created, identity };
+  }
   const terminal = await pollBacktestRunToTerminal({
     api: options.api,
     runId: created.run_id,
@@ -456,7 +459,7 @@ export function chartStrategyRunDiagnostics(error: unknown): ChartStrategyRunDia
   else if (code.includes("FIDELITY")) action = "use-fast";
   else if (code.includes("DATA") || code.includes("SNAPSHOT") || code.includes("CONTEXT")) action = "resolve-data";
   else if (code.includes("PROVIDER") || code.includes("SMOKE")) action = "fix-strategy";
-  else if (code.includes("BUDGET")) action = "wait-and-retry";
+  else if (code.includes("BUDGET") || code === "RUN_CAPACITY_EXCEEDED") action = "wait-and-retry";
   return { code, message, details, action, sourceDiagnostics: sourceDiagnostics(message) };
 }
 

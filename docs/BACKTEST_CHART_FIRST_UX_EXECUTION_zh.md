@@ -1388,6 +1388,11 @@ Phase 6 结束即形成独立的“首次可用快测”里程碑：用户已经
 
 ## Phase 8：自动运行、并发与缓存
 
+实施状态（2026-08-24）：`COMPLETE`。实现与验证证据见
+[`BACKTEST_CHART_FIRST_PHASE8_RESULT_20260824_zh.md`](evidence/BACKTEST_CHART_FIRST_PHASE8_RESULT_20260824_zh.md)
+与机器可读
+[`backtest-chart-first-phase8-20260824.json`](evidence/backtest-chart-first-phase8-20260824.json)。
+
 ### 目标
 
 实现“切到哪个品种和周期就出哪个结果”，同时不制造竞态和资源风暴。

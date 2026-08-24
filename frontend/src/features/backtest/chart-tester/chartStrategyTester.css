@@ -173,6 +173,25 @@
 }
 .chart-strategy-result-context.stale strong { color: #fcd34d; }
 
+.chart-strategy-auto-run-status {
+  display: flex;
+  flex: 0 0 31px;
+  min-width: 0;
+  align-items: center;
+  gap: 9px;
+  margin: 6px 16px 0;
+  padding: 0 10px;
+  overflow: hidden;
+  border: 1px solid rgba(245, 158, 11, 0.28);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  background: rgba(245, 158, 11, 0.06);
+  font-size: 9px;
+  white-space: nowrap;
+}
+.chart-strategy-auto-run-status strong { flex: 0 0 auto; color: #fcd34d; }
+.chart-strategy-auto-run-status span { overflow: hidden; text-overflow: ellipsis; }
+
 .chart-strategy-result-loading,
 .chart-strategy-result-load-error {
   display: flex;
@@ -566,13 +585,22 @@
   gap: 10px;
 }
 
-.chart-strategy-quick-settings > div {
+.chart-strategy-quick-settings > div,
+.chart-strategy-auto-run-setting {
   min-width: 0;
   min-height: 104px;
   padding: 14px;
   border: 1px solid #263348;
   border-radius: 7px;
   background: #0b1220;
+}
+
+.chart-strategy-auto-run-setting { position: relative; cursor: pointer; }
+.chart-strategy-auto-run-setting input {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  accent-color: var(--accent-blue);
 }
 
 .chart-strategy-quick-settings span,

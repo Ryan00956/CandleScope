@@ -215,6 +215,24 @@ test("READY follows revision-resolve-smoke-validate-reresolve-create-poll", asyn
   assert.equal(keys[0], keys[1]);
 });
 
+test("an idempotent completed Run is reused without polling or retry", async () => {
+  const calls: string[] = [];
+  const api = apiWithResolutions([resolution(), resolution()], calls);
+  api.createRun = async () => {
+    calls.push("create");
+    return completed();
+  };
+  api.getRun = async () => {
+    calls.push("get");
+    return completed();
+  };
+  const outcome = await runChartStrategyBacktest({ api, request, pollIntervalMs: 0 });
+  assert.equal(outcome.kind, "TERMINAL");
+  assert.equal(outcome.kind === "TERMINAL" ? outcome.run.state : null, "COMPLETED");
+  assert.equal(calls.filter((call) => call === "create").length, 1);
+  assert.equal(calls.includes("get"), false);
+});
+
 test("NEEDS_DATA stops for confirmation and materialize always re-resolves", async () => {
   const needs = resolution("NEEDS_DATA");
   const firstCalls: string[] = [];
@@ -278,4 +296,16 @@ test("unknown fees fail closed and provider diagnostics remain located", async (
     column: 19,
     message: "unknown target",
   });
+});
+
+test("backend Run capacity is actionable and never hidden behind generic retry", () => {
+  const diagnostics = chartStrategyRunDiagnostics(new BacktestApiError(
+    "RUN_CAPACITY_EXCEEDED",
+    "backtest Run capacity is temporarily exhausted",
+    { retryable: true, retry_after_ms: 1000 },
+    429,
+  ));
+  assert.equal(diagnostics.action, "wait-and-retry");
+  assert.equal(diagnostics.details.retryable, true);
+  assert.equal(diagnostics.details.retry_after_ms, 1000);
 });

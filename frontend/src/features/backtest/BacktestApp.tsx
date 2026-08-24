@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import { getLocale, t } from "../../i18n/index.js";
 import { useLocale } from "../../i18n/useLocale.js";
 import type { FormEvent } from "react";
+import BrandMark, { BrandWordmark } from "../../components/brand/BrandMark.js";
 import { defaultBacktestApi } from "./backtestApi.js";
 import type {
   BacktestCapabilities,
@@ -61,6 +63,71 @@ function timestampLabel(value: number | null | undefined): string {
 function hashLabel(value: string | null | undefined): string {
   if (!value) return "—";
   return value.length > 24 ? `${value.slice(0, 18)}…${value.slice(-6)}` : value;
+}
+
+function toDatetimeLocalValue(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return "";
+  const date = new Date(ms);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function fromDatetimeLocalValue(value: string): number {
+  if (!value) return 0;
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+type ResultTab = "overview" | "trades" | "fills" | "compare" | "study" | "proof";
+type HistoryTab = "runs" | "studies";
+
+function ConfigSection({
+  title,
+  defaultOpen = false,
+  children,
+}: {
+  title: string;
+  defaultOpen?: boolean;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <details
+      className="backtest-config-section"
+      open={open}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
+      <summary>{title}</summary>
+      <div className="backtest-config-section-body">{children}</div>
+    </details>
+  );
+}
+
+function WorkspaceTabs({
+  value,
+  items,
+  onChange,
+}: {
+  value: string;
+  items: ReadonlyArray<{ id: string; label: string }>;
+  onChange: (id: string) => void;
+}) {
+  return (
+    <div className="backtest-tabs" role="tablist">
+      {items.map((item) => (
+        <button
+          key={item.id}
+          type="button"
+          role="tab"
+          aria-selected={value === item.id}
+          className={value === item.id ? "active" : undefined}
+          onClick={() => onChange(item.id)}
+        >
+          {item.label}
+        </button>
+      ))}
+    </div>
+  );
 }
 
 function errorMessage(error: unknown): string {
@@ -188,6 +255,10 @@ export default function BacktestApp() {
   const [error, setError] = useState<string | null>(null);
   const [pythonGate, setPythonGate] = useState<PythonStudioGate | null>(null);
   const [workspaceHydrated, setWorkspaceHydrated] = useState(false);
+  const [resultTab, setResultTab] = useState<ResultTab>("overview");
+  const [historyTab, setHistoryTab] = useState<HistoryTab>("runs");
+  const [configRailOpen, setConfigRailOpen] = useState(false);
+  const [historyRailOpen, setHistoryRailOpen] = useState(false);
 
   const selectedDataset = useMemo(
     () => datasets.find((dataset) => dataset.dataset_id === datasetId) ?? null,
@@ -867,17 +938,35 @@ export default function BacktestApp() {
 
   return (
     <main className="backtest-app">
-      <header className="backtest-header">
-        <div>
-          <span className="backtest-kicker">{t("backtest.researchKicker")}</span>
-          <h1>{t("backtest.title")}</h1>
-          <p>{t("backtest.subtitle")}</p>
+      <header className="top-bar backtest-top-bar" id="top-bar" data-runtime-source="backtest">
+        <div className="logo">
+          <div className="logo-icon"><BrandMark size={24} /></div>
+          <BrandWordmark />
         </div>
-        <div className="backtest-credibility" aria-label={t("backtest.credibilityAria")}>
+        <span className="backtest-mode-badge">{t("shell.backtest")}</span>
+        <a className="replay-entry-link backtest-nav-link" href="/">{t("backtest.nav.market")}</a>
+        <button type="button" className="replay-entry-link backtest-nav-link backtest-rail-toggle config" onClick={() => {
+          setConfigRailOpen((open) => !open);
+          setHistoryRailOpen(false);
+        }}>
+          {t("backtest.toggleConfig")}
+        </button>
+        <button type="button" className="replay-entry-link backtest-nav-link backtest-rail-toggle history" onClick={() => {
+          setHistoryRailOpen((open) => !open);
+          setConfigRailOpen(false);
+        }}>
+          {t("backtest.toggleHistory")}
+        </button>
+        <div className="backtest-chrome-identity">
+          <strong>{selectedDataset ? `${selectedDataset.symbol} · ${selectedDataset.interval}` : "—"}</strong>
+          {selectedDataset && <span>{selectedStrategy?.label ?? strategyRevisionId}</span>}
+        </div>
+        <div
+          className="backtest-credibility"
+          aria-label={t("backtest.credibilityAria")}
+          title={fidelityMode === "BAR_APPROX" ? t("backtest.barApprox") : t("backtest.aggApprox")}
+        >
           <strong>{report?.report_label ?? fidelityMode}</strong>
-          <span>{fidelityMode === "BAR_APPROX"
-            ? t("backtest.barApprox")
-            : t("backtest.aggApprox")}</span>
         </div>
       </header>
 
@@ -888,11 +977,11 @@ export default function BacktestApp() {
         </div>
       )}
 
-      <div className="backtest-grid">
-        <form className="backtest-card backtest-form" onSubmit={handleCreate}>
-          <div className="backtest-section-title">
-            <span>01</span><h2>{t("backtest.newRun")}</h2>
-          </div>
+      <div className="backtest-workspace">
+        <aside className={configRailOpen ? "backtest-config-rail is-open" : "backtest-config-rail"}>
+        <form className="backtest-form" onSubmit={handleCreate}>
+          <div className="backtest-form-scroll">
+          <ConfigSection title={t("backtest.section.dataset")} defaultOpen>
           <label>
             {t("backtest.dataset")}
             <select value={datasetId} onChange={(event) => handleDatasetChange(event.target.value)}>
@@ -916,55 +1005,92 @@ export default function BacktestApp() {
               <span>{t("backtest.datasetRevision", { revision: hashLabel(selectedDataset.revision ?? selectedDataset.data_epoch) })}</span>
             </div>
           ) : <p className="backtest-empty">{t("backtest.noData")}</p>}
+          <label>
+            {t("backtest.fidelity")}
+            <select value={fidelityMode} onChange={(event) => setFidelityMode(event.target.value)}>
+              {(capabilities?.fidelity_modes ?? ["BAR_APPROX"]).map((mode) => (
+                <option key={mode} value={mode}>{mode === "BAR_APPROX"
+                  ? t("backtest.fidelityBar")
+                  : mode === DUAL_CLOCK_MODE
+                    ? t("backtest.fidelityDual")
+                    : t("backtest.fidelityTrade")}</option>
+              ))}
+            </select>
+          </label>
+          {fidelityMode !== "BAR_APPROX" && (
+            <div className="backtest-form-row">
+              <label>{t("backtest.exchange")}<input value={exchange} onChange={(event) => setExchange(event.target.value)} /></label>
+              <label>{t("backtest.marketType")}<input value={marketType} onChange={(event) => setMarketType(event.target.value)} /></label>
+            </div>
+          )}
           <div className="backtest-form-row">
-            <label>
-              {t("backtest.fidelity")}
-              <select value={fidelityMode} onChange={(event) => setFidelityMode(event.target.value)}>
-                {(capabilities?.fidelity_modes ?? ["BAR_APPROX"]).map((mode) => (
-                  <option key={mode} value={mode}>{mode === "BAR_APPROX"
-                    ? t("backtest.fidelityBar")
-                    : mode === DUAL_CLOCK_MODE
-                      ? t("backtest.fidelityDual")
-                      : t("backtest.fidelityTrade")}</option>
-                ))}
-              </select>
-            </label>
-            <label>
-              {t("backtest.strategy")}
-              <select value={strategyRevisionId} onChange={(event) => setStrategyRevisionId(event.target.value)}>
-                {(capabilities?.strategies ?? []).map((strategy) => (
-                  <option key={strategy.revision_id} value={strategy.revision_id}>{strategy.label}</option>
-                ))}
-              </select>
-            </label>
+            <label>{t("backtest.startTime")}<input type="datetime-local" value={toDatetimeLocalValue(startTimeMs)} onChange={(event) => setStartTimeMs(fromDatetimeLocalValue(event.target.value))} /></label>
+            <label>{t("backtest.endTime")}<input type="datetime-local" value={toDatetimeLocalValue(endTimeMs)} onChange={(event) => setEndTimeMs(fromDatetimeLocalValue(event.target.value))} /></label>
           </div>
+          <details className="backtest-nested-details">
+            <summary>{t("backtest.startMs")} / {t("backtest.endMs")}</summary>
+            <div className="backtest-form-row">
+              <label>{t("backtest.startMs")}<input type="number" value={startTimeMs} onChange={(event) => setStartTimeMs(Number(event.target.value))} /></label>
+              <label>{t("backtest.endMs")}<input type="number" value={endTimeMs} onChange={(event) => setEndTimeMs(Number(event.target.value))} /></label>
+            </div>
+          </details>
+          {startTimeMs > 0 && (
+            <div className="backtest-time-hint">
+              {timestampLabel(startTimeMs)} → {timestampLabel(endTimeMs)}
+            </div>
+          )}
+          {contractModeEnabled && (
+            <div className="backtest-strategy-evidence" data-testid="contract-role-status">
+              {(contractData?.required_roles ?? ["MARK_INDEX", "FUNDING", "INSTRUMENT_RULES"]).map((role) => (
+                <span key={role}>
+                  {role}: {contractData?.role_status?.[role]?.status ?? "missing"}
+                  {contractData?.role_status?.[role]?.row_count !== undefined
+                    ? t("backtest.roleRows", { count: contractData.role_status[role].row_count }) : ""}
+                </span>
+              ))}
+              <small>{t("backtest.localOnly")}</small>
+            </div>
+          )}
+          </ConfigSection>
+          <ConfigSection title={t("backtest.section.strategy")}>
+          <label>
+            {t("backtest.strategy")}
+            <select value={strategyRevisionId} onChange={(event) => setStrategyRevisionId(event.target.value)}>
+              {(capabilities?.strategies ?? []).map((strategy) => (
+                <option key={strategy.revision_id} value={strategy.revision_id}>{strategy.label}</option>
+              ))}
+            </select>
+          </label>
           {selectedStrategy && <p className="backtest-strategy-help">{selectedStrategy.description}</p>}
           {pythonEnabled && (
-            <PythonStudioPanel
-              api={defaultBacktestApi}
-              loading={loading}
-              snapshot={snapshot}
-              datasetId={datasetId}
-              startTimeMs={startTimeMs}
-              endTimeMs={endTimeMs}
-              schemaParameters={schemaParameters}
-              selectedRevisionId={strategyRevisionId}
-              restored={restoredStudio}
-              onLoading={setLoading}
-              onNotice={setNotice}
-              onError={setError}
-              onRevisionReady={(revision) => {
-                setStrategyRevisionId(revision.revision_id);
-                setSmokePassed(false);
-                if (revision.parameter_schema?.length) {
-                  setStudyParameterSpace(pythonStudyParameterSpace(revision.parameter_schema));
-                }
-                void defaultBacktestApi.capabilities().then(setCapabilities);
-              }}
-              onGateChange={setPythonGate}
-            />
+            <details className="backtest-strategy-workspace">
+              <summary>{t("backtest.pythonStudio")}</summary>
+              <PythonStudioPanel
+                api={defaultBacktestApi}
+                loading={loading}
+                snapshot={snapshot}
+                datasetId={datasetId}
+                startTimeMs={startTimeMs}
+                endTimeMs={endTimeMs}
+                schemaParameters={schemaParameters}
+                selectedRevisionId={strategyRevisionId}
+                restored={restoredStudio}
+                onLoading={setLoading}
+                onNotice={setNotice}
+                onError={setError}
+                onRevisionReady={(revision) => {
+                  setStrategyRevisionId(revision.revision_id);
+                  setSmokePassed(false);
+                  if (revision.parameter_schema?.length) {
+                    setStudyParameterSpace(pythonStudyParameterSpace(revision.parameter_schema));
+                  }
+                  void defaultBacktestApi.capabilities().then(setCapabilities);
+                }}
+                onGateChange={setPythonGate}
+              />
+            </details>
           )}
-          <details className="backtest-strategy-workspace" open data-testid="strategy-revision-workspace">
+          <details className="backtest-strategy-workspace" data-testid="strategy-revision-workspace">
             <summary>{t("backtest.revisionWorkspace")}</summary>
             <div className="backtest-form-row three">
               <label>{t("backtest.revisionName")}<input value={revisionName} onChange={(event) => setRevisionName(event.target.value)} /></label>
@@ -991,52 +1117,6 @@ export default function BacktestApp() {
               </div>
             </div>}
           </details>
-          {fidelityMode !== "BAR_APPROX" && (
-            <div className="backtest-form-row">
-              <label>{t("backtest.exchange")}<input value={exchange} onChange={(event) => setExchange(event.target.value)} /></label>
-              <label>{t("backtest.marketType")}<input value={marketType} onChange={(event) => setMarketType(event.target.value)} /></label>
-            </div>
-          )}
-          <label className="backtest-checkbox">
-            <input
-              type="checkbox"
-              checked={contractModeEnabled}
-              disabled={accountModel === ACCOUNT_V2}
-              onChange={(event) => setHistoricalContractData(event.target.checked)}
-            />
-            {accountModel === ACCOUNT_V2
-              ? t("backtest.v2Mark")
-              : t("backtest.m3Cover")}
-          </label>
-          <div className="backtest-form-row three" data-testid="account-v2-config">
-            <label>{t("backtest.accountModel")}<select value={accountModel} onChange={(event) => {
-              setAccountModel(event.target.value);
-              if (event.target.value !== ACCOUNT_V2) setFundingMode("OFF");
-            }}>
-              {(capabilities?.account_models ?? ["LINEAR_PERP_ONE_WAY_V1"]).map((model) => (
-                <option key={model} value={model}>{model}</option>
-              ))}
-            </select></label>
-            <label>{t("backtest.fundingMode")}<select value={fundingMode} disabled={accountModel !== ACCOUNT_V2} onChange={(event) => setFundingMode(event.target.value)}>
-              {(capabilities?.funding_modes_v2 ?? ["OFF"]).map((mode) => <option key={mode} value={mode}>{mode}</option>)}
-            </select></label>
-            <label>{t("backtest.leverage")}<input value={leverage} disabled={accountModel !== ACCOUNT_V2} onChange={(event) => setLeverage(event.target.value)} /></label>
-          </div>
-          {fidelityMode === DUAL_CLOCK_MODE && selectedDataset && (
-            <div className="backtest-strategy-evidence" data-testid="dual-clock-identity">
-              <strong>{t("backtest.signalInterval", { interval: selectedDataset.interval })}</strong>
-              <span>{t("backtest.signalSrc")}</span>
-              <span>{t("backtest.execSrc")}</span>
-              <span>{t("backtest.buckets")}</span>
-            </div>
-          )}
-          <div className="backtest-form-row">
-            <label>{t("backtest.startMs")}<input type="number" value={startTimeMs} onChange={(event) => setStartTimeMs(Number(event.target.value))} /></label>
-            <label>{t("backtest.endMs")}<input type="number" value={endTimeMs} onChange={(event) => setEndTimeMs(Number(event.target.value))} /></label>
-          </div>
-          <div className="backtest-time-hint">
-            {timestampLabel(startTimeMs)} → {timestampLabel(endTimeMs)}
-          </div>
           {strategyRevisionId === SMA_REVISION && <div className="backtest-form-row">
             <label>{t("backtest.fastSma")}<input type="number" min="1" value={fast} onChange={(event) => setFast(Number(event.target.value))} /></label>
             <label>{t("backtest.slowSma")}<input type="number" min="2" value={slow} onChange={(event) => setSlow(Number(event.target.value))} /></label>
@@ -1086,6 +1166,43 @@ export default function BacktestApp() {
             {t("backtest.orderJson")}
             <textarea value={commandSource} onChange={(event) => setCommandSource(event.target.value)} rows={10} spellCheck={false} />
           </label>}
+          </ConfigSection>
+          <ConfigSection title={t("backtest.section.account")}>
+          <label className="backtest-checkbox">
+            <input
+              type="checkbox"
+              checked={contractModeEnabled}
+              disabled={accountModel === ACCOUNT_V2}
+              onChange={(event) => setHistoricalContractData(event.target.checked)}
+            />
+            {accountModel === ACCOUNT_V2
+              ? t("backtest.v2Mark")
+              : t("backtest.m3Cover")}
+          </label>
+          <div className="backtest-form-row three" data-testid="account-v2-config">
+            <label>{t("backtest.accountModel")}<select value={accountModel} onChange={(event) => {
+              setAccountModel(event.target.value);
+              if (event.target.value !== ACCOUNT_V2) setFundingMode("OFF");
+            }}>
+              {(capabilities?.account_models ?? ["LINEAR_PERP_ONE_WAY_V1"]).map((model) => (
+                <option key={model} value={model}>{model}</option>
+              ))}
+            </select></label>
+            <label>{t("backtest.fundingMode")}<select value={fundingMode} disabled={accountModel !== ACCOUNT_V2} onChange={(event) => setFundingMode(event.target.value)}>
+              {(capabilities?.funding_modes_v2 ?? ["OFF"]).map((mode) => <option key={mode} value={mode}>{mode}</option>)}
+            </select></label>
+            <label>{t("backtest.leverage")}<input value={leverage} disabled={accountModel !== ACCOUNT_V2} onChange={(event) => setLeverage(event.target.value)} /></label>
+          </div>
+          {fidelityMode === DUAL_CLOCK_MODE && selectedDataset && (
+            <div className="backtest-strategy-evidence" data-testid="dual-clock-identity">
+              <strong>{t("backtest.signalInterval", { interval: selectedDataset.interval })}</strong>
+              <span>{t("backtest.signalSrc")}</span>
+              <span>{t("backtest.execSrc")}</span>
+              <span>{t("backtest.buckets")}</span>
+            </div>
+          )}
+          </ConfigSection>
+          <ConfigSection title={t("backtest.section.costs")}>
           <div className="backtest-form-row three">
             <label>{t("backtest.balance")}<input value={initialBalance} onChange={(event) => setInitialBalance(event.target.value)} /></label>
             <label>{t("backtest.slipBps")}<input value={slippageBps} onChange={(event) => setSlippageBps(event.target.value)} /></label>
@@ -1125,6 +1242,8 @@ export default function BacktestApp() {
                 : t("backtest.aggNotRaw")}</small>
             </div>
           </div>
+          </ConfigSection>
+          <ConfigSection title={t("backtest.section.metrics")}>
           <label className="backtest-checkbox" data-testid="metrics-v2-toggle">
             <input
               type="checkbox"
@@ -1157,6 +1276,8 @@ export default function BacktestApp() {
             <strong>{t("backtest.metricsUtc", { revision: METRICS_V2 })}</strong>
             <small>{t("backtest.metricsHint")}</small>
           </div>}
+          </ConfigSection>
+          <ConfigSection title={t("backtest.section.risk")}>
           <div className="backtest-strategy-evidence" data-testid="host-policy-config">
             <strong>{t("backtest.hostPolicy", { revision: HOST_POLICY_REVISION })}</strong>
             <small>{t("backtest.hostPolicyHint")}</small>
@@ -1190,69 +1311,66 @@ export default function BacktestApp() {
             <label>{t("backtest.dailyLoss")}<input value={dailyLossLimit} placeholder={t("backtest.dailyPh")} onChange={(event) => setDailyLossLimit(event.target.value)} /></label>
             <label>{t("backtest.cooldown")}<input type="number" min="0" value={cooldownEvents} disabled={!dailyLossLimit} onChange={(event) => setCooldownEvents(Number(event.target.value))} /></label>
           </div>
-          <div className="backtest-snapshot">
-            <span className={snapshot && historicalContractComplete ? "ready" : "pending"}>
-              {snapshot ? (historicalContractComplete ? t("backtest.verified") : t("backtest.incomplete")) : t("backtest.verifying")}
-            </span>
-            <div>
-              <strong>{fidelityMode === "BAR_APPROX"
-                ? t("backtest.snapshotBars", { count: (snapshot?.market_row_count ?? snapshot?.row_count)?.toLocaleString(locale) ?? "—" })
-                : t("backtest.snapshotTrades", { count: (snapshot?.market_row_count ?? snapshot?.row_count)?.toLocaleString(locale) ?? "—" })}</strong>
-              <small>{hashLabel(snapshot?.snapshot_hash)}</small>
-            </div>
+          </ConfigSection>
           </div>
-          {contractModeEnabled && (
-            <div className="backtest-strategy-evidence" data-testid="contract-role-status">
-              {(contractData?.required_roles ?? ["MARK_INDEX", "FUNDING", "INSTRUMENT_RULES"]).map((role) => (
-                <span key={role}>
-                  {role}: {contractData?.role_status?.[role]?.status ?? "missing"}
-                  {contractData?.role_status?.[role]?.row_count !== undefined
-                    ? t("backtest.roleRows", { count: contractData.role_status[role].row_count }) : ""}
+          <div className="backtest-submit-bar">
+            <div className="backtest-snapshot">
+              {selectedDataset && (
+                <span className={snapshot && historicalContractComplete ? "ready" : "pending"}>
+                  {snapshot
+                    ? (historicalContractComplete ? t("backtest.verified") : t("backtest.incomplete"))
+                    : t("backtest.verifying")}
                 </span>
-              ))}
-              <small>{t("backtest.localOnly")}</small>
+              )}
+              <div>
+                <strong>{selectedDataset
+                  ? (fidelityMode === "BAR_APPROX"
+                    ? t("backtest.snapshotBars", { count: (snapshot?.market_row_count ?? snapshot?.row_count)?.toLocaleString(locale) ?? "—" })
+                    : t("backtest.snapshotTrades", { count: (snapshot?.market_row_count ?? snapshot?.row_count)?.toLocaleString(locale) ?? "—" }))
+                  : t("backtest.noData")}</strong>
+                {snapshot?.snapshot_hash && <small>{hashLabel(snapshot.snapshot_hash)}</small>}
+              </div>
             </div>
-          )}
-          <button className="backtest-primary" type="submit" disabled={loading || !snapshot || !historicalContractComplete || Boolean(selectedStrategy?.compiled_hash && !smokePassed) || (strategyRevisionId === SMA_REVISION && fast >= slow) || (pythonSelected && pythonGate !== null && !pythonGate.canCreateRun)}>
-            {loading ? t("backtest.processing") : t("backtest.submit")}
-          </button>
-        </form>
-
-        <section className="backtest-card backtest-runs">
-          <div className="backtest-section-title"><span>02</span><h2>{t("backtest.runsTitle")}</h2></div>
-          <div className="backtest-run-list">
-            {runs.map((run) => (
-              <button
-                type="button"
-                key={run.run_id}
-                className={run.run_id === selectedRunId ? "backtest-run active" : "backtest-run"}
-                onClick={() => setSelectedRunId(run.run_id)}
-              >
-                <span className={`backtest-state ${run.state.toLowerCase()}`}>{run.state}</span>
-                <strong>{run.run_id.slice(0, 14)}</strong>
-                <small>{run.fidelity_mode} · {hashLabel(run.config_hash)}</small>
-              </button>
-            ))}
-            {runs.length === 0 && <p className="backtest-empty">{t("backtest.noRuns")}</p>}
+            <button className="backtest-primary" type="submit" disabled={loading || !snapshot || !historicalContractComplete || Boolean(selectedStrategy?.compiled_hash && !smokePassed) || (strategyRevisionId === SMA_REVISION && fast >= slow) || (pythonSelected && pythonGate !== null && !pythonGate.canCreateRun)}>
+              {loading ? t("backtest.processing") : t("backtest.submit")}
+            </button>
           </div>
-          {selectedRun && (
-            <div className="backtest-run-actions">
-              {!TERMINAL_STATES.has(selectedRun.state) && (
-                <button type="button" onClick={handleCancel} disabled={loading}>{t("backtest.cancelRun")}</button>
-              )}
-              {selectedRun.state === "COMPLETED" && (
-                <button type="button" onClick={handleExport}>{t("backtest.export")}</button>
-              )}
-              {selectedRun.state === "FAILED" && <span>{t("backtest.failCode", { code: selectedRun.failure_code ?? "UNKNOWN" })}</span>}
-              {selectedRun.state === "FAILED" && ["PROVIDER_TIMEOUT", "PROVIDER_CRASH_UNRECOVERABLE", "BACKTEST_STORAGE_TRANSIENT"].includes(selectedRun.failure_code ?? "") && (
-                <button type="button" onClick={handleResume} disabled={loading}>{t("backtest.resume")}</button>
-              )}
+        </form>
+        </aside>
+
+        <section className="backtest-stage">
+          <div className="backtest-chart-stage">
+            {chart ? (
+              <BacktestResultChart chart={chart} focusTimeMs={focusedTrade ? Number(focusedTrade.entry_time_ms) : null} />
+            ) : (
+              <div className="backtest-empty-stage">
+                <h2>{t("backtest.empty.chartTitle")}</h2>
+                <p>{t("backtest.empty.chartBody")}</p>
+              </div>
+            )}
+          </div>
+          {report && !emptyReportIsHidden({ error, report }) && (
+            <div className="backtest-kpi">
+              <div><span>{t("backtest.finalEquity")}</span><strong>{String(report.account?.equity ?? "—")}</strong></div>
+              <div><span>{t("backtest.trades")}</span><strong>{report.metrics.trade_count ?? 0}</strong></div>
+              <div><span>{t("backtest.fills")}</span><strong>{report.metrics.fill_count}</strong></div>
+              <div><span>{t("backtest.reportLabel")}</span><strong>{report.report_label}</strong></div>
             </div>
           )}
-        </section>
-
-        <section className="backtest-card backtest-report">
-          <div className="backtest-section-title"><span>03</span><h2>{t("backtest.report")}</h2></div>
+          <div className="backtest-result-shell">
+            <WorkspaceTabs
+              value={resultTab}
+              onChange={(id) => setResultTab(id as ResultTab)}
+              items={[
+                { id: "overview", label: t("backtest.tab.overview") },
+                { id: "trades", label: t("backtest.tab.trades") },
+                { id: "fills", label: t("backtest.tab.fills") },
+                { id: "compare", label: t("backtest.tab.compare") },
+                { id: "study", label: t("backtest.tab.study") },
+                { id: "proof", label: t("backtest.tab.proof") },
+              ]}
+            />
+        <section className="backtest-report backtest-result-pane" hidden={resultTab !== "overview"}>
           {pythonSelected && report && (
             <div className="backtest-strategy-evidence" data-testid="python-host-owns-report">
               <strong>{t("backtest.pythonHost")}</strong>
@@ -1355,24 +1473,26 @@ export default function BacktestApp() {
                   </table>
                 </div>
               </>}
-              <div className="backtest-proof">
-                <span>{t("backtest.reportHash")}</span><code title={report.hashes.report ?? ""}>{report.hashes.report}</code>
-              </div>
-              {report.strategy && <div className="backtest-strategy-evidence" data-testid="strategy-evidence">
-                <strong>{report.strategy.revision}</strong>
-                <span>{t("backtest.indicator", { rev: report.strategy.indicatorRevision ?? "—" })}</span>
-                <span>{t("backtest.params", { a: report.strategy.length ?? "—", b: report.strategy.oversold ?? "—", c: report.strategy.overbought ?? "—" })}</span>
-                <span>{t("backtest.warmup", {
-                  mode: report.strategy.triggerMode ?? "—",
-                  observed: report.strategy.warmupRowsObserved ?? "—",
-                  required: report.strategy.warmupRequirementRows ?? "—",
-                })}</span>
-                <span>{t("backtest.reasonCodes", { reasons: JSON.stringify(report.strategy.reasonCodes ?? {}) })}</span>
-              </div>}
               <div className="backtest-report-columns">
                 <div><h3>{t("backtest.suitable")}</h3>{report.suitable_for.map((item) => <p key={item}>✓ {item}</p>)}</div>
                 <div><h3>{t("backtest.notSuitable")}</h3>{report.not_suitable_for.map((item) => <p key={item}>× {item}</p>)}</div>
               </div>
+              {chart && <>
+                <h3 className="backtest-table-title">{t("backtest.equityTitle")}</h3>
+                <EquityCurve data={report.performance?.equity_daily ?? chart.equity_curve} drawdown={report.performance?.drawdown_daily} />
+                <RsiTracePane items={signalTrace} />
+              </>}
+            </>
+          ) : (
+            <p className="backtest-empty">
+              {error
+                ? t("backtest.connFail")
+                : selectedRun?.state === "COMPLETED" ? t("backtest.loadingReport") : t("backtest.pickCompleted")}
+            </p>
+          )}
+        </section>
+        <section className="backtest-result-pane" hidden={resultTab !== "fills"}>
+          {report && !emptyReportIsHidden({ error, report }) ? <>
               <h3 className="backtest-table-title">{t("backtest.fillTable")}</h3>
               {report.fills.length > 1_000 && <p className="backtest-empty">{t("backtest.tableTrunc")}</p>}
               <div className="backtest-table-wrap">
@@ -1423,6 +1543,10 @@ export default function BacktestApp() {
                   </table>
                 </div>
               </>}
+          </> : <p className="backtest-empty">{t("backtest.pickCompleted")}</p>}
+        </section>
+        <section className="backtest-result-pane" hidden={resultTab !== "trades"}>
+          {report && !emptyReportIsHidden({ error, report }) ? <>
               <h3 className="backtest-table-title">{t("backtest.fifoTrades")}</h3>
               {report.performance && <div className="backtest-trade-filters" data-testid="trade-filters">
                 <select aria-label={t("backtest.sideFilter")} value={tradeSideFilter} onChange={(event) => setTradeSideFilter(event.target.value)}>
@@ -1459,30 +1583,29 @@ export default function BacktestApp() {
                 <span>{t("backtest.execImpact", { ms: latencyMs, events: latencyEvents, slip: slippageBps, fees: focusedTrade.fees ?? "—", funding: focusedTrade.funding ?? "—" })}</span>
                 <small>{t("backtest.triggerHint")}</small>
               </div>}
-            </>
-          ) : (
-            <p className="backtest-empty">
-              {error
-                ? t("backtest.connFail")
-                : selectedRun?.state === "COMPLETED" ? t("backtest.loadingReport") : t("backtest.pickCompleted")}
-            </p>
-          )}
+          </> : <p className="backtest-empty">{t("backtest.pickCompleted")}</p>}
+        </section>
+        <section className="backtest-result-pane" hidden={resultTab !== "proof"}>
+          {report && !emptyReportIsHidden({ error, report }) ? <>
+            <div className="backtest-proof">
+              <span>{t("backtest.reportHash")}</span><code title={report.hashes.report ?? ""}>{report.hashes.report}</code>
+            </div>
+            {report.strategy && <div className="backtest-strategy-evidence" data-testid="strategy-evidence">
+              <strong>{report.strategy.revision}</strong>
+              <span>{t("backtest.indicator", { rev: report.strategy.indicatorRevision ?? "—" })}</span>
+              <span>{t("backtest.params", { a: report.strategy.length ?? "—", b: report.strategy.oversold ?? "—", c: report.strategy.overbought ?? "—" })}</span>
+              <span>{t("backtest.warmup", {
+                mode: report.strategy.triggerMode ?? "—",
+                observed: report.strategy.warmupRowsObserved ?? "—",
+                required: report.strategy.warmupRequirementRows ?? "—",
+              })}</span>
+              <span>{t("backtest.reasonCodes", { reasons: JSON.stringify(report.strategy.reasonCodes ?? {}) })}</span>
+            </div>}
+          </> : <p className="backtest-empty">{t("backtest.pickCompleted")}</p>}
         </section>
 
-        <section className="backtest-card backtest-visuals">
-          <div className="backtest-section-title"><span>04</span><h2>{t("backtest.chartTitle")}</h2></div>
-          {chart ? (
-            <>
-              <BacktestResultChart chart={chart} focusTimeMs={focusedTrade ? Number(focusedTrade.entry_time_ms) : null} />
-              <RsiTracePane items={signalTrace} />
-              <h3 className="backtest-table-title">{t("backtest.equityTitle")}</h3>
-              <EquityCurve data={report?.performance?.equity_daily ?? chart.equity_curve} drawdown={report?.performance?.drawdown_daily} />
-            </>
-          ) : <p className="backtest-empty">{t("backtest.pickChart")}</p>}
-        </section>
-
-        <section className="backtest-card backtest-visuals" data-testid="run-compare-workspace">
-          <div className="backtest-section-title"><span>05</span><h2>{t("backtest.compareTitle")}</h2></div>
+        <section className="backtest-visuals backtest-result-pane" data-testid="run-compare-workspace" hidden={resultTab !== "compare"}>
+          <div className="backtest-section-title"><h2>{t("backtest.compareTitle")}</h2></div>
           <div className="backtest-form-row">
             <label>{t("backtest.compareRun")}<select value={compareRunId} onChange={(event) => setCompareRunId(event.target.value)}>
               <option value="">{t("backtest.pickOther")}</option>
@@ -1528,8 +1651,8 @@ export default function BacktestApp() {
           </div>
         </section>
 
-        <section className="backtest-card backtest-studies">
-          <div className="backtest-section-title"><span>06</span><h2>{t("backtest.studyTitle")}</h2></div>
+        <section className="backtest-studies backtest-result-pane" hidden={resultTab !== "study"}>
+          <div className="backtest-section-title"><h2>{t("backtest.studyTitle")}</h2></div>
           <div className="backtest-strategy-evidence" data-testid="study-v2-contract">
             <strong>{t("backtest.studyContract")}</strong>
             <span>{t("backtest.studyHint")}</span>
@@ -1572,25 +1695,6 @@ export default function BacktestApp() {
             </button>
           </div>
           <div className="backtest-study-grid">
-            <div className="backtest-run-list">
-              {studies.map((study) => (
-                <button
-                  type="button"
-                  key={study.study_id}
-                  className={study.study_id === selectedStudyId ? "backtest-run active" : "backtest-run"}
-                  onClick={() => setSelectedStudyId(study.study_id)}
-                >
-                  <span className={`backtest-state ${study.state.toLowerCase()}`}>{study.state}</span>
-                  <strong>{study.name}</strong>
-                  <small>{t("backtest.studySummary", {
-                    folds: study.folds?.length ?? 0,
-                    trials: (study.folds ?? []).reduce((count, fold) => count + fold.train_trials.length, 0) || study.trials.length,
-                    hash: hashLabel(study.config_hash),
-                  })}</small>
-                </button>
-              ))}
-              {studies.length === 0 && <p className="backtest-empty">{t("backtest.noStudy")}</p>}
-            </div>
             <div className="backtest-study-detail">
               {selectedStudy ? (
                 <>
@@ -1696,6 +1800,77 @@ export default function BacktestApp() {
             </div>
           </div>
         </section>
+          </div>
+        </section>
+
+        <aside className={historyRailOpen ? "backtest-history-rail is-open" : "backtest-history-rail"}>
+          <WorkspaceTabs
+            value={historyTab}
+            onChange={(id) => setHistoryTab(id as HistoryTab)}
+            items={[
+              { id: "runs", label: t("backtest.tab.runs") },
+              { id: "studies", label: t("backtest.tab.studies") },
+            ]}
+          />
+          <div className="backtest-history-pane" hidden={historyTab !== "runs"}>
+            <div className="backtest-run-list">
+              {runs.map((run) => (
+                <button
+                  type="button"
+                  key={run.run_id}
+                  className={run.run_id === selectedRunId ? "backtest-run active" : "backtest-run"}
+                  onClick={() => {
+                    setSelectedRunId(run.run_id);
+                    setResultTab("overview");
+                  }}
+                >
+                  <span className={`backtest-state ${run.state.toLowerCase()}`}>{run.state}</span>
+                  <strong>{run.run_id.slice(0, 14)}</strong>
+                  <small>{run.fidelity_mode} · {hashLabel(run.config_hash)}</small>
+                </button>
+              ))}
+              {runs.length === 0 && <p className="backtest-empty">{t("backtest.noRuns")}</p>}
+            </div>
+            {selectedRun && (
+              <div className="backtest-run-actions">
+                {!TERMINAL_STATES.has(selectedRun.state) && (
+                  <button type="button" onClick={handleCancel} disabled={loading}>{t("backtest.cancelRun")}</button>
+                )}
+                {selectedRun.state === "COMPLETED" && (
+                  <button type="button" onClick={handleExport}>{t("backtest.export")}</button>
+                )}
+                {selectedRun.state === "FAILED" && <span>{t("backtest.failCode", { code: selectedRun.failure_code ?? "UNKNOWN" })}</span>}
+                {selectedRun.state === "FAILED" && ["PROVIDER_TIMEOUT", "PROVIDER_CRASH_UNRECOVERABLE", "BACKTEST_STORAGE_TRANSIENT"].includes(selectedRun.failure_code ?? "") && (
+                  <button type="button" onClick={handleResume} disabled={loading}>{t("backtest.resume")}</button>
+                )}
+              </div>
+            )}
+          </div>
+          <div className="backtest-history-pane" hidden={historyTab !== "studies"}>
+            <div className="backtest-run-list">
+              {studies.map((study) => (
+                <button
+                  type="button"
+                  key={study.study_id}
+                  className={study.study_id === selectedStudyId ? "backtest-run active" : "backtest-run"}
+                  onClick={() => {
+                    setSelectedStudyId(study.study_id);
+                    setResultTab("study");
+                  }}
+                >
+                  <span className={`backtest-state ${study.state.toLowerCase()}`}>{study.state}</span>
+                  <strong>{study.name}</strong>
+                  <small>{t("backtest.studySummary", {
+                    folds: study.folds?.length ?? 0,
+                    trials: (study.folds ?? []).reduce((count, fold) => count + fold.train_trials.length, 0) || study.trials.length,
+                    hash: hashLabel(study.config_hash),
+                  })}</small>
+                </button>
+              ))}
+              {studies.length === 0 && <p className="backtest-empty">{t("backtest.noStudy")}</p>}
+            </div>
+          </div>
+        </aside>
       </div>
     </main>
   );

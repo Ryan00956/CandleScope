@@ -15,6 +15,7 @@ import type { MarketDisplayData } from "../features/market-data/marketDataView.j
 import type { SymbolSearchProps } from "../features/symbol-search/SymbolSearch.js";
 import type { AdvancedMarketRuntimeView } from "../features/advanced-market-data/advancedMarketDataTypes.js";
 import type { ReplayEntryCapabilityView } from "../features/replay/useReplayEntryCapability.js";
+import { isBacktestEntryEnabled } from "../features/backtest/backtestFlags.js";
 import { useAdvancedMarketSummary } from "../features/advanced-market-data/useAdvancedMarketSnapshots.js";
 import { t } from "../i18n/index.js";
 import { useLocale } from "../i18n/useLocale.js";
@@ -73,6 +74,7 @@ function TopBar({
   } = controls;
   const { displayData, isUp, priceChange } = buildMarketSummary(marketSummary.displayData);
   const advancedSummary = useAdvancedMarketSummary(advancedMarketData);
+  const backtestEntryEnabled = isBacktestEntryEnabled();
   useLocale();
   const basisText = advancedSummary.basis == null
     ? "--"
@@ -105,6 +107,17 @@ function TopBar({
         >
           {t("shell.replay")}
         </button>
+        )}
+        {backtestEntryEnabled && (
+        <a
+          className="replay-entry-link backtest-entry-link"
+          data-backtest-entry="enabled"
+          href="/backtest.html"
+          target="_blank"
+          rel="noreferrer"
+        >
+          {t("shell.backtest")}
+        </a>
         )}
       </>}
       identity={<SymbolSearch

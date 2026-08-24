@@ -1,0 +1,101 @@
+{
+  "schemaVersion": "candlescope.backtest-chart-first-browser-soak-evidence/1",
+  "capturedAt": "2026-08-24T19:00:37+08:00",
+  "sourceSchemaVersion": "candlescope.backtest-chart-first-browser-soak/1",
+  "environment": {
+    "worktree": "H:\\program\\CandleScope-backtest-chart-first",
+    "frontendOrigin": "http://172.23.16.1:15184",
+    "backendMode": "LOCAL_OFFLINE",
+    "backendPort": 18092,
+    "browserDriver": "repository Playwright CLI with Chrome"
+  },
+  "target": {
+    "durationMs": 3600000,
+    "sampleIntervalMs": 60000,
+    "reloadEverySamples": 10,
+    "expectedSamples": 61
+  },
+  "result": {
+    "elapsedMs": 3601140,
+    "completed": true,
+    "ok": true,
+    "contextId": "brc_ed558ba3b32242b2beea774b8168c7ee",
+    "runId": "bt_e1b30fd8dead421eb55419362dfe5493",
+    "sampleCount": 61,
+    "reloadCount": 6,
+    "firstHeap": 13995784,
+    "lastHeap": 16674536,
+    "maxHeap": 17919151,
+    "heapGrowthBytes": 2678752,
+    "heapBoundBytes": 148213512,
+    "heapBounded": true,
+    "sampleFailures": [],
+    "consoleErrors": [],
+    "pageErrors": [],
+    "requestFailures": []
+  },
+  "sampleCheckpoints": [
+    {
+      "ordinal": 0,
+      "elapsedMs": 52,
+      "tab": "SUMMARY",
+      "capabilitiesStatus": 200,
+      "runStatus": 200,
+      "readyState": "complete",
+      "runSelected": true,
+      "completedVisible": true,
+      "canvasCount": 9,
+      "svgCount": 5,
+      "resultTabs": ["SUMMARY", "TRADES", "TRACE", "COMPARE", "QUALITY"],
+      "usedJSHeapSize": 13995784
+    },
+    {
+      "ordinal": 30,
+      "elapsedMs": 1800995,
+      "tab": "SUMMARY",
+      "capabilitiesStatus": 200,
+      "runStatus": 200,
+      "readyState": "complete",
+      "runSelected": true,
+      "completedVisible": true,
+      "canvasCount": 9,
+      "svgCount": 5,
+      "resultTabs": ["SUMMARY", "TRADES", "TRACE", "COMPARE", "QUALITY"],
+      "usedJSHeapSize": 16583599
+    },
+    {
+      "ordinal": 60,
+      "elapsedMs": 3601041,
+      "tab": "SUMMARY",
+      "capabilitiesStatus": 200,
+      "runStatus": 200,
+      "readyState": "complete",
+      "runSelected": true,
+      "completedVisible": true,
+      "canvasCount": 9,
+      "svgCount": 5,
+      "resultTabs": ["SUMMARY", "TRADES", "TRACE", "COMPARE", "QUALITY"],
+      "usedJSHeapSize": 16674536
+    }
+  ],
+  "tabCoverage": ["SUMMARY", "TRADES", "TRACE", "COMPARE", "QUALITY"],
+  "screenshots": {
+    "start": {
+      "path": "output/playwright/phase12/soak-start.png",
+      "sha256": "1633b202edd84c19e1fa9ea3d6c3f9e0646d73ea448a935c82102c4a1739bb80"
+    },
+    "middle": {
+      "path": "output/playwright/phase12/soak-middle.png",
+      "sha256": "efefff6fe1f599194f4c07791380d76f3617cfc4fac5e18549ed5c6c84805daf"
+    },
+    "end": {
+      "path": "output/playwright/phase12/soak-end.png",
+      "sha256": "ddf2efbcf0240ba1fb00d6bc8f8ff2d44875dd2a45f8d170ccb17f432d40f3ce"
+    }
+  },
+  "manualVisualReview": {
+    "middle": "PASS",
+    "end": "PASS",
+    "notes": "Completed Run remained selected; chart, result area, strategy/data rails and Run list showed no overlap, cropping or layout drift."
+  }
+}

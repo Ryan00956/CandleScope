@@ -1,0 +1,107 @@
+{
+  "schemaVersion": "candlescope.backtest-chart-first-release-fixture/1",
+  "capturedAt": "2026-08-24T18:00:00+08:00",
+  "runtimeMode": "LOCAL_OFFLINE",
+  "productionDataUsed": false,
+  "browserDataset": {
+    "datasetId": "local-55555555555555555555555555555555",
+    "dataEpoch": "sha256:b46a36dc583f1dd291dc182f28eba56a60c5f4bd0abb3db257042ef998faca8b",
+    "checksum": "5df181f4a2388f46c3c39fcf5e0ecffd1646b08b8761597d218a8eb768ad6fcf",
+    "name": "Chart-first Phase 5 local browser fixture",
+    "exchange": "binance",
+    "marketType": "spot",
+    "symbol": "BTCUSDT",
+    "interval": "1h",
+    "rows": 60,
+    "firstOpenMs": 1704067200000,
+    "lastCloseMs": 1704283199999,
+    "source": "host_chart_snapshot",
+    "gapCount": 0
+  },
+  "completedBrowserRun": {
+    "runId": "bt_e1b30fd8dead421eb55419362dfe5493",
+    "state": "COMPLETED",
+    "fidelityMode": "BAR_APPROX",
+    "sourceEventKind": "BAR",
+    "strategyRevisionId": "builtin-expression-model-v1",
+    "snapshotHash": "sha256:2de285d1f46a3e80f1b1c84914870dc12531202954610a12bac31ccc8d949114",
+    "configHash": "sha256:ba685d5f2842541b3d8690e4024da6a135defdfdc2de1805191ae860d62a2212"
+  },
+  "frozenGoldens": [
+    {
+      "path": "backend/tests/fixtures/backtest/contract_golden.json",
+      "bytes": 5634,
+      "sha256": "56f2edb7052cc67bc18ff0be4c653ea89f3bf3fcc4e98f52fc657c4dbe026a46"
+    },
+    {
+      "path": "backend/tests/fixtures/backtest/trade_tape_raw.json",
+      "bytes": 707,
+      "sha256": "28f1f3fc8f435c29fa283cefc95b48b0ff9d8c11b305ebb74f464ae1d3235ccf"
+    },
+    {
+      "path": "backend/tests/fixtures/backtest/trade_tape_agg.json",
+      "bytes": 528,
+      "sha256": "21461e552a938b69376d5e099507bae7138eed448f930cb2801818453e2b06bd"
+    },
+    {
+      "path": "backend/tests/fixtures/backtest/pyne_sma_cross_golden.json",
+      "bytes": 496,
+      "sha256": "42f0ceaa826180bcb019219a2d0f5eec530454692da0aef905b03ef76a00a6f5"
+    },
+    {
+      "path": "backend/tests/fixtures/backtest/trade_explanation_v1_jcs.json",
+      "bytes": 2057,
+      "sha256": "2f6c9d4761102e00f70d544d6d83b530978bad4d4079ec34320984c4a87e8577"
+    },
+    {
+      "path": "backend/tests/fixtures/backtest/release_manifest_example.json",
+      "bytes": 702,
+      "sha256": "3f5070966ef247ee4fb858ff749a98078ee919de481e425f05e7a874b5115b1e"
+    }
+  ],
+  "coverage": {
+    "marketAndSymbol": [
+      {
+        "case": "binance spot BTCUSDT",
+        "evidence": "browserDataset"
+      },
+      {
+        "case": "binance usdm BTCUSDT",
+        "evidence": "backend/tests/test_backtest_runtime.py"
+      },
+      {
+        "case": "ETHUSDT chart-context isolation",
+        "evidence": "backend/tests/test_backtest_chart_context.py"
+      }
+    ],
+    "interval": [
+      "native 1h",
+      "exact integer aggregation",
+      "UNSUPPORTED_INTERVAL"
+    ],
+    "dataState": [
+      "READY",
+      "gap policy",
+      "LOCAL_OFFLINE",
+      "CHART_CACHE_CORRUPT",
+      "data_epoch change"
+    ],
+    "strategy": [
+      "builtin",
+      "Pyne/Pine",
+      "compile failure",
+      "unsupported fidelity"
+    ],
+    "fidelity": [
+      "BAR_APPROX",
+      "TRADE_TAPE",
+      "AGG_TRADE_TAPE"
+    ]
+  },
+  "qualification": {
+    "testCommand": "python -m pytest tests -q -k \"backtest or trade_tape or python_strategy\"",
+    "result": "271 passed, 3640 deselected",
+    "releaseAndRollbackContract": "36 passed",
+    "status": "PASS"
+  }
+}

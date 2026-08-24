@@ -1,0 +1,104 @@
+{
+  "schemaVersion": "candlescope.backtest-chart-first-rollback-evidence/1",
+  "executedAt": "2026-08-24T18:10:00+08:00",
+  "runtimeMode": "LOCAL_OFFLINE",
+  "sourceDist": {
+    "path": "frontend/dist/backtest.html",
+    "sha256Before": "ad35c2547c24cca337c909eb1194165b9afa2ee09cc4d28a2c286bdaec8ea9ff",
+    "sha256After": "ad35c2547c24cca337c909eb1194165b9afa2ee09cc4d28a2c286bdaec8ea9ff",
+    "unchanged": true
+  },
+  "runState": {
+    "before": {
+      "count": 10,
+      "completed": 8,
+      "failed": 2,
+      "stateVectorSha256": "06d36e984e9bbb8946f38ab5ab84b45e4c90d33a0c683c447c0bb40ad9f22008"
+    },
+    "after": {
+      "count": 10,
+      "completed": 8,
+      "failed": 2,
+      "stateVectorSha256": "06d36e984e9bbb8946f38ab5ab84b45e4c90d33a0c683c447c0bb40ad9f22008"
+    },
+    "preserved": true
+  },
+  "frontendVariants": [
+    {
+      "name": "advanced-off",
+      "flags": {
+        "VITE_BACKTEST_RESEARCH_ENABLED": "1",
+        "VITE_BACKTEST_RESEARCH_ADVANCED_ENABLED": "0",
+        "VITE_BACKTEST_LEGACY_WORKBENCH_ENABLED": "1"
+      },
+      "build": "PASS",
+      "browser": {
+        "phase10ReadOnlyVisible": true,
+        "existingRunCount": 10,
+        "completedRunReloaded": true,
+        "canvasCount": 9,
+        "consoleErrors": 0,
+        "consoleWarnings": 0
+      }
+    },
+    {
+      "name": "auto-run-off",
+      "flags": {
+        "VITE_CHART_STRATEGY_TESTER_ENABLED": "1",
+        "VITE_CHART_STRATEGY_AUTO_RUN_ENABLED": "0"
+      },
+      "build": "PASS",
+      "contractTest": "PASS"
+    },
+    {
+      "name": "compare-off",
+      "flags": {
+        "VITE_CHART_STRATEGY_TESTER_ENABLED": "1",
+        "VITE_CHART_RUN_COMPARE_ENABLED": "0"
+      },
+      "build": "PASS",
+      "contractTest": "PASS"
+    },
+    {
+      "name": "explanation-off",
+      "flags": {
+        "VITE_CHART_STRATEGY_TESTER_ENABLED": "1",
+        "VITE_CHART_TRADE_EXPLANATION_ENABLED": "0"
+      },
+      "build": "PASS",
+      "contractTest": "PASS"
+    },
+    {
+      "name": "chart-tester-off",
+      "flags": {
+        "VITE_CHART_STRATEGY_TESTER_ENABLED": "0"
+      },
+      "build": "PASS",
+      "browser": {
+        "singleChartTesterDom": 0,
+        "fourChartTesterDom": 0,
+        "sixteenChartTesterDom": 0,
+        "testerResources": 0
+      },
+      "contractTest": "PASS"
+    }
+  ],
+  "backendResolver": {
+    "flag": "BACKTEST_CHART_CONTEXT_ENABLED",
+    "default": "0",
+    "flagOffBehavior": "FLAG_DISABLED",
+    "databasePreserved": true,
+    "evidence": [
+      "backend/tests/test_backtest_chart_context.py::test_chart_context_http_routes_are_default_off",
+      "backend/tests/test_backtest_rollback.py::test_flag_off_ignores_existing_backtest_database"
+    ],
+    "contractSuite": "36 passed"
+  },
+  "sharedPlatformAdapter": {
+    "rollbackKind": "commit-or-build-level",
+    "dataMutation": false,
+    "evidence": "docs/evidence/BACKTEST_CHART_FIRST_PHASE9_RESULT_20260824_zh.md"
+  },
+  "productionFlagsRemainDefaultOff": true,
+  "status": "PASS"
+}

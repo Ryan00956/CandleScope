@@ -1,6 +1,11 @@
 # CandleScope 图表脚本快测与高级策略研究 UX 逐步执行方案
 
-> 状态：`PHASE_11_COMPLETE`
+> 状态：`PHASE_12_TECHNICAL_COMPLETE_PRODUCTION_REVIEW_PENDING`
+>
+> 2026-08-24 Phase 12 已完成 unit/component/API/browser/desktop/build、真实 LOCAL_OFFLINE fixture、
+> flag-off 1/4/16 图、60 分钟稳定性和逐层回滚门禁。生产开关继续默认关闭；独立评审尚未通过，
+> 因而生产决定保持 `NO_GO`。证据见
+> [`BACKTEST_CHART_FIRST_PHASE12_EXECUTION_20260824_zh.md`](evidence/BACKTEST_CHART_FIRST_PHASE12_EXECUTION_20260824_zh.md)。
 >
 > 2026-08-24 Phase 0 自动化、公开 API、浏览器、bundle、单/四图与 lease 基线已通过；
 > 四个同视口视觉合同稿已经用户人工产品评审批准。Phase 1 已提取 typed backtest client、Run
@@ -1591,6 +1596,9 @@ Phase 6 结束即形成独立的“首次可用快测”里程碑：用户已经
 
 ## Phase 12：发布验证、灰度与回滚演练
 
+实施状态（2026-08-24）：`TECHNICAL_COMPLETE_PRODUCTION_REVIEW_PENDING`。技术门禁已经完成，生产开关保持
+默认关闭；独立评审无 P0/P1 是唯一尚未完成的外部关口。
+
 ### 目标
 
 用证据证明新入口简单、可信、隔离且不伤害主图性能。
@@ -1845,41 +1853,43 @@ VITE_BACKTEST_LEGACY_WORKBENCH_ENABLED=1
 
 只有同时满足以下条件，才能称为“图表脚本快测与高级策略研究完成”：
 
-- [ ] 普通用户可从当前图表三步内修改模板/最近脚本并运行；
-- [ ] 首次打开只显示模板、最近脚本、粘贴代码三个入口，不默认展示空白编辑器；
-- [ ] 普通模式唯一主操作为“运行”，草稿保存与 revision 创建完全后台化；
-- [ ] symbol、market、interval 和范围自动来自当前图表；
-- [ ] ResultContextBar 始终显示 symbol、interval、范围、精度和费用状态；
-- [ ] 数据不足时先披露再由用户触发准备；
-- [ ] 默认费用不是静默 0；
-- [ ] 快速估算、逐笔成交精算与聚合成交序列精算有清晰、真实且不可混用的标签；
-- [ ] 买卖点、交易列表、指标和报告来自同一 immutable run identity；
-- [ ] 切换图表后旧结果立即 stale 且不再投影；
-- [ ] 单图与多图状态完全隔离；
-- [ ] 支持的 Pyne/Pine 策略可在图表工作区编辑并运行，revision 由后台生成/复用；
-- [ ] 编译错误定位到代码行；数据/周期/精度错误提供直接修复动作；
-- [ ] 草稿、revision 和 Run 三种生命周期严格分离；
-- [ ] 支持解释的交易与拒单可追到决定时条件、变量、版本和 evidence hash；
-- [ ] evidence hash 按冻结 canonicalization 和预算跨语言复算一致，PARTIAL/UNAVAILABLE 不伪装成完整解释；
-- [ ] 不支持解释时明确标记，不生成推测内容；
-- [ ] 修改后自动选择最近可比 Run，显示净收益、最大回撤、交易次数和交易集合变化；
-- [ ] comparison context 包含所有非策略执行版本；交易变化使用 V2 fingerprint 多重集，同时间多次交易不碰撞；
-- [ ] 不兼容 Run 不展示改善/恶化结论；
-- [ ] 指标脚本不能直接冒充策略；
-- [ ] Python、Study、比较、审计和高级风控可在高级研究使用；
-- [ ] 高级研究是独立全屏页面和独立 runtime；
-- [ ] 高级研究首先按五类任务进入，不默认展示全字段页面；
-- [ ] 从普通模式进入高级研究时，脚本、参数、品种、周期、日期和最近 Run 无损恢复；
-- [ ] 普通页与高级页复用同一图表/行情平台，不复制实现；
-- [ ] 高级页 LIVE_REFERENCE、FROZEN_SNAPSHOT、RUN_RESULT 来源明确且不可混用；
-- [ ] 高级页关闭后 WebSocket、lease、轮询和缓存引用完整释放；
-- [ ] 未附着策略的 cell 不创建 tester runtime；detach/close/flag-off 后相关资源回到基线；
-- [ ] legacy workbench capability parity 与回滚通过；
-- [ ] 回放桥保持只读和 no-lookahead；
-- [ ] 所有新增入口可通过 flag 独立回滚；
-- [ ] flag off 时主图性能和现有功能不劣化；
-- [ ] 完整 test/build/browser/soak/rollback 证据归档；
+- [x] 普通用户可从当前图表三步内修改模板/最近脚本并运行；
+- [x] 首次打开只显示模板、最近脚本、粘贴代码三个入口，不默认展示空白编辑器；
+- [x] 普通模式唯一主操作为“运行”，草稿保存与 revision 创建完全后台化；
+- [x] symbol、market、interval 和范围自动来自当前图表；
+- [x] ResultContextBar 始终显示 symbol、interval、范围、精度和费用状态；
+- [x] 数据不足时先披露再由用户触发准备；
+- [x] 默认费用不是静默 0；
+- [x] 快速估算、逐笔成交精算与聚合成交序列精算有清晰、真实且不可混用的标签；
+- [x] 买卖点、交易列表、指标和报告来自同一 immutable run identity；
+- [x] 切换图表后旧结果立即 stale 且不再投影；
+- [x] 单图与多图状态完全隔离；
+- [x] 支持的 Pyne/Pine 策略可在图表工作区编辑并运行，revision 由后台生成/复用；
+- [x] 编译错误定位到代码行；数据/周期/精度错误提供直接修复动作；
+- [x] 草稿、revision 和 Run 三种生命周期严格分离；
+- [x] 支持解释的交易与拒单可追到决定时条件、变量、版本和 evidence hash；
+- [x] evidence hash 按冻结 canonicalization 和预算跨语言复算一致，PARTIAL/UNAVAILABLE 不伪装成完整解释；
+- [x] 不支持解释时明确标记，不生成推测内容；
+- [x] 修改后自动选择最近可比 Run，显示净收益、最大回撤、交易次数和交易集合变化；
+- [x] comparison context 包含所有非策略执行版本；交易变化使用 V2 fingerprint 多重集，同时间多次交易不碰撞；
+- [x] 不兼容 Run 不展示改善/恶化结论；
+- [x] 指标脚本不能直接冒充策略；
+- [x] Python、Study、比较、审计和高级风控可在高级研究使用；
+- [x] 高级研究是独立全屏页面和独立 runtime；
+- [x] 高级研究首先按五类任务进入，不默认展示全字段页面；
+- [x] 从普通模式进入高级研究时，脚本、参数、品种、周期、日期和最近 Run 无损恢复；
+- [x] 普通页与高级页复用同一图表/行情平台，不复制实现；
+- [x] 高级页 LIVE_REFERENCE、FROZEN_SNAPSHOT、RUN_RESULT 来源明确且不可混用；
+- [x] 高级页关闭后 WebSocket、lease、轮询和缓存引用完整释放；
+- [x] 未附着策略的 cell 不创建 tester runtime；detach/close/flag-off 后相关资源回到基线；
+- [x] legacy workbench capability parity 与回滚通过；
+- [x] 回放桥保持只读和 no-lookahead；
+- [x] 所有新增入口可通过 flag 独立回滚；
+- [x] flag off 时主图性能和现有功能不劣化；
+- [x] 完整 test/build/browser/soak/rollback 证据归档；
 - [ ] 独立评审通过，且没有 P0/P1 未决项。
+
+最后一项为生产默认开启前的外部关口；在独立评审确认前，不能把本清单解释为生产 `GO`。
 
 ---
 

@@ -710,7 +710,7 @@ export function useBacktestResearchRuntime(options: {
         }
         if (capabilities?.flags.BACKTEST_REPLAY_REVIEW_BRIDGE_ENABLED !== true
           || capabilities.flags.BACKTEST_REPLAY_TRAINING_AVAILABLE !== true) {
-          throw new Error("Replay TrainingRun runtime is unavailable.");
+          throw new Error("Replay training runtime is unavailable.");
         }
         const bridge = await api.createReviewBridge(activeRun.run_id, startTimeMs, endTimeMs);
         setReviewBridge(bridge);

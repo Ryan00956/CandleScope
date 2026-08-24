@@ -1,0 +1,139 @@
+{
+  "schemaVersion": "candlescope.backtest-chart-first-phase12-release-evidence/1",
+  "generatedAt": "2026-08-24T19:00:37+08:00",
+  "candidate": {
+    "branch": "codex/backtest-chart-first-ux",
+    "worktree": "H:\\program\\CandleScope-backtest-chart-first",
+    "candidateParent": "e63f23a8c21a897e3dc0c6c9b0d63f72a610e49e",
+    "runtimeRoot": "output/phase11-runtime-20260824",
+    "backendMode": "LOCAL_OFFLINE",
+    "backendPort": 18092,
+    "frontendPreviewPort": 15184
+  },
+  "productionFlags": {
+    "defaultOff": true,
+    "values": {
+      "BACKTEST_CHART_CONTEXT_ENABLED": "0",
+      "BACKTEST_TRADE_EXPLANATION_ENABLED": "0",
+      "VITE_CHART_STRATEGY_TESTER_ENABLED": "0",
+      "VITE_CHART_STRATEGY_AUTO_RUN_ENABLED": "0",
+      "VITE_CHART_TRADE_EXPLANATION_ENABLED": "0",
+      "VITE_CHART_RUN_COMPARE_ENABLED": "0",
+      "VITE_BACKTEST_RESEARCH_ENABLED": "0",
+      "VITE_BACKTEST_LEGACY_WORKBENCH_ENABLED": "1"
+    },
+    "finalHandoffBuild": {
+      "status": "PASS",
+      "modules": 672,
+      "warning": "existing chunk larger than 500 kB",
+      "indexHtmlSha256": "8fa56a0c2ca42765d52ea829d8d5d488374aa5cbbc759be53da0661556e790b4",
+      "backtestHtmlSha256": "b17ff24e76107a75c82d15b7756adfa9f7a5aa597e4f6ae96b035c24b7e7b257",
+      "freshBrowser": {
+        "readyState": "complete",
+        "testerDomCount": 0,
+        "testerEntryVisible": false,
+        "testerRuntimeResourceMatches": []
+      }
+    }
+  },
+  "testGates": {
+    "architecture": { "status": "PASS", "allowlistEntries": 0 },
+    "i18n": { "status": "PASS", "catalogKeys": 3910, "sourceFiles": 635 },
+    "typecheck": { "status": "PASS", "configs": ["browser", "node"] },
+    "lint": { "status": "PASS", "dependencyTree": "npm ci exact lockfile" },
+    "frontendBacktest": { "status": "PASS", "passed": 111, "total": 111, "suites": 3 },
+    "frontendFull": { "status": "PASS", "passed": 3396, "total": 3396, "suites": 3, "durationMs": 154986.9206 },
+    "desktop": { "status": "PASS", "passed": 35, "total": 35 },
+    "backendKeywordCoverage": { "status": "PASS", "passed": 271, "deselected": 3640 },
+    "backendReleaseRollbackContracts": { "status": "PASS", "passed": 36, "total": 36 },
+    "rapidSwitchingRuntimeDraft": { "status": "PASS", "passed": 19, "total": 19 },
+    "truthCompareProjectionAutoRunAdvanced": { "status": "PASS", "passed": 25, "total": 25 },
+    "backendExplanationStudyTradeTape": { "status": "PASS", "passed": 26, "total": 26 },
+    "advancedOnBuild": { "status": "PASS", "modules": 672 },
+    "defaultOffBuild": { "status": "PASS", "modules": 672 },
+    "rollbackBuilds": {
+      "status": "PASS",
+      "variants": ["advanced-off", "auto-run-off", "compare-off", "explanation-off", "chart-tester-off"]
+    },
+    "productionDependencyAudit": { "status": "PASS", "vulnerabilities": 0 },
+    "fullDependencyAudit": {
+      "status": "KNOWN_DEV_BUILD_CHAIN_ADVISORY",
+      "high": 1,
+      "advisory": "GHSA-2v37-7h3g-55p8",
+      "chain": "vite@7.3.6 -> postcss@8.5.26 -> nanoid@3.3.17",
+      "effects": []
+    }
+  },
+  "fixture": {
+    "evidence": "docs/evidence/backtest-chart-first-phase12-fixture-20260824.json",
+    "datasetId": "local-55555555555555555555555555555555",
+    "dataEpoch": "sha256:b46a36dc583f1dd291dc182f28eba56a60c5f4bd0abb3db257042ef998faca8b",
+    "checksum": "5df181f4a2388f46c3c39fcf5e0ecffd1646b08b8761597d218a8eb768ad6fcf",
+    "rows": 60,
+    "runId": "bt_e1b30fd8dead421eb55419362dfe5493",
+    "snapshotHash": "sha256:2de285d1f46a3e80f1b1c84914870dc12531202954610a12bac31ccc8d949114",
+    "configHash": "sha256:ba685d5f2842541b3d8690e4024da6a135defdfdc2de1805191ae860d62a2212"
+  },
+  "browser": {
+    "driver": "repository Playwright CLI with user-approved Chrome",
+    "researchConsole": { "errors": 0, "warnings": 0 },
+    "viewports": ["1366x768", "1920x1080"],
+    "layouts": ["single", "left-right-double", "four", "maximize-restore", "flag-off-16"],
+    "flagOff": {
+      "single": { "status": "PASS", "testerDomCount": 0, "resourceMatches": 0 },
+      "four": { "status": "PASS", "testerDomCount": 0, "resourceMatches": 0 },
+      "sixteen": { "status": "PASS", "logicalCells": 64, "windows": 4, "testerDomCount": 0, "resourceMatches": 0 }
+    },
+    "soak": {
+      "status": "PASS",
+      "evidence": "docs/evidence/backtest-chart-first-phase12-soak-20260824.json",
+      "elapsedMs": 3601140,
+      "sampleCount": 61,
+      "reloadCount": 6,
+      "consoleErrors": 0,
+      "pageErrors": 0,
+      "requestFailures": 0,
+      "sampleFailures": 0,
+      "firstHeap": 13995784,
+      "lastHeap": 16674536,
+      "maxHeap": 17919151,
+      "heapGrowthBytes": 2678752,
+      "heapBoundBytes": 148213512,
+      "heapBounded": true,
+      "middleVisualReview": "PASS",
+      "endVisualReview": "PASS"
+    }
+  },
+  "rollback": {
+    "status": "PASS",
+    "evidence": "docs/evidence/backtest-chart-first-phase12-rollback-20260824.json",
+    "runCountBefore": 10,
+    "runCountAfter": 10,
+    "stateVectorSha256Before": "06d36e984e9bbb8946f38ab5ab84b45e4c90d33a0c683c447c0bb40ad9f22008",
+    "stateVectorSha256After": "06d36e984e9bbb8946f38ab5ab84b45e4c90d33a0c683c447c0bb40ad9f22008",
+    "dataMutation": false
+  },
+  "screenshots": {
+    "flag-off-1-cell-1920x1080.png": "73ab2bd09c9fce1667bb4b1d792911196ba01788b937e5c5ac3b6d25998700ce",
+    "flag-off-16-cell-1920x1080.png": "84bf1feed120e4c520d53f21f81360b3df17a616a7111c7c9e5042c96ec395c2",
+    "flag-off-4-cell-1920x1080.png": "c7b3faaeac36cd43d62b55bb4924600cc1fa4b458223f9f54e7459e1f3880117",
+    "layout-double-1366x768.png": "3fe764ff47ea82c32d86706ee66123bfae0ac00f8511eba6ccadf4ba3ce95c9c",
+    "layout-four-1366x768.png": "268509d6a994bb2f3cf6d0add945e6f5461a4d283f79498abb8be683acbe101d",
+    "layout-maximized-1366x768.png": "2c03abb371f3ffea66be55e85151e232bc920e9dc3a565986cc60b867db7f90f",
+    "research-advanced-1366x768.png": "b303d0daad3836c259fbb6d0ba7434222a5d058b8a282cda4b9997fb6df22112",
+    "research-advanced-1920x1080.png": "9fccc03b7d7a4a50e6efd7452241e809566c8062b671a57631a71e650a1cf52f",
+    "research-completed-run-1366x768.png": "2faacb894817274960c836cfaef97267762694e5f045af7b8968b842462f1070",
+    "research-completed-run-1920x1080.png": "a89332b48e2887c42c3fdd24686c0d9669688d3f6dff91610bca7554a04ae32b",
+    "rollback-advanced-off-readonly.png": "6460d5eb17c981efda5d8fe184322bc059463c4e4392721e0e750f59c1af5f2f",
+    "soak-start.png": "1633b202edd84c19e1fa9ea3d6c3f9e0646d73ea448a935c82102c4a1739bb80",
+    "soak-middle.png": "efefff6fe1f599194f4c07791380d76f3617cfc4fac5e18549ed5c6c84805daf",
+    "soak-end.png": "ddf2efbcf0240ba1fb00d6bc8f8ff2d44875dd2a45f8d170ccb17f432d40f3ce"
+  },
+  "sourceHashes": {
+    "frontend/scripts/backtest-chart-first-phase12-browser-soak.js": "8314a001e5b53adf9749d478ea6c9a9807f19aa6616cf5b3ac9c3ca638a74b3f",
+    "frontend/src/features/backtest/research/useBacktestResearchRuntime.ts": "1e5618a922ad8ba43df2d0f2f60a538630297ed86291e42213a08cc9a100f5cd"
+  },
+  "technicalStatus": "PASS",
+  "independentReview": "PENDING",
+  "decision": "NO_GO_PRODUCTION_DEFAULT_OFF_PENDING_INDEPENDENT_REVIEW"
+}

@@ -309,10 +309,9 @@ export default function ReplayTrainingPageShell({
     timelineOriginMs: runtime.store.replayStartMs,
     timelineMs: publicTimeline,
   });
-  const publicTime = integrityRuntime.integrity?.public_time.label
-    ?? (runtime.store.virtualTimeMs === null
-      ? "--"
-      : publicTimeRuntime.formatTime(runtime.store.virtualTimeMs));
+  const publicTime = runtime.store.virtualTimeMs === null
+    ? (integrityRuntime.integrity?.public_time.label ?? "--")
+    : publicTimeRuntime.formatTime(runtime.store.virtualTimeMs);
   const formatPublicTime = publicTimeRuntime.formatTime;
   const formatChartTime = useCallback(
     (timeSeconds: number) => formatPublicTime(timeSeconds * 1_000),

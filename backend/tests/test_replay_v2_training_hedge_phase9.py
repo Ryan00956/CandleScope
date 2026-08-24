@@ -518,6 +518,178 @@ async def test_manual_hedge_bar_step_keeps_exhaustive_audit_off_hot_path(
         await service.shutdown(step_timeout=1.0)
 
 
+@pytest.mark.parametrize("funding_event_offset_bars", (0, 1))
+async def test_empty_hedge_display_step_batches_marks_without_losing_audit_events(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    funding_event_offset_bars: int,
+) -> None:
+    forward_bars = 260
+    suffix = f"funding-{funding_event_offset_bars}"
+    database = tmp_path / f"phase9-empty-hedge-display-batch-{suffix}.db"
+    service = await _risk_service(
+        database,
+        bar_prices=["100"] * (forward_bars + 1_000),
+        leading_bars=500,
+        now_ms=1_710_000_000_000 + 700 * 60_000,
+    )
+    try:
+        catalog = await service.catalog(
+            warmup_bars=2,
+            horizon_ms=forward_bars * 60_000,
+            quality_mode="exact",
+            blind_mode=False,
+        )
+        base = replace(
+            _sandbox_request(await _request(service), initial_equity="10000"),
+            catalog_epoch=str(catalog["catalog_epoch"]),
+            market_type="futures",
+            display_interval="4h",
+            forward_cache_ms=forward_bars * 60_000,
+        )
+        request = await prepare_hedge_request(
+            service,
+            base,
+            root=tmp_path,
+            prefix=f"phase9-empty-hedge-display-batch-{suffix}",
+            mark_prices=["100"] * (forward_bars + 1),
+            book_mode="OFF",
+            funding_event_offset_bars=funding_event_offset_bars,
+        )
+        assert service.training is not None
+        created = await service.training.create_run(request)
+        run_id = str(created["run"]["run_id"])
+        session_id = str(created["run"]["adapter_session_id"])
+        await _acquire(
+            service,
+            run_id=run_id,
+            selected_session_id=session_id,
+            command_id="phase9-empty-hedge-display-batch-acquire",
+        )
+
+        adapter_batch_sizes: list[int | None] = []
+        hedge_apply_sizes: list[int] = []
+        hedge_finalize_count = 0
+        original_advance = service.training._advance_adapter_to
+        original_apply = service.training.store.apply_hedge_input_events
+        original_finalize = service.training.store.finalize_hedge_inputs
+
+        async def observed_advance(**kwargs):
+            adapter_batch_sizes.append(kwargs.get("final_state_max_events"))
+            return await original_advance(**kwargs)
+
+        async def observed_apply(*args, **kwargs):
+            hedge_apply_sizes.append(len(kwargs["events"]))
+            return await original_apply(*args, **kwargs)
+
+        async def observed_finalize(*args, **kwargs):
+            nonlocal hedge_finalize_count
+            hedge_finalize_count += 1
+            return await original_finalize(*args, **kwargs)
+
+        monkeypatch.setattr(service.training, "_advance_adapter_to", observed_advance)
+        monkeypatch.setattr(
+            service.training.store,
+            "apply_hedge_input_events",
+            observed_apply,
+        )
+        monkeypatch.setattr(
+            service.training.store,
+            "finalize_hedge_inputs",
+            observed_finalize,
+        )
+        before = await service.get_session(session_id)
+        before_sequence = int(before["snapshot"]["cursor"]["source_sequence"])
+        advanced = await _send(
+            service,
+            run_id=run_id,
+            session_id=session_id,
+            command_id="phase9-empty-hedge-display-batch-step",
+            command_type=ReplayV2CommandType.ADVANCE,
+            payload={
+                "basis": "DISPLAY_BAR",
+                "count": 1,
+                "display_interval": "4h",
+                "viewer_revision": 0,
+            },
+        )
+        after = await service.get_session(session_id)
+        after_sequence = int(after["snapshot"]["cursor"]["source_sequence"])
+        consumed = after_sequence - before_sequence
+
+        assert 200 <= consumed <= 240
+        assert len(adapter_batch_sizes) <= 5
+        if funding_event_offset_bars == 0:
+            assert all(size is not None and size > 1 for size in adapter_batch_sizes)
+        else:
+            assert adapter_batch_sizes[0] is None
+            assert all(
+                size is not None and size > 1 for size in adapter_batch_sizes[1:]
+            )
+        assert len([size for size in hedge_apply_sizes if size > 0]) <= 5
+        assert max(hedge_apply_sizes) >= 50
+        assert hedge_finalize_count <= 6
+        stable_order = advanced["data"]["stable_order"]
+        assert len(stable_order) >= consumed * 2 - 1
+        assert stable_order == sorted(
+            stable_order,
+            key=lambda item: (
+                item["actual_event_time_ms"],
+                item["event_phase"],
+                item["market_track_stable_id"],
+                item["source_sequence"],
+            ),
+        )
+
+        def read_applied(
+            connection: sqlite3.Connection,
+        ) -> tuple[sqlite3.Row, ...]:
+            return tuple(
+                connection.execute(
+                    """
+                    SELECT event_sequence, event_time_ms, applied_virtual_time_ms
+                    FROM replay_hedge_track_public_applied_event
+                    WHERE run_id = ? AND event_kind = 'MARK_INDEX'
+                    ORDER BY event_sequence
+                    """,
+                    (run_id,),
+                ).fetchall()
+            )
+
+        applied = await service.training.store.base_store.run_extension_read(
+            read_applied
+        )
+        assert len(applied) >= consumed - 1
+        assert all(
+            int(row["applied_virtual_time_ms"]) == int(row["event_time_ms"])
+            for row in applied
+        )
+        audit = await service.training.audit_account(run_id)
+        assert audit["status"] == "PASS", audit["differences"]
+        assert audit["hedge_input_audit"]["status"] == "PASS"
+        if funding_event_offset_bars == 0:
+            expected_cursor = dict(after["snapshot"]["cursor"])
+            expected_proof = audit["hedge_input_audit"]["proof_hash"]
+            await service.shutdown(step_timeout=1.0)
+            service = await _risk_service(
+                database,
+                bar_prices=["100"] * (forward_bars + 1_000),
+                leading_bars=500,
+                now_ms=1_710_000_000_000 + 700 * 60_000,
+            )
+            assert service.training is not None
+            recovered = await service.get_session(session_id)
+            assert recovered["snapshot"]["cursor"] == expected_cursor
+            recovered_audit = await service.training.audit_account(run_id)
+            assert recovered_audit["status"] == "PASS"
+            assert (
+                recovered_audit["hedge_input_audit"]["proof_hash"]
+                == expected_proof
+            )
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
 @pytest.mark.parametrize("setup_start_mode", ("MANUAL", "RANDOM"))
 async def test_segment_plan_resolves_cross_verified_explicit_hedge_refs(
     tmp_path: Path,

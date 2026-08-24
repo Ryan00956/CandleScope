@@ -310,6 +310,7 @@ async def prepare_hedge_request(
     required_symbols: list[str] | None = None,
     book_mode: str = "BOOK_ASSISTED_REQUIRED",
     contract_size: str = "1",
+    funding_event_offset_bars: int = 1,
 ) -> TrainingRunCreateRequest:
     training = getattr(service, "training")
     if training is None:
@@ -392,11 +393,15 @@ async def prepare_hedge_request(
         }
         for index, price in enumerate(marks)
     )
+    funding_index = min(funding_event_offset_bars, len(marks) - 1)
     events.append(
         {
-            "event_time_ms": min(end, start + interval_ms),
+            "event_time_ms": min(end, start + funding_index * interval_ms),
             "event_kind": "FUNDING",
-            "payload": {"funding_rate": "0.0001", "mark_price": marks[1]},
+            "payload": {
+                "funding_rate": "0.0001",
+                "mark_price": marks[funding_index],
+            },
         }
     )
     events.sort(

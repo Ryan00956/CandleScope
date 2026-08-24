@@ -79,6 +79,7 @@ from .historical_book import HistoricalBookArchiveManager, HistoricalBookProject
 from .hedge_inputs import (
     HYBRID_PUBLIC_INPUT_FIDELITY,
     HedgeInputArchiveManager,
+    HedgeInputEvent,
     PreparedHedgeInputBinding,
 )
 from .account import isolated_margin_key, round_to_step
@@ -8725,6 +8726,64 @@ class TrainingRunService:
                     status_code=409,
                     details={"fallback_applied": False},
                 )
+            batched_hedge_events: tuple[HedgeInputEvent, ...] = ()
+            batched_hedge_virtual_times: tuple[int, ...] = ()
+            hedge_batch_wave_time: int | None = None
+            if (
+                hedge_mode
+                and final_state_profile is not None
+                and final_state_profile[1]
+                and next_times
+            ):
+                planned_batch_time = min(next_times)
+                account_after_batch = (
+                    next_account_virtual is None
+                    or next_account_virtual > planned_batch_time
+                )
+                candidate_hedge_events = await self.hedge_inputs.events_through(
+                    run_id=command.run_id,
+                    target_actual_time_ms=self._actual_event_time_ms(
+                        binding,
+                        planned_batch_time,
+                    ),
+                    runtime_snapshot=hedge_runtime_snapshot,
+                )
+                hedge_batch_is_safe = (
+                    not book_required
+                    and account_after_batch
+                    and all(
+                        event.source_kind == "PUBLIC"
+                        and event.event_kind == "MARK_INDEX"
+                        and event.event_phase == MARK_INDEX_EVENT_PHASE
+                        for event in candidate_hedge_events
+                    )
+                )
+                if hedge_batch_is_safe:
+                    if candidate_hedge_events:
+                        batched_hedge_events = candidate_hedge_events
+                        batched_hedge_virtual_times = tuple(
+                            self._virtual_event_time_ms(binding, event.event_time_ms)
+                            for event in candidate_hedge_events
+                        )
+                        hedge_batch_wave_time = planned_batch_time
+                        next_hedge_virtual = planned_batch_time
+                else:
+                    # A rule, fee, funding, simulation, book, or exact-account
+                    # barrier must retain phase ordering against the first market
+                    # event.  Shrink this preflight plan before choosing wave_time.
+                    next_times.clear()
+                    for track_index, (track, _snapshot) in enumerate(snapshots):
+                        track_key = str(track["track_id"])
+                        planned_times = planned_event_times.get(track_key, ())
+                        if not planned_times:
+                            continue
+                        first_time = planned_times[0]
+                        planned_event_times[track_key] = (first_time,)
+                        planned_source_boundaries[track_key] = (
+                            market_sequences[track_index] + 1
+                        )
+                        next_times.append(first_time)
+                    final_state_profile = None
             source_goal_reached = (
                 source_goal is None
                 or current_source_sequence == source_goal.target_source_sequence
@@ -8793,15 +8852,16 @@ class TrainingRunService:
                 actual_time_ms=actual_wave_time,
                 guarded=True,
             )
-            hedge_events = (
-                await self.hedge_inputs.events_at(
+            if not hedge_mode:
+                hedge_events = ()
+            elif hedge_batch_wave_time == wave_time:
+                hedge_events = batched_hedge_events
+            else:
+                hedge_events = await self.hedge_inputs.events_at(
                     run_id=command.run_id,
                     actual_time_ms=actual_wave_time,
                     runtime_snapshot=hedge_runtime_snapshot,
                 )
-                if hedge_mode
-                else ()
-            )
             pre_account_events = tuple(
                 item
                 for item in account_events
@@ -8994,6 +9054,11 @@ class TrainingRunService:
                             command.run_id,
                             events=post_hedge_events,
                             virtual_time_ms=wave_time,
+                            event_virtual_times_ms=(
+                                batched_hedge_virtual_times
+                                if hedge_batch_wave_time == wave_time
+                                else None
+                            ),
                         )
                     )
                     await self.store.finalize_account_history(
@@ -9187,15 +9252,27 @@ class TrainingRunService:
             target_virtual_time_ms=target_virtual_time_ms,
         )
         dependencies = set(decision.context.path_dependencies)
+        allowed_dependencies = {"OPEN_ORDER", "OPEN_POSITION"}
+        if str(binding.get("position_mode")) == "HEDGE":
+            # A pinned funding schedule is only a potential barrier.  The
+            # coordinator inspects the exact events inside each proposed chunk
+            # and shrinks to one source event whenever a settlement is present.
+            allowed_dependencies.add("FUNDING_SCHEDULE")
         if decision.context.blocking_reasons or not dependencies.issubset(
-            {"OPEN_ORDER", "OPEN_POSITION"}
+            allowed_dependencies
         ):
             return None
-        if str(binding.get("account_model")) == "TOUCH_OR_TAPE_V2" and dependencies:
+        trading_dependencies = dependencies.intersection(
+            {"OPEN_ORDER", "OPEN_POSITION"}
+        )
+        if (
+            str(binding.get("account_model")) == "TOUCH_OR_TAPE_V2"
+            and trading_dependencies
+        ):
             # Contract-account marks and liquidation checks still require the
             # global event barrier while any trading path is active.
             return None
-        require_empty_account = not dependencies
+        require_empty_account = not trading_dependencies
         limit = min(
             (
                 MAX_PLAYBACK_BATCH_UNITS

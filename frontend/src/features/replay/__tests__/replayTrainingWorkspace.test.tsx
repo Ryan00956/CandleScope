@@ -733,6 +733,19 @@ test("toolbar keeps idle time visible and scopes progress to an active cancelabl
   assert.match(styles, /\.replay-advance-progress \{/);
 });
 
+test("toolbar time follows the authoritative live cursor after an advance", () => {
+  const workspace = source("src/features/replay/ReplayTrainingPageShell.tsx");
+
+  assert.match(
+    workspace,
+    /const publicTime = runtime\.store\.virtualTimeMs === null\s*\? \(integrityRuntime\.integrity\?\.public_time\.label \?\? "--"\)\s*:\s*publicTimeRuntime\.formatTime\(runtime\.store\.virtualTimeMs\)/,
+  );
+  assert.doesNotMatch(
+    workspace,
+    /integrityRuntime\.integrity\?\.public_time\.label\s*\?\?\s*\(runtime\.store\.virtualTimeMs/,
+  );
+});
+
 test("toolbar bounds exact source-event advances to one interruptible batch", () => {
   const controls = source("src/features/replay/components/ReplayControlBar.tsx");
   const limits = source("src/features/replay/replayAdvanceLimits.ts");

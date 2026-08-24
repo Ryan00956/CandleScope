@@ -2328,12 +2328,20 @@ class TrainingRunStore:
         *,
         events: Sequence[HedgeInputEvent],
         virtual_time_ms: int,
+        event_virtual_times_ms: Sequence[int] | None = None,
     ) -> tuple[StableMarketEvent, ...]:
         """Apply one ordered HEDGE input phase with durable idempotency."""
 
         materialized = tuple(events)
         if not materialized:
             return ()
+        applied_virtual_times = (
+            (virtual_time_ms,) * len(materialized)
+            if event_virtual_times_ms is None
+            else tuple(event_virtual_times_ms)
+        )
+        if len(applied_virtual_times) != len(materialized):
+            raise ValueError("HEDGE event virtual-time count must match event count")
 
         def write(connection: sqlite3.Connection) -> tuple[StableMarketEvent, ...]:
             binding = connection.execute(
@@ -2359,7 +2367,9 @@ class TrainingRunStore:
                 raise TypeError("HEDGE primary track is missing")
             primary_track_id = str(primary_track["track_id"])
             stable: list[StableMarketEvent] = []
-            for event in materialized:
+            for event, virtual_time_ms in zip(
+                materialized, applied_virtual_times, strict=True
+            ):
                 stable.append(
                     StableMarketEvent(
                         actual_event_time_ms=event.event_time_ms,
@@ -15455,17 +15465,52 @@ class TrainingRunStore:
                 )
             )
             now_ms = self.base_store._validated_now_ms()
-            inserted = 0
+            sequence_ranges: dict[str, tuple[int, int]] = {}
             for event in ordered:
-                exists = connection.execute(
-                    """
+                current_range = sequence_ranges.get(event.market_track_stable_id)
+                if current_range is None:
+                    sequence_ranges[event.market_track_stable_id] = (
+                        event.source_sequence,
+                        event.source_sequence,
+                    )
+                else:
+                    sequence_ranges[event.market_track_stable_id] = (
+                        min(current_range[0], event.source_sequence),
+                        max(current_range[1], event.source_sequence),
+                    )
+            existing_by_identity: dict[
+                tuple[str, int], Mapping[str, object]
+            ] = {}
+            if sequence_ranges:
+                range_clauses: list[str] = []
+                range_parameters: list[object] = [run_id]
+                for track_id, (first_sequence, last_sequence) in sorted(
+                    sequence_ranges.items()
+                ):
+                    range_clauses.append(
+                        "(track_id = ? AND source_sequence BETWEEN ? AND ?)"
+                    )
+                    range_parameters.extend(
+                        (track_id, first_sequence, last_sequence)
+                    )
+                existing_rows = connection.execute(
+                    f"""
                     SELECT global_sequence, actual_event_time_ms, event_phase,
                            track_id, source_sequence
                     FROM replay_training_global_event
-                    WHERE run_id = ? AND track_id = ? AND source_sequence = ?
+                    WHERE run_id = ? AND ({" OR ".join(range_clauses)})
                     """,
-                    (run_id, event.market_track_stable_id, event.source_sequence),
-                ).fetchone()
+                    tuple(range_parameters),
+                ).fetchall()
+                existing_by_identity = {
+                    (str(row["track_id"]), int(row["source_sequence"])): row
+                    for row in existing_rows
+                }
+            inserted = 0
+            insert_rows: list[tuple[object, ...]] = []
+            for event in ordered:
+                identity = (event.market_track_stable_id, event.source_sequence)
+                exists = existing_by_identity.get(identity)
                 if exists is not None:
                     existing_key = (
                         int(exists["actual_event_time_ms"]),
@@ -15495,14 +15540,7 @@ class TrainingRunStore:
                         },
                     )
                 global_sequence += 1
-                connection.execute(
-                    """
-                    INSERT INTO replay_training_global_event(
-                        run_id, global_sequence, ordering_version,
-                        actual_event_time_ms, event_phase, track_id,
-                        source_sequence, ordering_hash, created_at_ms
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
+                insert_rows.append(
                     (
                         run_id,
                         global_sequence,
@@ -15515,8 +15553,25 @@ class TrainingRunStore:
                         now_ms,
                     ),
                 )
+                existing_by_identity[identity] = {
+                    "global_sequence": global_sequence,
+                    "actual_event_time_ms": event.actual_event_time_ms,
+                    "event_phase": event.event_phase,
+                    "track_id": event.market_track_stable_id,
+                    "source_sequence": event.source_sequence,
+                }
                 inserted += 1
                 tail_key = event.ordering_key
+            connection.executemany(
+                """
+                INSERT INTO replay_training_global_event(
+                    run_id, global_sequence, ordering_version,
+                    actual_event_time_ms, event_phase, track_id,
+                    source_sequence, ordering_hash, created_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                insert_rows,
+            )
             checkpoint = self._insert_global_checkpoint(
                 connection,
                 run_id=run_id,

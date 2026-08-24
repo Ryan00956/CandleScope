@@ -3001,30 +3001,7 @@ class HedgeInputArchiveManager:
             if runtime_snapshot is None
             else runtime_snapshot
         )
-
-        def read(connection: sqlite3.Connection) -> tuple[dict[str, int], int]:
-            public_cursors = {
-                str(row["track_id"]): int(row["last_event_sequence"])
-                for row in connection.execute(
-                    """
-                    SELECT track_id, last_event_sequence
-                    FROM replay_hedge_track_public_projection WHERE run_id = ?
-                    """,
-                    (run_id,),
-                ).fetchall()
-            }
-            simulation = connection.execute(
-                """
-                SELECT last_event_sequence FROM replay_hedge_input_projection
-                WHERE run_id = ? AND source_kind = 'SIMULATION'
-                """,
-                (run_id,),
-            ).fetchone()
-            if simulation is None:
-                raise TypeError("HEDGE simulation projection is missing")
-            return public_cursors, int(simulation["last_event_sequence"])
-
-        public_cursors, simulation_cursor = await self.store.run_extension_read(read)
+        public_cursors, simulation_cursor = await self._projection_cursors(run_id)
         candidates = [
             event.event_time_ms
             for event in public
@@ -3052,30 +3029,7 @@ class HedgeInputArchiveManager:
             if runtime_snapshot is None
             else runtime_snapshot
         )
-
-        def read(connection: sqlite3.Connection) -> tuple[dict[str, int], int]:
-            public_cursors = {
-                str(row["track_id"]): int(row["last_event_sequence"])
-                for row in connection.execute(
-                    """
-                    SELECT track_id, last_event_sequence
-                    FROM replay_hedge_track_public_projection WHERE run_id = ?
-                    """,
-                    (run_id,),
-                ).fetchall()
-            }
-            simulation_row = connection.execute(
-                """
-                SELECT last_event_sequence FROM replay_hedge_input_projection
-                WHERE run_id = ? AND source_kind = 'SIMULATION'
-                """,
-                (run_id,),
-            ).fetchone()
-            if simulation_row is None:
-                raise TypeError("HEDGE simulation projection is missing")
-            return public_cursors, int(simulation_row["last_event_sequence"])
-
-        public_cursors, simulation_cursor = await self.store.run_extension_read(read)
+        public_cursors, simulation_cursor = await self._projection_cursors(run_id)
         return tuple(
             sorted(
                 (
@@ -3100,6 +3054,71 @@ class HedgeInputArchiveManager:
                 ),
             )
         )
+
+    async def events_through(
+        self,
+        *,
+        run_id: str,
+        target_actual_time_ms: int,
+        runtime_snapshot: HedgeInputRuntimeSnapshot | None = None,
+    ) -> tuple[HedgeInputEvent, ...]:
+        """Return every unconsumed event through one inclusive actual-time bound."""
+
+        public, simulation = (
+            await self._runtime_events(run_id)
+            if runtime_snapshot is None
+            else runtime_snapshot
+        )
+        public_cursors, simulation_cursor = await self._projection_cursors(run_id)
+        return tuple(
+            sorted(
+                (
+                    event
+                    for event in (*public, *simulation)
+                    if (
+                        event.event_sequence
+                        > (
+                            public_cursors.get(event.track_id, 0)
+                            if event.source_kind == "PUBLIC"
+                            and event.track_id is not None
+                            else simulation_cursor
+                        )
+                        and event.event_time_ms <= target_actual_time_ms
+                    )
+                ),
+                key=lambda event: (
+                    event.event_time_ms,
+                    event.event_phase,
+                    event.stable_track_id,
+                    event.event_sequence,
+                ),
+            )
+        )
+
+    async def _projection_cursors(self, run_id: str) -> tuple[dict[str, int], int]:
+        def read(connection: sqlite3.Connection) -> tuple[dict[str, int], int]:
+            public_cursors = {
+                str(row["track_id"]): int(row["last_event_sequence"])
+                for row in connection.execute(
+                    """
+                    SELECT track_id, last_event_sequence
+                    FROM replay_hedge_track_public_projection WHERE run_id = ?
+                    """,
+                    (run_id,),
+                ).fetchall()
+            }
+            simulation_row = connection.execute(
+                """
+                SELECT last_event_sequence FROM replay_hedge_input_projection
+                WHERE run_id = ? AND source_kind = 'SIMULATION'
+                """,
+                (run_id,),
+            ).fetchone()
+            if simulation_row is None:
+                raise TypeError("HEDGE simulation projection is missing")
+            return public_cursors, int(simulation_row["last_event_sequence"])
+
+        return await self.store.run_extension_read(read)
 
     async def audit_run(self, run_id: str) -> dict[str, object]:
         """Independently rebuild the pinned input proof, cursors, and receipts."""

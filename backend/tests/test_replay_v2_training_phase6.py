@@ -862,11 +862,16 @@ async def _risk_service(
     path: Path,
     *,
     symbols: tuple[str, ...] = ("BTCUSDT",),
+    bar_prices: list[str] | None = None,
+    leading_bars: int = 0,
+    now_ms: int = NOW_MS,
 ) -> ReplayService:
     repository = ImmutableReplayHistoryFake()
-    prices = ["100", "101", "102", "103", "104", "50"] + ["50"] * 14
+    prices = bar_prices or (
+        ["100", "101", "102", "103", "104", "50"] + ["50"] * 14
+    )
     rows = [
-        make_bar(START_MS + index * INTERVAL_MS, price=price)
+        make_bar(START_MS + (index - leading_bars) * INTERVAL_MS, price=price)
         for index, price in enumerate(prices)
     ]
     for market_type in ("spot", "futures"):
@@ -882,9 +887,9 @@ async def _risk_service(
             replay_historical_book_enabled=True,
             replay_historical_book_max_archive_bytes=64 * 1024 * 1024,
         ),
-        store=ReplaySQLiteStore(path, now_ms=lambda: NOW_MS),
+        store=ReplaySQLiteStore(path, now_ms=lambda: now_ms),
         repository=repository,
-        now_ms=lambda: NOW_MS,
+        now_ms=lambda: now_ms,
         session_id_factory=SessionIdFactory("risk-adapter"),
         training_run_id_factory=SessionIdFactory("risk-run"),
         native_intervals=lambda _identity: ("1m",),

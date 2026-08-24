@@ -12,7 +12,10 @@ from typing import cast
 from app.replay.canonical import canonical_json, canonical_sha256
 from app.replay.archive_pins import persisted_bar_archive_reference
 from app.replay.broker.models import decimal_to_string
-from app.replay.internal_commands import REVEALED_REFERENCE_CLOSE_FIDELITY
+from app.replay.internal_commands import (
+    REVEALED_REFERENCE_CLOSE_FIDELITY,
+    InternalCommandType,
+)
 from app.replay.period_summary import (
     EncodedPeriodSummaryCandidate,
     MAX_PERIOD_SUMMARY_CANDIDATES,
@@ -13257,6 +13260,36 @@ class TrainingRunStore:
             "portfolio": portfolio,
         }
 
+    async def get_market_track_heads(self, run_id: str) -> list[dict[str, object]]:
+        """Read operational track state without materializing audit history."""
+
+        def read(connection: sqlite3.Connection) -> tuple[sqlite3.Row, ...] | None:
+            run = connection.execute(
+                "SELECT 1 FROM replay_training_run WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if run is None:
+                return None
+            return tuple(
+                connection.execute(
+                    """
+                    SELECT * FROM replay_training_market_track
+                    WHERE run_id = ?
+                    ORDER BY stable_ordinal, track_id
+                    """,
+                    (run_id,),
+                ).fetchall()
+            )
+
+        rows = await self.base_store.run_extension_read(read)
+        if rows is None:
+            raise TrainingRunError(
+                "TRAINING_RUN_NOT_FOUND",
+                "training run does not exist",
+                status_code=404,
+            )
+        return [self._market_track_from_row(row) for row in rows]
+
     async def get_market_track(
         self,
         run_id: str,
@@ -15692,6 +15725,8 @@ class TrainingRunStore:
         self,
         run_id: str,
         events: Sequence[StableMarketEvent],
+        *,
+        materialize_portfolio: bool = True,
     ) -> dict[str, object]:
         ordered = stable_market_event_order(events)
 
@@ -15830,6 +15865,7 @@ class TrainingRunStore:
                 connection,
                 run_id=run_id,
                 now_ms=now_ms,
+                materialize_portfolio=materialize_portfolio,
             )
             selected = connection.execute(
                 """
@@ -15863,12 +15899,18 @@ class TrainingRunStore:
 
         return await self.base_store.run_extension_write(write)
 
-    async def checkpoint_market_tracks(self, run_id: str) -> dict[str, object]:
+    async def checkpoint_market_tracks(
+        self,
+        run_id: str,
+        *,
+        materialize_portfolio: bool = True,
+    ) -> dict[str, object]:
         def write(connection: sqlite3.Connection) -> dict[str, object]:
             return self._insert_global_checkpoint(
                 connection,
                 run_id=run_id,
                 now_ms=self.base_store._validated_now_ms(),
+                materialize_portfolio=materialize_portfolio,
             )
 
         return await self.base_store.run_extension_write(write)
@@ -17225,6 +17267,27 @@ class TrainingRunStore:
             total_maintenance = Decimal(0)
             maintenance_tier_extrapolated_positions = 0
             liquidation_tier_extrapolated_positions = 0
+            active_rule_rows: dict[str, sqlite3.Row] = {}
+            if position_items:
+                active_rule_rows = {
+                    str(row["track_id"]): row
+                    for row in connection.execute(
+                        """
+                        SELECT rule.track_id, rule.revision, rule.rule_json,
+                               rule.rule_hash, rule.fidelity
+                        FROM replay_training_instrument_rule AS rule
+                        JOIN (
+                            SELECT track_id, MAX(revision) AS revision
+                            FROM replay_training_instrument_rule
+                            WHERE run_id = ? GROUP BY track_id
+                        ) AS latest
+                          ON latest.track_id = rule.track_id
+                         AND latest.revision = rule.revision
+                        WHERE rule.run_id = ?
+                        """,
+                        (run_id, run_id),
+                    ).fetchall()
+                }
             for item in position_items:
                 if not isinstance(item, Mapping):
                     continue
@@ -17232,15 +17295,7 @@ class TrainingRunStore:
                 if not isinstance(position, Mapping):
                     continue
                 track_id = str(item["track_id"])
-                rule_row = connection.execute(
-                    """
-                    SELECT revision, rule_json, rule_hash, fidelity
-                    FROM replay_training_instrument_rule
-                    WHERE run_id = ? AND track_id = ?
-                    ORDER BY revision DESC LIMIT 1
-                    """,
-                    (run_id, track_id),
-                ).fetchone()
+                rule_row = active_rule_rows.get(track_id)
                 if rule_row is None:
                     raise TypeError("active instrument rule is missing")
                 rule = InstrumentRule.from_mapping(
@@ -17497,40 +17552,56 @@ class TrainingRunStore:
                 (run_id,),
             ).fetchall()
         )
-        leg_accounting: list[dict[str, object]] = []
-        for leg in position_leg_rows:
-            track_id = str(leg["track_id"])
-            position_side = str(leg["position_side"])
-            matching_entries: list[sqlite3.Row] = []
-            fee_entries = 0
-            mutation_entries = 0
+        ledger_entries_by_leg: dict[tuple[str, str], list[sqlite3.Row]] = {}
+        funding_counts: dict[tuple[str, str], int] = {}
+        if position_leg_rows:
             for entry in ledger_rows:
-                if entry["track_id"] != track_id:
+                raw_track_id = entry["track_id"]
+                if raw_track_id is None:
                     continue
                 metadata = json.loads(str(entry["metadata_json"]))
                 if not isinstance(metadata, Mapping):
                     raise TypeError("contract ledger metadata is invalid")
-                if metadata.get("position_side") != position_side:
+                raw_position_side = metadata.get("position_side")
+                if not isinstance(raw_position_side, str):
                     continue
-                matching_entries.append(entry)
-                if entry["kind"] == "TRADING_FEE":
-                    fee_entries += 1
-                if entry["kind"] in {
+                ledger_entries_by_leg.setdefault(
+                    (str(raw_track_id), raw_position_side), []
+                ).append(entry)
+            funding_counts = {
+                (
+                    str(row["track_id"]),
+                    str(row["position_side"]),
+                ): int(row["entry_count"])
+                for row in connection.execute(
+                    """
+                    SELECT track_id, position_side, COUNT(*) AS entry_count
+                    FROM replay_training_hedge_funding_settlement
+                    WHERE run_id = ? GROUP BY track_id, position_side
+                    """,
+                    (run_id,),
+                ).fetchall()
+            }
+        leg_accounting: list[dict[str, object]] = []
+        for leg in position_leg_rows:
+            track_id = str(leg["track_id"])
+            position_side = str(leg["position_side"])
+            matching_entries = ledger_entries_by_leg.get(
+                (track_id, position_side), []
+            )
+            fee_entries = sum(
+                entry["kind"] == "TRADING_FEE" for entry in matching_entries
+            )
+            mutation_entries = sum(
+                entry["kind"]
+                in {
                     "POSITION_MUTATION",
                     "POSITION_ACCOUNTING_MUTATION",
                     "MARGIN_MUTATION",
-                }:
-                    mutation_entries += 1
-            funding_count = int(
-                connection.execute(
-                    """
-                    SELECT COUNT(*)
-                    FROM replay_training_hedge_funding_settlement
-                    WHERE run_id = ? AND track_id = ? AND position_side = ?
-                    """,
-                    (run_id, track_id, position_side),
-                ).fetchone()[0]
+                }
+                for entry in matching_entries
             )
+            funding_count = funding_counts.get((track_id, position_side), 0)
             last_entry = matching_entries[-1] if matching_entries else None
             leg_accounting.append(
                 {
@@ -17978,12 +18049,224 @@ class TrainingRunStore:
             )
 
     @classmethod
+    def _contract_portfolio_checkpoint_commitment(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+        initial_equity: str,
+        tracks: list[dict[str, object]],
+    ) -> dict[str, object]:
+        """Commit current account heads without replaying immutable audit history."""
+
+        account = connection.execute(
+            """
+            SELECT account_model, margin_mode, funding_mode, fixed_funding_rate,
+                   funding_interval_ms, next_funding_time_ms, overlay_cash,
+                   isolated_margin_json, status, fidelity, ledger_tail_hash
+            FROM replay_training_contract_account WHERE run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        if account is None or str(account["account_model"]) != CONTRACT_ACCOUNT_MODEL:
+            projection = cls._portfolio_projection(
+                initial_equity=initial_equity,
+                tracks=tracks,
+            )
+            payload = {
+                "schema_version": "replay.training.portfolio-checkpoint-head.v1",
+                "account_model": (
+                    None if account is None else str(account["account_model"])
+                ),
+                "projection_hash": canonical_sha256(projection),
+            }
+            return {**payload, "commitment_hash": canonical_sha256(payload)}
+
+        try:
+            isolated_margin = json.loads(str(account["isolated_margin_json"]))
+        except json.JSONDecodeError as exc:
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "contract account isolated margin JSON is invalid",
+                status_code=503,
+            ) from exc
+        if not isinstance(isolated_margin, dict):
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "contract account isolated margin JSON is invalid",
+                status_code=503,
+            )
+
+        active_orders: list[dict[str, object]] = []
+        for row in connection.execute(
+            """
+            SELECT track_id, order_id, order_json, rule_revision
+            FROM replay_training_contract_order
+            WHERE run_id = ?
+              AND json_extract(order_json, '$.status')
+                  IN ('OPEN', 'PARTIALLY_FILLED')
+            ORDER BY track_id, order_id
+            """,
+            (run_id,),
+        ).fetchall():
+            try:
+                order = json.loads(str(row["order_json"]))
+            except json.JSONDecodeError as exc:
+                raise TrainingRunError(
+                    "TRAINING_RUN_STORAGE_DEGRADED",
+                    "contract order JSON is invalid",
+                    status_code=503,
+                ) from exc
+            if not isinstance(order, dict):
+                raise TrainingRunError(
+                    "TRAINING_RUN_STORAGE_DEGRADED",
+                    "contract order JSON is invalid",
+                    status_code=503,
+                )
+            order_head = {
+                "track_id": str(row["track_id"]),
+                "order_id": str(row["order_id"]),
+                "rule_revision": int(row["rule_revision"]),
+                "order": order,
+            }
+            active_orders.append(
+                {
+                    "track_id": order_head["track_id"],
+                    "order_id": order_head["order_id"],
+                    "component_hash": canonical_sha256(order_head),
+                }
+            )
+
+        component_rows = connection.execute(
+            """
+            SELECT component_kind, component_id, revision, component_hash
+            FROM (
+                SELECT 'POSITION_LEG' AS component_kind,
+                       track_id || ':' || position_side AS component_id,
+                       component_revision AS revision,
+                       component_hash
+                FROM replay_training_position_leg WHERE run_id = ?
+                UNION ALL
+                SELECT 'MARGIN_BUCKET', bucket_id, component_revision,
+                       component_hash
+                FROM replay_training_margin_bucket WHERE run_id = ?
+                UNION ALL
+                SELECT 'HEDGE_INPUT', source_kind, last_event_sequence,
+                       component_hash
+                FROM replay_hedge_input_projection WHERE run_id = ?
+                UNION ALL
+                SELECT 'TRACK_PUBLIC_INPUT', track_id, last_event_sequence,
+                       component_hash
+                FROM replay_hedge_track_public_projection WHERE run_id = ?
+                UNION ALL
+                SELECT 'INSURANCE_FUND', asset, revision, ledger_tail_hash
+                FROM replay_training_insurance_fund WHERE run_id = ?
+                UNION ALL
+                SELECT 'RISK_SNAPSHOT', snapshot_id, snapshot_sequence,
+                       component_hash
+                FROM replay_training_risk_snapshot
+                WHERE run_id = ? AND snapshot_sequence = (
+                    SELECT MAX(snapshot_sequence)
+                    FROM replay_training_risk_snapshot WHERE run_id = ?
+                )
+                UNION ALL
+                SELECT 'LIQUIDATION_CASE', case_id, case_sequence,
+                       component_hash
+                FROM replay_training_liquidation_case
+                WHERE run_id = ? AND state NOT IN (
+                    'COMPLETED', 'BANKRUPT', 'FAILED_CLOSED',
+                    'RECOVERED_AFTER_CANCEL'
+                )
+                UNION ALL
+                SELECT 'HISTORICAL_BOOK', track_id,
+                       COALESCE(last_update_id, 0), book_hash
+                FROM replay_historical_book_projection WHERE run_id = ?
+            )
+            ORDER BY component_kind, component_id
+            """,
+            (run_id,) * 9,
+        ).fetchall()
+        components = [
+            {
+                "kind": str(row["component_kind"]),
+                "id": str(row["component_id"]),
+                "revision": int(row["revision"]),
+                "hash": row["component_hash"],
+            }
+            for row in component_rows
+        ]
+
+        rule_heads = [
+            {
+                "track_id": str(row["track_id"]),
+                "revision": int(row["revision"]),
+                "rule_hash": str(row["rule_hash"]),
+            }
+            for row in connection.execute(
+                """
+                SELECT rule.track_id, rule.revision, rule.rule_hash
+                FROM replay_training_instrument_rule AS rule
+                JOIN (
+                    SELECT track_id, MAX(revision) AS revision
+                    FROM replay_training_instrument_rule
+                    WHERE run_id = ? GROUP BY track_id
+                ) AS latest
+                  ON latest.track_id = rule.track_id
+                 AND latest.revision = rule.revision
+                WHERE rule.run_id = ? ORDER BY rule.track_id
+                """,
+                (run_id, run_id),
+            ).fetchall()
+        ]
+        fee_policy = connection.execute(
+            """
+            SELECT policy.revision, policy.policy_hash, extension.component_hash
+            FROM replay_training_fee_policy AS policy
+            LEFT JOIN replay_training_fee_policy_extension AS extension
+              ON extension.run_id = policy.run_id
+             AND extension.revision = policy.revision
+            WHERE policy.run_id = ? ORDER BY policy.revision DESC LIMIT 1
+            """,
+            (run_id,),
+        ).fetchone()
+        payload = {
+            "schema_version": "replay.training.portfolio-checkpoint-head.v1",
+            "account": {
+                "account_model": str(account["account_model"]),
+                "margin_mode": str(account["margin_mode"]),
+                "funding_mode": str(account["funding_mode"]),
+                "fixed_funding_rate": account["fixed_funding_rate"],
+                "funding_interval_ms": account["funding_interval_ms"],
+                "next_funding_time_ms": account["next_funding_time_ms"],
+                "overlay_cash": str(account["overlay_cash"]),
+                "isolated_margin": isolated_margin,
+                "status": str(account["status"]),
+                "fidelity": str(account["fidelity"]),
+                "ledger_tail_hash": str(account["ledger_tail_hash"]),
+            },
+            "active_orders": active_orders,
+            "components": components,
+            "instrument_rules": rule_heads,
+            "fee_policy": (
+                None
+                if fee_policy is None
+                else {
+                    "revision": int(fee_policy["revision"]),
+                    "policy_hash": str(fee_policy["policy_hash"]),
+                    "extension_hash": fee_policy["component_hash"],
+                }
+            ),
+        }
+        return {**payload, "commitment_hash": canonical_sha256(payload)}
+
+    @classmethod
     def _insert_global_checkpoint(
         cls,
         connection: sqlite3.Connection,
         *,
         run_id: str,
         now_ms: int,
+        materialize_portfolio: bool = True,
     ) -> dict[str, object]:
         cls._assert_run_segments_ready(
             connection,
@@ -18017,11 +18300,25 @@ class TrainingRunStore:
                 "training run does not exist",
                 status_code=404,
             )
-        portfolio = cls._contract_portfolio_projection(
-            connection,
-            run_id=run_id,
-            initial_equity=str(run["initial_equity"]),
-            tracks=tracks,
+        portfolio = (
+            cls._contract_portfolio_projection(
+                connection,
+                run_id=run_id,
+                initial_equity=str(run["initial_equity"]),
+                tracks=tracks,
+            )
+            if materialize_portfolio
+            else None
+        )
+        portfolio_commitment = (
+            None
+            if materialize_portfolio
+            else cls._contract_portfolio_checkpoint_commitment(
+                connection,
+                run_id=run_id,
+                initial_equity=str(run["initial_equity"]),
+                tracks=tracks,
+            )
         )
         if any(not isinstance(track.get("cursor"), Mapping) for track in tracks):
             raise TrainingRunError(
@@ -18042,29 +18339,63 @@ class TrainingRunStore:
         virtual_time_ms = next(iter(cursor_times))
         tail = connection.execute(
             """
-            SELECT COALESCE(MAX(global_sequence), 0) AS sequence
-            FROM replay_training_global_event WHERE run_id = ?
+            SELECT global_sequence AS sequence, ordering_hash
+            FROM replay_training_global_event
+            WHERE run_id = ? ORDER BY global_sequence DESC LIMIT 1
             """,
             (run_id,),
         ).fetchone()
         checkpoint_row = connection.execute(
             """
-            SELECT COALESCE(MAX(checkpoint_sequence), 0) + 1 AS sequence
-            FROM replay_training_global_checkpoint WHERE run_id = ?
+            SELECT checkpoint_sequence, global_state_hash
+            FROM replay_training_global_checkpoint
+            WHERE run_id = ? ORDER BY checkpoint_sequence DESC LIMIT 1
             """,
             (run_id,),
         ).fetchone()
-        checkpoint_sequence = int(checkpoint_row["sequence"])
-        state = {
+        checkpoint_sequence = (
+            1 if checkpoint_row is None else int(checkpoint_row["checkpoint_sequence"]) + 1
+        )
+        global_event_sequence = 0 if tail is None else int(tail["sequence"])
+        state: dict[str, object] = {
             "ordering_version": GLOBAL_ORDERING_VERSION,
-            "global_event_sequence": int(tail["sequence"]),
+            "global_event_sequence": global_event_sequence,
             "global_virtual_time_ms": virtual_time_ms,
             "tracks": tracks,
-            "portfolio": portfolio,
         }
+        if materialize_portfolio:
+            state["portfolio"] = portfolio
+            checkpoint_schema_version = "replay.training.global-checkpoint.v1"
+            stored_payload: dict[str, object] = {
+                "tracks": tracks,
+                "portfolio": portfolio,
+            }
+        else:
+            state.update(
+                {
+                    "global_event_tail_hash": (
+                        None if tail is None else str(tail["ordering_hash"])
+                    ),
+                    "previous_global_state_hash": (
+                        None
+                        if checkpoint_row is None
+                        else str(checkpoint_row["global_state_hash"])
+                    ),
+                    "portfolio_commitment": portfolio_commitment,
+                }
+            )
+            checkpoint_schema_version = "replay.training.global-checkpoint.v2"
+            stored_payload = {
+                "schema_version": checkpoint_schema_version,
+                "tracks": tracks,
+                "global_event_sequence": global_event_sequence,
+                "global_event_tail_hash": state["global_event_tail_hash"],
+                "previous_global_state_hash": state["previous_global_state_hash"],
+                "portfolio_commitment": portfolio_commitment,
+            }
         state_hash = canonical_sha256(
             {
-                "schema_version": "replay.training.global-checkpoint.v1",
+                "schema_version": checkpoint_schema_version,
                 "state": state,
             }
         )
@@ -18082,7 +18413,7 @@ class TrainingRunStore:
                 GLOBAL_ORDERING_VERSION,
                 virtual_time_ms,
                 state_hash,
-                canonical_json({"tracks": tracks, "portfolio": portfolio}),
+                canonical_json(stored_payload),
                 now_ms,
             ),
         )
@@ -18110,12 +18441,16 @@ class TrainingRunStore:
             """,
             (virtual_time_ms, now_ms, now_ms, run_id),
         )
-        return {
+        result = {
             "checkpoint_sequence": checkpoint_sequence,
             "global_virtual_time_ms": virtual_time_ms,
             "global_state_hash": state_hash,
-            "portfolio": portfolio,
         }
+        if materialize_portfolio:
+            result["portfolio"] = portfolio
+        else:
+            result["portfolio_commitment"] = portfolio_commitment
+        return result
 
     @classmethod
     def _insert_contract_account(
@@ -21064,6 +21399,26 @@ class TrainingRunStore:
         }
 
     @classmethod
+    def _append_only_projection_delta(
+        cls,
+        current: object,
+        previous: object,
+    ) -> Sequence[object] | object:
+        """Return only an immutable sequence tail, with a safe full fallback."""
+
+        if not isinstance(current, (list, tuple)) or not isinstance(
+            previous, (list, tuple)
+        ):
+            return current
+        common_length = min(len(current), len(previous))
+        if common_length and current[common_length - 1] != previous[common_length - 1]:
+            return current
+        if len(current) < len(previous):
+            # Contract projections intentionally retain immutable historical rows.
+            return ()
+        return current[len(previous) :]
+
+    @classmethod
     def _sync_contract_components(
         cls,
         connection: sqlite3.Connection,
@@ -21074,6 +21429,7 @@ class TrainingRunStore:
         source_sequence: int,
         component_state: Mapping[str, object],
         now_ms: int,
+        previous_component_state: Mapping[str, object] | None = None,
         fork_parent_run_id: str | None = None,
         fork_parent_track_id: str | None = None,
     ) -> None:
@@ -21104,6 +21460,29 @@ class TrainingRunStore:
         rule = InstrumentRule.from_mapping(json.loads(str(rule_row["rule_json"])))
         rule_revision = int(rule_row["revision"])
         raw_orders = component_state.get("orders")
+        previous_orders = (
+            previous_component_state.get("orders")
+            if previous_component_state is not None
+            else None
+        )
+        if isinstance(raw_orders, (list, tuple)) and isinstance(
+            previous_orders, (list, tuple)
+        ):
+            if raw_orders == previous_orders:
+                raw_orders = ()
+            else:
+                previous_orders_by_id = {
+                    str(raw["order_id"]): raw
+                    for raw in previous_orders
+                    if isinstance(raw, Mapping)
+                    and isinstance(raw.get("order_id"), str)
+                }
+                raw_orders = tuple(
+                    raw
+                    for raw in raw_orders
+                    if not isinstance(raw, Mapping)
+                    or previous_orders_by_id.get(str(raw.get("order_id"))) != raw
+                )
         if isinstance(raw_orders, (list, tuple)):
             for raw in raw_orders:
                 if not isinstance(raw, Mapping) or not isinstance(
@@ -21132,6 +21511,11 @@ class TrainingRunStore:
                 )
 
         raw_fills = component_state.get("fills")
+        if previous_component_state is not None:
+            raw_fills = cls._append_only_projection_delta(
+                raw_fills,
+                previous_component_state.get("fills"),
+            )
         overlay_delta = Decimal(0)
         hedge_fee_changed = False
         if isinstance(raw_fills, (list, tuple)):
@@ -21295,7 +21679,19 @@ class TrainingRunStore:
 
         raw_ledger = component_state.get("ledger")
         entries = raw_ledger.get("entries") if isinstance(raw_ledger, Mapping) else None
-        if isinstance(entries, list):
+        previous_ledger = (
+            previous_component_state.get("ledger")
+            if previous_component_state is not None
+            else None
+        )
+        previous_entries = (
+            previous_ledger.get("entries")
+            if isinstance(previous_ledger, Mapping)
+            else None
+        )
+        if previous_component_state is not None:
+            entries = cls._append_only_projection_delta(entries, previous_entries)
+        if isinstance(entries, (list, tuple)):
             for raw in entries:
                 if not isinstance(raw, Mapping) or raw.get("account") != "CASH":
                     continue
@@ -23079,23 +23475,6 @@ class TrainingRunStore:
                 else min(lowest_mark, revealed_event_low)
             )
 
-        raw_closed = component_state.get("closed_trades")
-        closed_by_fill = (
-            {
-                str(item["fill_id"]): item
-                for item in raw_closed
-                if isinstance(raw_closed, (list, tuple))
-                and isinstance(item, Mapping)
-                and isinstance(item.get("fill_id"), str)
-                and (
-                    required_position_side is None
-                    or item.get("position_side") == required_position_side
-                )
-            }
-            if isinstance(raw_closed, (list, tuple))
-            else {}
-        )
-
         fill_rows = connection.execute(
             """
             SELECT fill_id, fill_json FROM replay_training_contract_fill
@@ -23104,6 +23483,21 @@ class TrainingRunStore:
             """,
             (run_id, track_id, f"fill-{last_fill_ordinal:010d}"),
         ).fetchall()
+        raw_closed = component_state.get("closed_trades")
+        closed_by_fill = (
+            {
+                str(item["fill_id"]): item
+                for item in raw_closed
+                if isinstance(item, Mapping)
+                and isinstance(item.get("fill_id"), str)
+                and (
+                    required_position_side is None
+                    or item.get("position_side") == required_position_side
+                )
+            }
+            if fill_rows and isinstance(raw_closed, (list, tuple))
+            else {}
+        )
 
         def bind_plan(order_id: str, opening_quantity: Decimal) -> None:
             plan = connection.execute(
@@ -23400,6 +23794,7 @@ class TrainingRunStore:
         session_id: str,
         state: Mapping[str, object],
         component_state: Mapping[str, object],
+        previous_component_state: Mapping[str, object] | None,
         now_ms: int,
     ) -> None:
         cursor = state.get("cursor")
@@ -23596,15 +23991,6 @@ class TrainingRunStore:
         )
         run_id = str(track["run_id"])
         track_id = str(track["track_id"])
-        self._sync_contract_components(
-            connection,
-            run_id=run_id,
-            track_id=track_id,
-            virtual_time_ms=int(cursor["virtual_time_ms"]),
-            source_sequence=int(state["source_sequence"]),
-            component_state=component_state,
-            now_ms=now_ms,
-        )
         revealed_event_low: Decimal | None = None
         revealed_event_high: Decimal | None = None
         latest_mutation = connection.execute(
@@ -23614,6 +24000,42 @@ class TrainingRunStore:
             """,
             (session_id,),
         ).fetchone()
+        previous_component_hash = (
+            previous_component_state.get("state_hash")
+            if previous_component_state is not None
+            else None
+        )
+        component_hash = component_state.get("state_hash")
+        if isinstance(previous_component_hash, str) and isinstance(
+            component_hash, str
+        ):
+            component_projection_changed = previous_component_hash != component_hash
+        else:
+            projection_component_keys = (
+                "orders",
+                "fills",
+                "ledger",
+                "position",
+                "account",
+                "bar_builder",
+                "closed_trades",
+                "warnings",
+            )
+            component_projection_changed = previous_component_state is None or any(
+                previous_component_state.get(key) != component_state.get(key)
+                for key in projection_component_keys
+            )
+        if component_projection_changed:
+            self._sync_contract_components(
+                connection,
+                run_id=run_id,
+                track_id=track_id,
+                virtual_time_ms=int(cursor["virtual_time_ms"]),
+                source_sequence=int(state["source_sequence"]),
+                component_state=component_state,
+                now_ms=now_ms,
+                previous_component_state=previous_component_state,
+            )
         if (
             latest_mutation is not None
             and latest_mutation["kind"] == "source_event"
@@ -23649,15 +24071,16 @@ class TrainingRunStore:
                     or revealed_event_high < revealed_event_low
                 ):
                     raise TypeError("revealed source event price range is invalid")
-        self._sync_trade_results_projection(
-            connection,
-            run_id=run_id,
-            track_id=track_id,
-            component_state=component_state,
-            revealed_event_low=revealed_event_low,
-            revealed_event_high=revealed_event_high,
-            now_ms=now_ms,
-        )
+        if component_projection_changed:
+            self._sync_trade_results_projection(
+                connection,
+                run_id=run_id,
+                track_id=track_id,
+                component_state=component_state,
+                revealed_event_low=revealed_event_low,
+                revealed_event_high=revealed_event_high,
+                now_ms=now_ms,
+            )
         account_history = connection.execute(
             """
             SELECT account_data_mode, status
@@ -23685,14 +24108,29 @@ class TrainingRunStore:
             if not isinstance(mutation_payload, Mapping):
                 raise TypeError("latest replay command mutation must be an object")
             mutation_command_type = mutation_payload.get("type")
-        coordinated_hedge_advance = str(
-            track["position_mode"]
-        ) == "HEDGE" and mutation_command_type in {
-            "step",
-            "advance_by",
-            "_training_fast_forward_final_state",
-        }
-        if not coordinated_hedge_advance:
+        source_event_in_coordinated_hedge_advance = (
+            latest_mutation is not None
+            and latest_mutation["kind"] == "source_event"
+            and latest_mutation["source_sequence"] is not None
+            and int(latest_mutation["source_sequence"]) == int(state["source_sequence"])
+        )
+        # A HEDGE TrainingRun owns every adapter source-event clock. Its
+        # coordinator applies all same-time market/account/input phases and
+        # performs the one authoritative funding/liquidation pass afterwards.
+        # Internal liquidation closes are likewise followed immediately by
+        # commit_liquidation_execution(), which performs the durable recheck.
+        coordinated_hedge_mutation = str(track["position_mode"]) == "HEDGE" and (
+            source_event_in_coordinated_hedge_advance
+            or mutation_command_type
+            in {
+                "step",
+                "advance_by",
+                InternalCommandType.EXECUTE_HISTORICAL_BOOK_CLOSE.value,
+                InternalCommandType.EXECUTE_REVEALED_REFERENCE_CLOSE.value,
+                "_training_fast_forward_final_state",
+            }
+        )
+        if component_projection_changed and not coordinated_hedge_mutation:
             self._settle_contract_funding(
                 connection,
                 run_id=run_id,

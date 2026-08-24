@@ -382,6 +382,11 @@ async def test_high_rate_hedge_playback_yields_control_lock_after_each_bar(
                 "while holding the pause acknowledgement lock"
             )
 
+        async def forbidden_full_track_projection(_run_id: str) -> dict[str, object]:
+            raise AssertionError(
+                "ordered playback must use lightweight track heads"
+            )
+
         async def controlled_advance(**kwargs):
             advance_kwargs.append(dict(kwargs))
             result = await original_advance(**kwargs)
@@ -398,6 +403,11 @@ async def test_high_rate_hedge_playback_yields_control_lock_after_each_bar(
             service.training,
             "audit_account",
             forbidden_account_audit,
+        )
+        monkeypatch.setattr(
+            service.training.store,
+            "get_market_tracks",
+            forbidden_full_track_projection,
         )
         monkeypatch.setattr(
             "app.replay.training.service.discrete_playback_units",
@@ -482,6 +492,11 @@ async def test_manual_hedge_bar_step_keeps_exhaustive_audit_off_hot_path(
         original_audit = service.training.audit_account
         advance_kwargs: list[dict[str, object]] = []
         original_advance = service.training._advance_adapter_to
+        original_get_market_tracks = service.training.store.get_market_tracks
+        original_detect_liquidations = (
+            service.training.store._detect_contract_liquidations
+        )
+        liquidation_detection_count = 0
 
         async def forbidden_account_audit(_run_id: str) -> dict[str, object]:
             raise AssertionError(
@@ -492,8 +507,41 @@ async def test_manual_hedge_bar_step_keeps_exhaustive_audit_off_hot_path(
             advance_kwargs.append(dict(kwargs))
             return await original_advance(**kwargs)
 
+        async def forbidden_full_track_projection(_run_id: str) -> dict[str, object]:
+            raise AssertionError(
+                "manual BAR advance preflight must use lightweight track heads"
+            )
+
+        async def forbidden_exact_account_finalize(
+            _run_id: str,
+            **_kwargs: object,
+        ) -> None:
+            raise AssertionError(
+                "sandbox HEDGE advance must not open an exact-account transaction"
+            )
+
+        def observed_detect_liquidations(*args, **kwargs):
+            nonlocal liquidation_detection_count
+            liquidation_detection_count += 1
+            return original_detect_liquidations(*args, **kwargs)
+
         monkeypatch.setattr(service.training, "audit_account", forbidden_account_audit)
         monkeypatch.setattr(service.training, "_advance_adapter_to", observed_advance)
+        monkeypatch.setattr(
+            service.training.store,
+            "get_market_tracks",
+            forbidden_full_track_projection,
+        )
+        monkeypatch.setattr(
+            service.training.store,
+            "finalize_account_history",
+            forbidden_exact_account_finalize,
+        )
+        monkeypatch.setattr(
+            service.training.store,
+            "_detect_contract_liquidations",
+            observed_detect_liquidations,
+        )
         advanced = await _send(
             service,
             run_id=run_id,
@@ -509,9 +557,15 @@ async def test_manual_hedge_bar_step_keeps_exhaustive_audit_off_hot_path(
         )
         assert advanced["data"]["consumed"] >= 1
         assert len(advance_kwargs) == 1
+        assert liquidation_detection_count == 1
 
         # The independent proof remains exact and callable outside the command
         # hot path; moving it does not weaken tamper detection or accounting.
+        monkeypatch.setattr(
+            service.training.store,
+            "get_market_tracks",
+            original_get_market_tracks,
+        )
         audit = await original_audit(run_id)
         assert audit["status"] == "PASS", audit["differences"]
     finally:
@@ -599,6 +653,10 @@ async def test_empty_hedge_display_step_batches_marks_without_losing_audit_event
             "finalize_hedge_inputs",
             observed_finalize,
         )
+        monkeypatch.setattr(
+            "app.replay.training.service.STABLE_ORDER_RESPONSE_EVENTS",
+            64,
+        )
         before = await service.get_session(session_id)
         before_sequence = int(before["snapshot"]["cursor"]["source_sequence"])
         advanced = await _send(
@@ -627,7 +685,8 @@ async def test_empty_hedge_display_step_batches_marks_without_losing_audit_event
         assert max(hedge_apply_sizes) >= 50
         assert hedge_finalize_count <= 6
         stable_order = advanced["data"]["stable_order"]
-        assert len(stable_order) >= consumed * 2 - 1
+        assert len(stable_order) == 64
+        assert advanced["data"]["stable_order_truncated"] is True
         assert stable_order == sorted(
             stable_order,
             key=lambda item: (
@@ -683,6 +742,139 @@ async def test_empty_hedge_display_step_batches_marks_without_losing_audit_event
                 recovered_audit["hedge_input_audit"]["proof_hash"]
                 == expected_proof
             )
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_empty_multitrack_hedge_display_step_batches_aligned_bars(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    forward_bars = 260
+    database = tmp_path / "phase9-empty-multitrack-display-batch.db"
+    service = await _risk_service(
+        database,
+        symbols=("BTCUSDT", "ETHUSDT"),
+        bar_prices=["100"] * (forward_bars + 1_000),
+        leading_bars=500,
+        now_ms=1_710_000_000_000 + 700 * 60_000,
+        event_buffer_size=512,
+    )
+    try:
+        catalog = await service.catalog(
+            warmup_bars=2,
+            horizon_ms=forward_bars * 60_000,
+            quality_mode="exact",
+            blind_mode=False,
+        )
+        base = replace(
+            _sandbox_request(await _request(service), initial_equity="10000"),
+            catalog_epoch=str(catalog["catalog_epoch"]),
+            market_type="futures",
+            display_interval="4h",
+            forward_cache_ms=forward_bars * 60_000,
+        )
+        request = await prepare_hedge_request(
+            service,
+            base,
+            root=tmp_path,
+            prefix="phase9-empty-multitrack-display-batch",
+            mark_prices=["100"] * (forward_bars + 1),
+            required_symbols=["BTCUSDT", "ETHUSDT"],
+            book_mode="OFF",
+        )
+        await import_hedge_track_public_inputs(
+            service,
+            request,
+            root=tmp_path,
+            prefix="phase9-empty-multitrack-display-batch",
+            symbol="ETHUSDT",
+            mark_prices=["200"] * (forward_bars + 1),
+        )
+        assert service.training is not None
+        created = await service.training.create_run(request)
+        run_id = str(created["run"]["run_id"])
+        session_id = str(created["run"]["adapter_session_id"])
+        await _send(
+            service,
+            run_id=run_id,
+            session_id=session_id,
+            command_id="phase9-empty-multitrack-display-batch-add",
+            command_type=ReplayV2CommandType.ADD_TRACK,
+            payload={
+                "exchange": "binance",
+                "market_type": "futures",
+                "symbol": "ETHUSDT",
+                "settlement_asset": "USDT",
+                "subscription_tier": "FULL",
+            },
+        )
+        await _acquire(
+            service,
+            run_id=run_id,
+            selected_session_id=session_id,
+            command_id="phase9-empty-multitrack-display-batch-acquire",
+        )
+
+        adapter_batch_sizes: list[int | None] = []
+        original_advance = service.training._advance_adapter_to
+
+        async def observed_advance(**kwargs):
+            adapter_batch_sizes.append(kwargs.get("final_state_max_events"))
+            return await original_advance(**kwargs)
+
+        monkeypatch.setattr(service.training, "_advance_adapter_to", observed_advance)
+        before = await service.get_session(session_id)
+        before_sequence = int(before["snapshot"]["cursor"]["source_sequence"])
+        advanced = await _send(
+            service,
+            run_id=run_id,
+            session_id=session_id,
+            command_id="phase9-empty-multitrack-display-batch-step",
+            command_type=ReplayV2CommandType.ADVANCE,
+            payload={
+                "basis": "DISPLAY_BAR",
+                "count": 1,
+                "display_interval": "4h",
+                "viewer_revision": 0,
+            },
+        )
+        after = await service.get_session(session_id)
+        consumed = int(after["snapshot"]["cursor"]["source_sequence"]) - before_sequence
+
+        assert 200 <= consumed <= 240
+        assert adapter_batch_sizes == [None, None, 512, 512]
+        assert len(advanced["data"]["stable_order"]) == 512
+        assert advanced["data"]["stable_order_truncated"] is True
+        with sqlite3.connect(database) as connection:
+            compact_checkpoint = json.loads(
+                connection.execute(
+                    """
+                    SELECT tracks_json FROM replay_training_global_checkpoint
+                    WHERE run_id = ? ORDER BY checkpoint_sequence DESC LIMIT 1
+                    """,
+                    (run_id,),
+                ).fetchone()[0]
+            )
+        assert compact_checkpoint["schema_version"] == (
+            "replay.training.global-checkpoint.v2"
+        )
+        assert "portfolio" not in compact_checkpoint
+        assert compact_checkpoint["portfolio_commitment"]["schema_version"] == (
+            "replay.training.portfolio-checkpoint-head.v1"
+        )
+        assert compact_checkpoint["portfolio_commitment"]["commitment_hash"].startswith(
+            "sha256:"
+        )
+        assert compact_checkpoint["previous_global_state_hash"].startswith("sha256:")
+        projection = await service.training.get_market_tracks(run_id)
+        assert projection["portfolio"]["positions"] == []
+        assert {
+            track["cursor"]["virtual_time_ms"] for track in projection["tracks"]
+        } == {int(after["snapshot"]["cursor"]["virtual_time_ms"])}
+        audit = await service.training.audit_account(run_id)
+        assert audit["status"] == "PASS", audit["differences"]
+        assert audit["hedge_input_audit"]["status"] == "PASS"
     finally:
         await service.shutdown(step_timeout=1.0)
 

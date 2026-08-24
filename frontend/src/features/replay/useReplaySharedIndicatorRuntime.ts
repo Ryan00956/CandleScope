@@ -36,6 +36,7 @@ import {
 import type {
   KlineBar,
 } from "../market-data/marketDataTypes.js";
+import type { WindowDelta } from "../market-data/klineContracts.js";
 import { t } from "../../i18n/index.js";
 import { useLocale } from "../../i18n/useLocale.js";
 import type {
@@ -59,6 +60,50 @@ const DISABLED_CAPABILITIES = Object.freeze([
   "unsafe-script",
 ] as const);
 export const REPLAY_INDICATOR_PLAYING_REFRESH_MS = 500;
+
+interface ReplaySeriesProjectionRevision {
+  readonly version: number;
+  readonly structureRevision: number;
+}
+
+function requiresFullOrderFlowProjection(delta: WindowDelta): boolean {
+  return delta.type !== "tick"
+    || delta.appended === true
+    || Number(delta.trimmedLeft || 0) !== 0
+    || Number(delta.trimmedRight || 0) !== 0;
+}
+
+function createReplaySeriesProjectionRevisionSource(
+  seriesStore: ReplayViewerRuntime["seriesStore"],
+): {
+  getSnapshot(): ReplaySeriesProjectionRevision;
+  subscribe(listener: () => void): () => void;
+} {
+  let snapshot: ReplaySeriesProjectionRevision = Object.freeze({
+    version: Number(seriesStore.version),
+    structureRevision: 0,
+  });
+  return {
+    getSnapshot: () => {
+      const version = Number(seriesStore.version);
+      if (version !== snapshot.version) {
+        snapshot = Object.freeze({
+          version,
+          structureRevision: snapshot.structureRevision + 1,
+        });
+      }
+      return snapshot;
+    },
+    subscribe: (listener) => seriesStore.subscribe((delta) => {
+      snapshot = Object.freeze({
+        version: Number(seriesStore.version),
+        structureRevision: snapshot.structureRevision
+          + (requiresFullOrderFlowProjection(delta) ? 1 : 0),
+      });
+      listener();
+    }),
+  };
+}
 
 interface ReplayOrderFlowPreferences {
   cvd: {
@@ -253,31 +298,36 @@ export function useReplaySharedIndicatorRuntime(
 ): ReplaySharedIndicatorRuntime {
   const locale = useLocale();
   const seriesStore = viewer.seriesStore;
-  const subscribeSeries = useCallback((listener: () => void) => (
-    seriesStore.subscribe(() => listener())
-  ), [seriesStore]);
-  const getSeriesRevision = useCallback(
-    () => Number(seriesStore.version),
+  const seriesRevisionSource = useMemo(
+    () => createReplaySeriesProjectionRevisionSource(seriesStore),
     [seriesStore],
   );
-  const seriesRevision = useSyncExternalStore(
-    subscribeSeries,
-    getSeriesRevision,
-    getSeriesRevision,
+  const seriesProjectionRevision = useSyncExternalStore(
+    seriesRevisionSource.subscribe,
+    seriesRevisionSource.getSnapshot,
+    seriesRevisionSource.getSnapshot,
   );
+  const seriesRevision = seriesProjectionRevision.version;
+  const seriesStructureRevision = seriesProjectionRevision.structureRevision;
   const cursorMs = runtime.store.virtualTimeMs;
   const playing = runtime.store.state === "PLAYING";
   const latestIndicatorBoundaryRef = useRef({
     revision: seriesRevision,
+    structureRevision: seriesStructureRevision,
     cursorMs,
   });
   const [sampledIndicatorBoundary, setSampledIndicatorBoundary] = useState({
     revision: seriesRevision,
+    structureRevision: seriesStructureRevision,
     cursorMs,
   });
   const indicatorRefreshTimerRef = useRef<ReturnType<typeof globalThis.setTimeout> | null>(null);
   useEffect(() => {
-    latestIndicatorBoundaryRef.current = { revision: seriesRevision, cursorMs };
+    latestIndicatorBoundaryRef.current = {
+      revision: seriesRevision,
+      structureRevision: seriesStructureRevision,
+      cursorMs,
+    };
     if (!playing) {
       if (indicatorRefreshTimerRef.current !== null) {
         globalThis.clearTimeout(indicatorRefreshTimerRef.current);
@@ -304,7 +354,7 @@ export function useReplaySharedIndicatorRuntime(
           : latest
       ));
     }, REPLAY_INDICATOR_PLAYING_REFRESH_MS);
-  }, [cursorMs, playing, seriesRevision]);
+  }, [cursorMs, playing, seriesRevision, seriesStructureRevision]);
   useEffect(() => () => {
     if (indicatorRefreshTimerRef.current !== null) {
       globalThis.clearTimeout(indicatorRefreshTimerRef.current);
@@ -317,6 +367,9 @@ export function useReplaySharedIndicatorRuntime(
   const indicatorRevision = playing
     ? sampledIndicatorBoundary.revision
     : seriesRevision;
+  const indicatorStructureRevision = playing
+    ? sampledIndicatorBoundary.structureRevision
+    : seriesStructureRevision;
   const indicatorCursorMs = playing
     ? sampledIndicatorBoundary.cursorMs
     : cursorMs;
@@ -396,22 +449,28 @@ export function useReplaySharedIndicatorRuntime(
   useEffect(() => {
     saveReplayOrderFlowPreferences(resolvedRunScope, orderFlowPreferences);
   }, [orderFlowPreferences, resolvedRunScope]);
-  const [orderFlowProjection] = useState(createKlineOrderFlowProjectionMemo);
+  const orderFlowProjection = useMemo(
+    () => {
+      void sourceScopeKey;
+      return createKlineOrderFlowProjectionMemo();
+    },
+    [sourceScopeKey],
+  );
   const orderFlowEnabled = orderFlowPreferences.cvd.added
     || orderFlowPreferences.delta.added;
   const projectedOrderFlowPanes = useMemo(() => orderFlowProjection.project({
     bars: indicatorBars,
     enabled: orderFlowEnabled,
-    forceFull: true,
+    forceFull: false,
     interval,
     intervalSeconds: seriesStore.intervalSeconds,
-    structureRevision: indicatorRevision,
+    structureRevision: indicatorStructureRevision,
   }), [
     indicatorBars,
     interval,
     orderFlowEnabled,
     orderFlowProjection,
-    indicatorRevision,
+    indicatorStructureRevision,
     seriesStore.intervalSeconds,
   ]);
   const visibleOrderFlowPanes = useMemo(() => (

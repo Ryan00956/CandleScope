@@ -29,7 +29,14 @@ _WAL_AUTOCHECKPOINT_PAGES = 256
 _DATASET_OBJECT_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 ExtensionWriter = Callable[[sqlite3.Connection, int], None]
 SessionSummaryWriter = Callable[
-    [sqlite3.Connection, str, Mapping[str, object], Mapping[str, object], int],
+    [
+        sqlite3.Connection,
+        str,
+        Mapping[str, object],
+        Mapping[str, object],
+        Mapping[str, object] | None,
+        int,
+    ],
     None,
 ]
 SessionMutationWriter = Callable[
@@ -444,6 +451,7 @@ class ReplaySQLiteStore:
         checkpoint: bytes | None,
         source_events: Sequence[Mapping[str, object]] = (),
         component_state: Mapping[str, object] | None = None,
+        previous_component_state: Mapping[str, object] | None = None,
     ) -> StoredCommand:
         command_payload = dict(command)
         fingerprint = canonical_sha256(command_payload)
@@ -528,8 +536,12 @@ class ReplaySQLiteStore:
                     now_ms=now,
                 )
             self._update_session(connection, session_id, state, now_ms=now)
-            self._replace_component_rows(
-                connection, session_id, component_state or {}, now_ms=now
+            self._sync_component_rows(
+                connection,
+                session_id,
+                component_state or {},
+                previous_component_state=previous_component_state,
+                now_ms=now,
             )
             self._write_session_mutation(
                 connection,
@@ -546,6 +558,7 @@ class ReplaySQLiteStore:
                 session_id,
                 state,
                 component_state or {},
+                previous_component_state=previous_component_state,
                 now_ms=now,
             )
             self._write_session_review(
@@ -576,6 +589,7 @@ class ReplaySQLiteStore:
         session_state: Mapping[str, object],
         checkpoint: bytes | None,
         component_state: Mapping[str, object] | None = None,
+        previous_component_state: Mapping[str, object] | None = None,
     ) -> None:
         event_payload = dict(source_event)
         now = self._validated_now_ms()
@@ -680,14 +694,19 @@ class ReplaySQLiteStore:
                     now_ms=now,
                 )
             self._update_session(connection, session_id, state, now_ms=now)
-            self._replace_component_rows(
-                connection, session_id, component_state or {}, now_ms=now
+            self._sync_component_rows(
+                connection,
+                session_id,
+                component_state or {},
+                previous_component_state=previous_component_state,
+                now_ms=now,
             )
             self._write_session_summary(
                 connection,
                 session_id,
                 state,
                 component_state or {},
+                previous_component_state=previous_component_state,
                 now_ms=now,
             )
             self._write_session_review(
@@ -711,6 +730,7 @@ class ReplaySQLiteStore:
         session_state: Mapping[str, object],
         checkpoint: bytes,
         component_state: Mapping[str, object] | None = None,
+        previous_component_state: Mapping[str, object] | None = None,
     ) -> None:
         now = self._validated_now_ms()
 
@@ -747,14 +767,19 @@ class ReplaySQLiteStore:
                 now_ms=now,
             )
             self._update_session(connection, session_id, state, now_ms=now)
-            self._replace_component_rows(
-                connection, session_id, component_state or {}, now_ms=now
+            self._sync_component_rows(
+                connection,
+                session_id,
+                component_state or {},
+                previous_component_state=previous_component_state,
+                now_ms=now,
             )
             self._write_session_summary(
                 connection,
                 session_id,
                 state,
                 component_state or {},
+                previous_component_state=previous_component_state,
                 now_ms=now,
             )
             self._write_session_review(
@@ -1266,11 +1291,19 @@ class ReplaySQLiteStore:
         state: Mapping[str, object],
         component_state: Mapping[str, object],
         *,
+        previous_component_state: Mapping[str, object] | None,
         now_ms: int,
     ) -> None:
         writer = self._session_summary_writer
         if writer is not None:
-            writer(connection, session_id, state, component_state, now_ms)
+            writer(
+                connection,
+                session_id,
+                state,
+                component_state,
+                previous_component_state,
+                now_ms,
+            )
 
     def _write_session_mutation(
         self,
@@ -1465,6 +1498,102 @@ class ReplaySQLiteStore:
             and bool(durable["accepting"]) is candidate["accepting"]
             and durable["degraded_reason"] == candidate["degraded_reason"]
         )
+
+    @staticmethod
+    def _component_records(
+        component_state: Mapping[str, object],
+        *,
+        key: str,
+        id_field: str,
+    ) -> tuple[Mapping[str, object], ...]:
+        if key == "ledger":
+            ledger = component_state.get("ledger")
+            values = ledger.get("entries", ()) if isinstance(ledger, Mapping) else ()
+            field_name = "component_state.ledger.entries"
+        else:
+            values = component_state.get(key, ())
+            field_name = f"component_state.{key}"
+        if not isinstance(values, (list, tuple)):
+            raise TypeError(f"{field_name} must be an array")
+        records: list[Mapping[str, object]] = []
+        identifiers: set[str] = set()
+        for value in values:
+            if not isinstance(value, Mapping) or id_field not in value:
+                raise TypeError(f"{field_name} contains an invalid record")
+            identifier = str(value[id_field])
+            if identifier in identifiers:
+                raise ValueError(f"{field_name} contains a duplicate {id_field}")
+            identifiers.add(identifier)
+            records.append(value)
+        return tuple(records)
+
+    @classmethod
+    def _sync_component_rows(
+        cls,
+        connection: sqlite3.Connection,
+        session_id: str,
+        component_state: Mapping[str, object],
+        *,
+        previous_component_state: Mapping[str, object] | None,
+        now_ms: int,
+    ) -> None:
+        if previous_component_state is None:
+            cls._replace_component_rows(
+                connection,
+                session_id,
+                component_state,
+                now_ms=now_ms,
+            )
+            return
+        collections = (
+            ("replay_order", "orders", "order_id", "updated_at_ms"),
+            ("replay_fill", "fills", "fill_id", "created_at_ms"),
+            ("replay_ledger_entry", "ledger", "entry_id", "created_at_ms"),
+            ("replay_journal_entry", "journal", "entry_id", "created_at_ms"),
+        )
+        for table, key, id_field, timestamp_field in collections:
+            previous_records = cls._component_records(
+                previous_component_state,
+                key=key,
+                id_field=id_field,
+            )
+            current_records = cls._component_records(
+                component_state,
+                key=key,
+                id_field=id_field,
+            )
+            previous_by_id = {
+                str(record[id_field]): record for record in previous_records
+            }
+            current_by_id = {str(record[id_field]): record for record in current_records}
+            removed_ids = previous_by_id.keys() - current_by_id.keys()
+            if removed_ids:
+                connection.executemany(
+                    f"DELETE FROM {table} WHERE session_id = ? AND {id_field} = ?",
+                    ((session_id, identifier) for identifier in sorted(removed_ids)),
+                )
+            changed_records = tuple(
+                record
+                for record in current_records
+                if previous_by_id.get(str(record[id_field])) != record
+            )
+            if changed_records:
+                connection.executemany(
+                    f"INSERT INTO {table}(session_id, {id_field}, payload_json, "
+                    f"{timestamp_field}) VALUES (?, ?, ?, ?) "
+                    f"ON CONFLICT(session_id, {id_field}) DO UPDATE SET "
+                    "payload_json = excluded.payload_json, "
+                    f"{timestamp_field} = excluded.{timestamp_field}",
+                    (
+                        (
+                            session_id,
+                            str(record[id_field]),
+                            canonical_json(record),
+                            now_ms,
+                        )
+                        for record in changed_records
+                    ),
+                )
 
     @staticmethod
     def _replace_component_rows(

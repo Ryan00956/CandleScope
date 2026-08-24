@@ -495,6 +495,157 @@ async def test_failed_component_projection_rolls_back_entire_command_transaction
         await store.close()
 
 
+async def test_component_projection_delta_only_writes_changes_and_truncates_rewind(
+    tmp_path: Path,
+) -> None:
+    store = await _created_store(tmp_path / "component-delta.db")
+    before = {
+        "orders": [{"order_id": "order-1", "status": "OPEN"}],
+        "fills": [{"fill_id": "fill-1", "price": "100"}],
+        "ledger": {
+            "entries": [
+                {"entry_id": "led-1", "amount": "100"},
+                {"entry_id": "led-2", "amount": "-100"},
+            ]
+        },
+        "journal": [{"entry_id": "note-1", "text": "watch"}],
+    }
+    after = {
+        "orders": [{"order_id": "order-1", "status": "FILLED"}],
+        "fills": [
+            {"fill_id": "fill-1", "price": "100"},
+            {"fill_id": "fill-2", "price": "101"},
+        ],
+        "ledger": {
+            "entries": [
+                {"entry_id": "led-1", "amount": "100"},
+                {"entry_id": "led-2", "amount": "-100"},
+                {"entry_id": "led-3", "amount": "101"},
+                {"entry_id": "led-4", "amount": "-101"},
+            ]
+        },
+        "journal": [{"entry_id": "note-1", "text": "watch"}],
+    }
+    first_now = 1_800_000_000_000
+    second_now = first_now + 1
+    rewind_now = first_now + 2
+    try:
+        await store.commit_command(
+            session_id="session-1",
+            command={
+                "protocol": "replay.v1",
+                "command_id": "component-seed",
+                "client_instance_id": "tab-1",
+                "expected_revision": 0,
+                "type": "step",
+                "payload": {"count": 1},
+            },
+            accepted=True,
+            result={"ok": True},
+            error_code=None,
+            error_message=None,
+            error_details={},
+            session_state=_state(revision=1, command_log_offset=1),
+            checkpoint=b"component-seed",
+            component_state=before,
+        )
+        with sqlite3.connect(store.path) as connection:
+            original_rows = {
+                table: connection.execute(
+                    f"SELECT rowid, payload_json, {timestamp} FROM {table} "
+                    f"WHERE session_id = ? ORDER BY rowid",
+                    ("session-1",),
+                ).fetchall()
+                for table, timestamp in (
+                    ("replay_order", "updated_at_ms"),
+                    ("replay_fill", "created_at_ms"),
+                    ("replay_ledger_entry", "created_at_ms"),
+                    ("replay_journal_entry", "created_at_ms"),
+                )
+            }
+
+        store._now_ms = lambda: second_now  # noqa: SLF001
+        await store.commit_command(
+            session_id="session-1",
+            command={
+                "protocol": "replay.v1",
+                "command_id": "component-append",
+                "client_instance_id": "tab-1",
+                "expected_revision": 1,
+                "type": "step",
+                "payload": {"count": 1},
+            },
+            accepted=True,
+            result={"ok": True},
+            error_code=None,
+            error_message=None,
+            error_details={},
+            session_state=_state(revision=2, command_log_offset=2),
+            checkpoint=b"component-append",
+            component_state=after,
+            previous_component_state=before,
+        )
+        with sqlite3.connect(store.path) as connection:
+            order_rows = connection.execute(
+                "SELECT rowid, payload_json, updated_at_ms FROM replay_order "
+                "WHERE session_id = ? ORDER BY rowid",
+                ("session-1",),
+            ).fetchall()
+            fill_rows = connection.execute(
+                "SELECT rowid, payload_json, created_at_ms FROM replay_fill "
+                "WHERE session_id = ? ORDER BY rowid",
+                ("session-1",),
+            ).fetchall()
+            ledger_rows = connection.execute(
+                "SELECT rowid, payload_json, created_at_ms FROM replay_ledger_entry "
+                "WHERE session_id = ? ORDER BY rowid",
+                ("session-1",),
+            ).fetchall()
+            journal_rows = connection.execute(
+                "SELECT rowid, payload_json, created_at_ms FROM replay_journal_entry "
+                "WHERE session_id = ? ORDER BY rowid",
+                ("session-1",),
+            ).fetchall()
+        assert order_rows[0][0] == original_rows["replay_order"][0][0]
+        assert order_rows[0][2] == second_now
+        assert fill_rows[0] == original_rows["replay_fill"][0]
+        assert fill_rows[1][2] == second_now
+        assert ledger_rows[:2] == original_rows["replay_ledger_entry"]
+        assert [row[2] for row in ledger_rows[2:]] == [second_now, second_now]
+        assert journal_rows == original_rows["replay_journal_entry"]
+
+        store._now_ms = lambda: rewind_now  # noqa: SLF001
+        await store.commit_state(
+            session_id="session-1",
+            kind="rewind-test",
+            payload={"reason": "test"},
+            session_state=_state(revision=3, command_log_offset=2),
+            checkpoint=b"component-rewind",
+            component_state=before,
+            previous_component_state=after,
+        )
+        with sqlite3.connect(store.path) as connection:
+            assert connection.execute(
+                "SELECT COUNT(*) FROM replay_fill WHERE session_id = ?",
+                ("session-1",),
+            ).fetchone() == (1,)
+            assert connection.execute(
+                "SELECT COUNT(*) FROM replay_ledger_entry WHERE session_id = ?",
+                ("session-1",),
+            ).fetchone() == (2,)
+            rewound_order = connection.execute(
+                "SELECT payload_json, updated_at_ms FROM replay_order "
+                "WHERE session_id = ?",
+                ("session-1",),
+            ).fetchone()
+        assert rewound_order == (
+            '{"order_id":"order-1","status":"OPEN"}',
+            rewind_now,
+        )
+    finally:
+        await store.close()
+
+
 async def test_source_event_commit_is_atomic_and_exact_retry_is_a_noop(
     tmp_path: Path,
 ) -> None:

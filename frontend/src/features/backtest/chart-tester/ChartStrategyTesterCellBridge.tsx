@@ -644,7 +644,7 @@ export default function ChartStrategyTesterCellBridge({
     inFlightRef.current = task;
   }, [cancelPendingAutoRun, cellId, workspaceId]);
 
-  const handleOpenAdvanced = useCallback(() => {
+  const openResearch = useCallback((entryTask: "PRECISE_EXECUTION" | "PARAMETER_ROBUSTNESS") => {
     if (advancedOpening) return;
     if (!attachment) {
       window.location.assign("/backtest.html");
@@ -663,6 +663,7 @@ export default function ChartStrategyTesterCellBridge({
         resolution,
         activeRunId: runtimeState.activeRunId,
         baselineRunId: runtimeState.baselineRunId,
+        entryTask,
       });
     } catch (reason) {
       setResultError(reason instanceof Error ? reason.message : String(reason));
@@ -686,6 +687,8 @@ export default function ChartStrategyTesterCellBridge({
     session,
     workspaceId,
   ]);
+  const handleOpenAdvanced = useCallback(() => openResearch("PRECISE_EXECUTION"), [openResearch]);
+  const handleOpenBatchStudy = useCallback(() => openResearch("PARAMETER_ROBUSTNESS"), [openResearch]);
 
   if (!active || !panelOpen || !bottomPanelHost) return null;
   return createPortal(
@@ -717,6 +720,7 @@ export default function ChartStrategyTesterCellBridge({
       onResumeObserving={handleResumeObserving}
       onSourceDirty={() => setSourceDiagnostics([])}
       onOpenAdvanced={handleOpenAdvanced}
+      onOpenBatchStudy={handleOpenBatchStudy}
       onClose={onClosePanel}
     />,
     bottomPanelHost,

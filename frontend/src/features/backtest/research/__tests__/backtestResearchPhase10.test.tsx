@@ -57,7 +57,7 @@ test("five research tasks expose only their declared shared panel composition", 
   assert.equal(backtestResearchHasPanel("PARAMETER_ROBUSTNESS", "STUDY"), true);
   assert.equal(backtestResearchHasPanel("PARAMETER_ROBUSTNESS", "EXECUTION"), false);
   assert.equal(backtestResearchHasPanel("PYTHON_MODEL", "DATA"), false);
-  assert.deepEqual(backtestResearchPanels("REPLAY_REVIEW"), ["RUN", "RESULTS"]);
+  assert.deepEqual(backtestResearchPanels("REPLAY_REVIEW"), ["RUN", "REPLAY", "RESULTS"]);
 });
 
 test("task home renders five functional task entries without mounting a chart", () => {
@@ -146,10 +146,12 @@ test("quick tester launch context carries IDs and frozen selection without sourc
     resolution: null,
     activeRunId: result.run.run_id,
     baselineRunId: "bt_baseline_12345678",
+    entryTask: "PARAMETER_ROBUSTNESS",
   });
   assert.equal(payload.latest_run_id, result.run.run_id);
   assert.deepEqual(payload.range, { mode: "CUSTOM", start_time_ms: 1000, end_time_ms: 2000 });
   assert.equal("source" in payload, false);
+  assert.equal(payload.entry_task, "PARAMETER_ROBUSTNESS");
   assert.equal(backtestResearchContextHref("brc_context_12345678"), "/backtest.html?context=brc_context_12345678");
 });
 
@@ -178,6 +180,7 @@ test("research context API posts payload and re-reads by opaque ID", async () =>
       dataset_identity: context.dataset_identity,
       latest_run_id: context.latest_run_id,
       baseline_run_id: context.baseline_run_id,
+      entry_task: "PARAMETER_ROBUSTNESS" as const,
     };
     await api.createResearchLaunchContext(input);
     await api.getResearchLaunchContext(context.context_id);

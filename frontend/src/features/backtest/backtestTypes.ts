@@ -47,6 +47,7 @@ export interface BacktestResearchLaunchContext {
   dataset_identity: BacktestResearchDatasetIdentity | null;
   latest_run_id: string | null;
   baseline_run_id: string | null;
+  entry_task?: "PRECISE_EXECUTION" | "PARAMETER_ROBUSTNESS" | "PYTHON_MODEL" | "MULTI_MARKET" | "REPLAY_REVIEW" | null;
   created_at_ms: number;
 }
 

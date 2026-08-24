@@ -16,7 +16,7 @@ const TASK_PANELS: Readonly<Record<BacktestResearchTask, readonly BacktestResear
   PARAMETER_ROBUSTNESS: ["STRATEGY", "DATA", "STUDY", "RESULTS"],
   PYTHON_MODEL: ["STRATEGY", "EXECUTION", "RUN", "RESULTS"],
   MULTI_MARKET: ["STRATEGY", "DATA", "RUN", "RESULTS"],
-  REPLAY_REVIEW: ["RUN", "RESULTS"],
+  REPLAY_REVIEW: ["RUN", "REPLAY", "RESULTS"],
 };
 
 export function backtestResearchPanels(task: BacktestResearchTask): readonly BacktestResearchPanel[] {

@@ -1,6 +1,6 @@
 # CandleScope 图表脚本快测与高级策略研究 UX 逐步执行方案
 
-> 状态：`PHASE_9_COMPLETE`
+> 状态：`PHASE_11_COMPLETE`
 >
 > 2026-08-24 Phase 0 自动化、公开 API、浏览器、bundle、单/四图与 lease 基线已通过；
 > 四个同视口视觉合同稿已经用户人工产品评审批准。Phase 1 已提取 typed backtest client、Run
@@ -1543,6 +1543,9 @@ Phase 6 结束即形成独立的“首次可用快测”里程碑：用户已经
 关闭 `VITE_BACKTEST_RESEARCH_ENABLED` 并启用 legacy workbench flag；现有 Run/Study 数据不变。
 
 ## Phase 11：高级能力迁移、Study 与回放复盘
+
+实施状态（2026-08-24）：`COMPLETE`。实现与验证证据见
+[`docs/evidence/BACKTEST_CHART_FIRST_PHASE11_EXECUTION_20260824_zh.md`](evidence/BACKTEST_CHART_FIRST_PHASE11_EXECUTION_20260824_zh.md)。
 
 ### 目标
 

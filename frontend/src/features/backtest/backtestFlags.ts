@@ -47,6 +47,18 @@ export function isBacktestResearchEnabled(
   return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
 }
 
+export function isBacktestResearchAdvancedEnabled(
+  env: Record<string, string | boolean | undefined> = import.meta.env as Record<
+    string,
+    string | boolean | undefined
+  >,
+): boolean {
+  const raw = String(env.VITE_BACKTEST_RESEARCH_ADVANCED_ENABLED ?? "0")
+    .trim()
+    .toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+
 export function isBacktestLegacyWorkbenchEnabled(
   env: Record<string, string | boolean | undefined> = import.meta.env as Record<
     string,

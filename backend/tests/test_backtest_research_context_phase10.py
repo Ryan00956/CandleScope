@@ -107,8 +107,19 @@ def test_research_context_http_round_trip_and_validation(tmp_path: Path) -> None
         capabilities = client.get("/api/v1/backtests/capabilities")
         assert capabilities.status_code == 200
         assert capabilities.json()["runtime_mode"] == "LOCAL_OFFLINE"
-        created = client.post("/api/v1/backtests/research/contexts", json=_context())
+        assert capabilities.json()["flags"]["BACKTEST_REPLAY_TRAINING_AVAILABLE"] is False
+        api.state.replay_service = type(
+            "ReplayServiceProbe", (), {"training": object()}
+        )()
+        assert client.get("/api/v1/backtests/capabilities").json()["flags"][
+            "BACKTEST_REPLAY_TRAINING_AVAILABLE"
+        ] is True
+        created = client.post(
+            "/api/v1/backtests/research/contexts",
+            json=_context(entry_task="PARAMETER_ROBUSTNESS"),
+        )
         assert created.status_code == 200, created.text
+        assert created.json()["entry_task"] == "PARAMETER_ROBUSTNESS"
         context_id = created.json()["context_id"]
         restored = client.get(f"/api/v1/backtests/research/contexts/{context_id}")
         assert restored.status_code == 200
@@ -118,6 +129,11 @@ def test_research_context_http_round_trip_and_validation(tmp_path: Path) -> None
             json=_context(parameters={}, extra="forbidden"),
         )
         assert invalid.status_code == 422
+        invalid_task = client.post(
+            "/api/v1/backtests/research/contexts",
+            json=_context(entry_task="NOT_A_RESEARCH_TASK"),
+        )
+        assert invalid_task.status_code == 422
         missing = client.get(
             "/api/v1/backtests/research/contexts/brc_missing_12345678"
         )

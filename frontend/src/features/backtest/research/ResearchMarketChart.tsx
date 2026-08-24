@@ -5,7 +5,7 @@ import MarketPageFrame from "../../../app/MarketPageFrame.js";
 import MarketStatusBar from "../../../app/MarketStatusBar.js";
 import MarketTopBarFrame from "../../../app/MarketTopBarFrame.js";
 import MarketWorkspaceFrame from "../../../app/MarketWorkspaceFrame.js";
-import { t } from "../../../i18n/index.js";
+import { getLocale, t } from "../../../i18n/index.js";
 import { useChartSession } from "../../chart-session/useChartSession.js";
 import type { ChartSession } from "../../chart-session/chartSessionTypes.js";
 import { useMarketDataRuntime } from "../../market-data/useMarketDataRuntime.js";
@@ -27,6 +27,7 @@ import type { BacktestResearchRuntime } from "./backtestResearchTypes.js";
 import ResearchDataPanel from "./ResearchDataPanel.js";
 import ResearchExecutionPanel from "./ResearchExecutionPanel.js";
 import ResearchResultsPanel from "./ResearchResultsPanel.js";
+import ResearchReplayPanel from "./ResearchReplayPanel.js";
 import ResearchRunPanel from "./ResearchRunPanel.js";
 import ResearchStrategyPanel from "./ResearchStrategyPanel.js";
 import ResearchStudyPanel from "./ResearchStudyPanel.js";
@@ -38,7 +39,7 @@ function sourceLabel(mode: MarketChartSourceRuntime["mode"]): string {
 }
 
 function dateLabel(value: number | null | undefined): string {
-  return value == null ? "—" : new Date(value).toLocaleString();
+  return value == null ? "—" : new Date(value).toLocaleString(getLocale());
 }
 
 export default function ResearchMarketChart({ runtime }: { runtime: BacktestResearchRuntime }) {
@@ -166,16 +167,19 @@ export default function ResearchMarketChart({ runtime }: { runtime: BacktestRese
   useEffect(() => () => markerSource?.dispose(), [markerSource]);
 
   const leftPanels = (
-    <aside className="research-left-rail" aria-label="Research setup">
+    <aside className="research-left-rail" aria-label={t("research.aria.setup")}>
       {backtestResearchHasPanel(task, "STRATEGY") && <ResearchStrategyPanel runtime={runtime} />}
       {backtestResearchHasPanel(task, "DATA") && <ResearchDataPanel runtime={runtime} />}
     </aside>
   );
   const rightPanels = (
-    <aside className="research-right-rail" aria-label="Research controls">
+    <aside className="research-right-rail" aria-label={t("research.aria.controls")}>
+      {runtime.view.operationError && <p className="research-operation-message error" role="alert">{runtime.view.operationError}</p>}
+      {runtime.view.notice && <p className="research-operation-message" role="status">{runtime.view.notice}</p>}
       {backtestResearchHasPanel(task, "EXECUTION") && <ResearchExecutionPanel runtime={runtime} />}
       {backtestResearchHasPanel(task, "RUN") && <ResearchRunPanel runtime={runtime} />}
       {backtestResearchHasPanel(task, "STUDY") && <ResearchStudyPanel runtime={runtime} />}
+      {backtestResearchHasPanel(task, "REPLAY") && <ResearchReplayPanel runtime={runtime} />}
     </aside>
   );
   const range = runtime.view.launchContext?.range;
@@ -207,7 +211,7 @@ export default function ResearchMarketChart({ runtime }: { runtime: BacktestRese
             </div>
           )}
           controls={(
-            <div className="research-source-switch" role="group" aria-label="Market chart source">
+            <div className="research-source-switch" role="group" aria-label={t("research.aria.chartSource")}>
               <button type="button" disabled={runtime.view.runtimeMode === "LOCAL_OFFLINE"} title={runtime.view.runtimeMode === "LOCAL_OFFLINE" ? t("research.source.liveOffline") : ""} data-active={runtime.view.sourceMode === "LIVE_REFERENCE"} onClick={() => runtime.actions.selectSourceMode("LIVE_REFERENCE")}>{t("research.source.live")}</button>
               <button type="button" disabled={frozenDisabled} title={frozenDisabled ? t("research.source.frozenUnavailable") : ""} data-active={runtime.view.sourceMode === "FROZEN_SNAPSHOT"} onClick={() => runtime.actions.selectSourceMode("FROZEN_SNAPSHOT")}>{t("research.source.frozen")}</button>
               <button type="button" disabled={runModeDisabled} title={runModeDisabled ? t("research.source.runUnavailable") : ""} data-active={runtime.view.sourceMode === "RUN_RESULT"} onClick={() => runtime.actions.selectSourceMode("RUN_RESULT")}>{t("research.source.run")}</button>
@@ -215,6 +219,9 @@ export default function ResearchMarketChart({ runtime }: { runtime: BacktestRese
           )}
           trailing={(
             <div className="research-top-actions">
+              <span className="research-advanced-state" data-enabled={runtime.view.advancedEnabled}>
+                {runtime.view.advancedEnabled ? t("research.advanced.on") : t("research.advanced.off")}
+              </span>
               <button type="button" onClick={runtime.actions.refresh}>{t("research.refresh")}</button>
               <a href={runtime.view.returnHref}>{t("research.return")}</a>
             </div>
@@ -301,6 +308,7 @@ export default function ResearchMarketChart({ runtime }: { runtime: BacktestRese
           dataAttributes={{
             "data-source-mode": activeSource.mode,
             "data-run-id": runtime.view.activeRun?.run_id ?? "none",
+            "data-advanced-enabled": runtime.view.advancedEnabled ? "true" : "false",
           }}
         />
       )}

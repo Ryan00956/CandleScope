@@ -293,6 +293,13 @@ class ResearchLaunchContextRequest(BaseModel):
     baseline_run_id: str | None = Field(
         default=None, pattern=r"^bt_[A-Za-z0-9_-]{8,128}$"
     )
+    entry_task: Literal[
+        "PRECISE_EXECUTION",
+        "PARAMETER_ROBUSTNESS",
+        "PYTHON_MODEL",
+        "MULTI_MARKET",
+        "REPLAY_REVIEW",
+    ] | None = None
 
 
 def _require_contract_snapshot(
@@ -352,8 +359,14 @@ def _error(exc: BacktestError) -> JSONResponse:
 def capabilities(request: Request) -> dict[str, Any]:
     try:
         payload = _service(request).capabilities()
+        flags = dict(payload.get("flags") or {})
+        replay_service = getattr(request.app.state, "replay_service", None)
+        flags["BACKTEST_REPLAY_TRAINING_AVAILABLE"] = (
+            getattr(replay_service, "training", None) is not None
+        )
         return {
             **payload,
+            "flags": flags,
             "runtime_mode": getattr(request.app.state, "runtime_mode", "LIVE"),
         }
     except BacktestError as exc:

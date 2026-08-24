@@ -13,6 +13,7 @@ export function buildBacktestResearchLaunchContext(input: {
   resolution: ChartContextResolution | null;
   activeRunId: string | null;
   baselineRunId: string | null;
+  entryTask?: BacktestResearchLaunchContextInput["entry_task"];
 }): BacktestResearchLaunchContextInput {
   const draftId = input.attachment.strategyDraftId;
   if (!draftId) throw new Error("A saved strategy draft is required before opening research.");
@@ -63,6 +64,7 @@ export function buildBacktestResearchLaunchContext(input: {
     dataset_identity: resolvedDataset,
     latest_run_id: input.result?.run.run_id ?? input.activeRunId,
     baseline_run_id: input.baselineRunId,
+    entry_task: input.entryTask ?? null,
   };
 }
 

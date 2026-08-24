@@ -171,6 +171,7 @@ export interface ChartStrategyTesterPanelProps {
   onSourceDirty(): void;
   onClose(): void;
   onOpenAdvanced?(): void;
+  onOpenBatchStudy?(): void;
 }
 
 export default function ChartStrategyTesterPanel({
@@ -200,6 +201,7 @@ export default function ChartStrategyTesterPanel({
   onSourceDirty,
   onClose,
   onOpenAdvanced,
+  onOpenBatchStudy,
 }: ChartStrategyTesterPanelProps) {
   const locale = useLocale();
   const [height, setHeight] = useState(() => loadChartStrategyPanelPreferences(cellScope).height);
@@ -838,6 +840,11 @@ export default function ChartStrategyTesterPanel({
             <div><span>{t("chartTester.settings.fidelity")}</span><strong>{currentAttachment.fidelityPreference === "FAST"
               ? t("chartTester.settings.fast")
               : t("chartTester.settings.precise")}</strong></div>
+            {onOpenBatchStudy && (
+              <button type="button" className="chart-strategy-advanced-link" onClick={onOpenBatchStudy}>
+                {t("chartTester.settings.batchStudy")}
+              </button>
+            )}
           </div>
         )}
 

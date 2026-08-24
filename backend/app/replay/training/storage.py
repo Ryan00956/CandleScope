@@ -2366,6 +2366,21 @@ class TrainingRunStore:
             if primary_track is None:
                 raise TypeError("HEDGE primary track is missing")
             primary_track_id = str(primary_track["track_id"])
+            if all(
+                event.source_kind == "PUBLIC"
+                and event.event_kind == "MARK_INDEX"
+                and event.event_phase == 30
+                and event.track_id == primary_track_id
+                for event in materialized
+            ):
+                return self._apply_hedge_public_mark_batch(
+                    connection,
+                    run_id=run_id,
+                    events=materialized,
+                    virtual_times_ms=applied_virtual_times,
+                    track_id=primary_track_id,
+                    now_ms=now_ms,
+                )
             stable: list[StableMarketEvent] = []
             for event, virtual_time_ms in zip(
                 materialized, applied_virtual_times, strict=True
@@ -2844,6 +2859,245 @@ class TrainingRunStore:
             return stable_market_event_order(stable)
 
         return await self.base_store.run_extension_write(write)
+
+    @staticmethod
+    def _apply_hedge_public_mark_batch(
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+        events: Sequence[HedgeInputEvent],
+        virtual_times_ms: Sequence[int],
+        track_id: str,
+        now_ms: int,
+    ) -> tuple[StableMarketEvent, ...]:
+        """Apply one contiguous primary-track MARK batch without per-event queries."""
+
+        projection = connection.execute(
+            """
+            SELECT * FROM replay_hedge_track_public_projection
+            WHERE run_id = ? AND track_id = ?
+            """,
+            (run_id, track_id),
+        ).fetchone()
+        if projection is None:
+            raise TrainingRunError(
+                "HEDGE_INPUT_PROJECTION_MISSING",
+                "HEDGE input projection is missing",
+                status_code=409,
+                details={"fallback_applied": False},
+            )
+        state = json.loads(str(projection["state_json"]))
+        if not isinstance(state, dict):
+            raise TypeError("HEDGE input projection state is invalid")
+        first_sequence = min(event.event_sequence for event in events)
+        last_sequence = max(event.event_sequence for event in events)
+        existing_sequences = {
+            int(row["event_sequence"])
+            for row in connection.execute(
+                """
+                SELECT event_sequence
+                FROM replay_hedge_track_public_applied_event
+                WHERE run_id = ? AND track_id = ?
+                  AND event_sequence BETWEEN ? AND ?
+                """,
+                (run_id, track_id, first_sequence, last_sequence),
+            ).fetchall()
+        }
+        projection_sequence = int(projection["last_event_sequence"])
+        projection_chain_hash = str(projection["input_chain_hash"])
+        track_applied_rows: list[tuple[object, ...]] = []
+        compatibility_applied_rows: list[tuple[object, ...]] = []
+        stable: list[StableMarketEvent] = []
+        final_event: HedgeInputEvent | None = None
+        final_virtual_time_ms: int | None = None
+
+        for event, virtual_time_ms in zip(
+            events, virtual_times_ms, strict=True
+        ):
+            stable.append(
+                StableMarketEvent(
+                    actual_event_time_ms=event.event_time_ms,
+                    event_phase=event.event_phase,
+                    market_track_stable_id=event.stable_track_id,
+                    source_sequence=event.event_sequence,
+                )
+            )
+            if event.event_sequence <= projection_sequence:
+                if event.event_sequence in existing_sequences:
+                    continue
+                raise TrainingRunError(
+                    "HEDGE_INPUT_EVENT_GAP",
+                    "HEDGE input event sequence is not contiguous",
+                    status_code=409,
+                    details={
+                        "expected_sequence": projection_sequence + 1,
+                        "actual_sequence": event.event_sequence,
+                        "fallback_applied": False,
+                    },
+                )
+            expected = projection_sequence + 1
+            if event.event_sequence != expected:
+                raise TrainingRunError(
+                    "HEDGE_INPUT_EVENT_GAP",
+                    "HEDGE input event sequence is not contiguous",
+                    status_code=409,
+                    details={
+                        "expected_sequence": expected,
+                        "actual_sequence": event.event_sequence,
+                        "fallback_applied": False,
+                    },
+                )
+            if event.previous_hash != projection_chain_hash:
+                raise TrainingRunError(
+                    "HEDGE_INPUT_EVENT_CHAIN_MISMATCH",
+                    "HEDGE input event no longer follows the pinned chain",
+                    status_code=409,
+                    details={"fallback_applied": False},
+                )
+            state["mark_index"] = dict(event.payload)
+            applied_hash = canonical_sha256(
+                {
+                    "run_id": run_id,
+                    "track_id": track_id,
+                    "virtual_time_ms": virtual_time_ms,
+                    "source_kind": event.source_kind,
+                    "source_id": event.source_id,
+                    "event_sequence": event.event_sequence,
+                    "event_hash": event.event_hash,
+                    "payload": dict(event.payload),
+                }
+            )
+            track_applied_rows.append(
+                (
+                    run_id,
+                    track_id,
+                    event.event_sequence,
+                    event.event_time_ms,
+                    event.event_phase,
+                    event.event_kind,
+                    event.component_sequence,
+                    virtual_time_ms,
+                    event.event_hash,
+                    canonical_json(event.payload),
+                    applied_hash,
+                    now_ms,
+                )
+            )
+            compatibility_hash = canonical_sha256(
+                {
+                    "run_id": run_id,
+                    "virtual_time_ms": virtual_time_ms,
+                    "source_kind": "PUBLIC",
+                    "source_id": event.source_id,
+                    "event_sequence": event.event_sequence,
+                    "event_hash": event.event_hash,
+                    "payload": dict(event.payload),
+                }
+            )
+            compatibility_applied_rows.append(
+                (
+                    run_id,
+                    event.event_sequence,
+                    event.event_time_ms,
+                    event.event_phase,
+                    event.event_kind,
+                    event.component_sequence,
+                    virtual_time_ms,
+                    event.event_hash,
+                    canonical_json(event.payload),
+                    compatibility_hash,
+                    now_ms,
+                )
+            )
+            projection_sequence = event.event_sequence
+            projection_chain_hash = event.event_hash
+            existing_sequences.add(event.event_sequence)
+            final_event = event
+            final_virtual_time_ms = virtual_time_ms
+
+        if final_event is not None and final_virtual_time_ms is not None:
+            projection_payload = {
+                "schema_version": "replay.hedge-track-public-projection.v1",
+                "run_id": run_id,
+                "track_id": track_id,
+                "last_event_sequence": final_event.event_sequence,
+                "as_of_actual_time_ms": final_event.event_time_ms,
+                "as_of_virtual_time_ms": final_virtual_time_ms,
+                "state": state,
+                "input_chain_hash": final_event.event_hash,
+            }
+            connection.execute(
+                """
+                UPDATE replay_hedge_track_public_projection
+                SET last_event_sequence = ?, as_of_actual_time_ms = ?,
+                    as_of_virtual_time_ms = ?, state_json = ?,
+                    input_chain_hash = ?, component_hash = ?, updated_at_ms = ?
+                WHERE run_id = ? AND track_id = ?
+                """,
+                (
+                    final_event.event_sequence,
+                    final_event.event_time_ms,
+                    final_virtual_time_ms,
+                    canonical_json(state),
+                    final_event.event_hash,
+                    canonical_sha256(projection_payload),
+                    now_ms,
+                    run_id,
+                    track_id,
+                ),
+            )
+            compatibility_payload = {
+                "schema_version": "replay.hedge-input-projection.v1",
+                "source_kind": "PUBLIC",
+                "last_event_sequence": final_event.event_sequence,
+                "as_of_actual_time_ms": final_event.event_time_ms,
+                "as_of_virtual_time_ms": final_virtual_time_ms,
+                "state": state,
+                "input_chain_hash": final_event.event_hash,
+            }
+            connection.execute(
+                """
+                UPDATE replay_hedge_input_projection
+                SET last_event_sequence = ?, as_of_actual_time_ms = ?,
+                    as_of_virtual_time_ms = ?, state_json = ?,
+                    input_chain_hash = ?, component_hash = ?, updated_at_ms = ?
+                WHERE run_id = ? AND source_kind = 'PUBLIC'
+                """,
+                (
+                    final_event.event_sequence,
+                    final_event.event_time_ms,
+                    final_virtual_time_ms,
+                    canonical_json(state),
+                    final_event.event_hash,
+                    canonical_sha256(compatibility_payload),
+                    now_ms,
+                    run_id,
+                ),
+            )
+        connection.executemany(
+            """
+            INSERT INTO replay_hedge_track_public_applied_event(
+                run_id, track_id, event_sequence, event_time_ms,
+                event_phase, event_kind, component_sequence,
+                applied_virtual_time_ms, source_event_hash,
+                payload_json, applied_payload_hash, created_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            track_applied_rows,
+        )
+        connection.executemany(
+            """
+            INSERT INTO replay_hedge_input_applied_event(
+                run_id, source_kind, event_sequence,
+                event_time_ms, event_phase, event_kind,
+                component_sequence, applied_virtual_time_ms,
+                source_event_hash, payload_json,
+                applied_payload_hash, created_at_ms
+            ) VALUES (?, 'PUBLIC', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            compatibility_applied_rows,
+        )
+        return stable_market_event_order(stable)
 
     @classmethod
     def _settle_hedge_funding_event(

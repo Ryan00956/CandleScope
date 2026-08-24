@@ -24,6 +24,7 @@ import type {
   ChartCellCreationMode,
   ChartCellId,
   ChartCellState,
+  ChartStrategyAttachmentRecord,
   ChartLinkGroup,
   ChartWorkspaceCellRole,
   ChartWorkspaceId,
@@ -87,6 +88,8 @@ import ChartCellCanvas from "./ChartCellCanvas.js";
 import LazyFeatureSurfaces from "./LazyFeatureSurfaces.js";
 import StatusBar from "./StatusBar.js";
 import TopBar from "./TopBar.js";
+import { CHART_STRATEGY_TESTER_ENABLED } from "../features/backtest/chart-tester/chartStrategyTesterFeature.js";
+import type { ChartStrategyTesterEntryState } from "../features/backtest/chart-tester/chartStrategyTesterUiModel.js";
 
 const ExportPanel = lazy(() => import("../features/export/ExportPanel.js"));
 const DrawingToolbar = lazy(() => {
@@ -94,6 +97,10 @@ const DrawingToolbar = lazy(() => {
   return import("../features/drawings/DrawingToolbar.js");
 });
 const RightMarketRail = lazy(() => import("./RightMarketRail.js"));
+const loadChartStrategyTesterCellBridge = () => import(
+  "../features/backtest/chart-tester/ChartStrategyTesterCellBridge.js"
+);
+const ChartStrategyTesterCellBridge = lazy(loadChartStrategyTesterCellBridge);
 let liveChartCellMountSequence = 0;
 
 export interface WorkspacePortalHosts {
@@ -102,6 +109,7 @@ export interface WorkspacePortalHosts {
   drawingToolbar: HTMLElement | null;
   rightRail: HTMLElement | null;
   featureSurfaces: HTMLElement | null;
+  bottomPanel: HTMLElement | null;
   statusBar: HTMLElement | null;
 }
 
@@ -148,6 +156,12 @@ export interface LiveChartCellProps {
   onChartSettingsChange(cellId: ChartCellId, settings: ReturnType<typeof normalizeSettings>): void;
   onPriceScaleChange(cellId: ChartCellId, value: ChartCellState["priceScale"]): void;
   onIndicatorsChange(cellId: ChartCellId, indicators: ChartCellState["indicators"]): void;
+  strategyPanelOpen: boolean;
+  onStrategyPanelOpenChange(open: boolean): void;
+  onStrategyAttachmentChange(
+    cellId: ChartCellId,
+    attachment: ChartStrategyAttachmentRecord | null,
+  ): void;
   onOpenReplayLauncher(): void;
   onActiveEnvironmentChange(cellId: ChartCellId, environment: ActiveChartEnvironment): void;
 }
@@ -184,6 +198,9 @@ function LiveChartCell({
   onChartSettingsChange,
   onPriceScaleChange,
   onIndicatorsChange,
+  strategyPanelOpen,
+  onStrategyPanelOpenChange,
+  onStrategyAttachmentChange,
   onOpenReplayLauncher,
   onActiveEnvironmentChange,
 }: LiveChartCellProps) {
@@ -193,6 +210,57 @@ function LiveChartCell({
   const linkGroupName = linkGroup ? chartLinkGroupDisplayName(linkGroup) : null;
   const sectionRef = useRef<HTMLElement | null>(null);
   const [density, setDensity] = useState<WorkspaceCellDensity>("full");
+  const strategyEntryRef = useRef<HTMLButtonElement | null>(null);
+  const strategyAttachmentKey = cell.strategyAttachment
+    ? cell.strategyAttachment.strategyDraftId ?? "__attached__"
+    : "__detached__";
+  const [strategyEntrySnapshot, setStrategyEntrySnapshot] = useState<{
+    attachmentKey: string;
+    state: ChartStrategyTesterEntryState;
+  }>(() => ({
+    attachmentKey: strategyAttachmentKey,
+    state: cell.strategyAttachment ? "editing" : "unattached",
+  }));
+  const strategyEntryState = strategyEntrySnapshot.attachmentKey === strategyAttachmentKey
+    ? strategyEntrySnapshot.state
+    : cell.strategyAttachment ? "editing" : "unattached";
+  const handleStrategyEntryStateChange = useCallback((state: ChartStrategyTesterEntryState) => {
+    setStrategyEntrySnapshot({ attachmentKey: strategyAttachmentKey, state });
+  }, [strategyAttachmentKey]);
+  const closeStrategyPanel = useCallback(() => {
+    onStrategyPanelOpenChange(false);
+    globalThis.setTimeout(() => {
+      const currentEntry = document.querySelector<HTMLButtonElement>(
+        `[data-chart-strategy-entry="${CSS.escape(cell.id)}"]`,
+      );
+      (currentEntry ?? strategyEntryRef.current)?.focus();
+    }, 0);
+  }, [cell.id, onStrategyPanelOpenChange]);
+  const handleStrategyAttachmentChange = useCallback((attachment: ChartStrategyAttachmentRecord | null) => {
+    onStrategyAttachmentChange(cell.id, attachment);
+  }, [cell.id, onStrategyAttachmentChange]);
+  const strategyEntryControl = CHART_STRATEGY_TESTER_ENABLED ? (
+    <button
+      ref={strategyEntryRef}
+      type="button"
+      className="chart-strategy-entry-button"
+      data-chart-strategy-entry={cell.id}
+      data-state={strategyEntryState}
+      aria-expanded={strategyPanelOpen}
+      aria-controls="chart-strategy-tester-panel"
+      onPointerEnter={() => { void loadChartStrategyTesterCellBridge(); }}
+      onMouseEnter={() => { void loadChartStrategyTesterCellBridge(); }}
+      onFocus={() => { void loadChartStrategyTesterCellBridge(); }}
+      onClick={() => onStrategyPanelOpenChange(!strategyPanelOpen)}
+    >
+      {t("chartTester.entry")}
+      <span>
+        {cell.strategyAttachment
+          ? `${cell.strategyAttachment.displayName} · ${t(`chartTester.entryState.${strategyEntryState}`)}`
+          : t("chartTester.entryState.unattached")}
+      </span>
+    </button>
+  ) : null;
   useLayoutEffect(() => {
     recordMultiChartCellCommit(cell.id);
   });
@@ -710,9 +778,28 @@ function LiveChartCell({
         </div>
       </section>
 
+      {CHART_STRATEGY_TESTER_ENABLED
+        && (cell.strategyAttachment !== null || (active && strategyPanelOpen)) && (
+          <Suspense fallback={null}>
+            <ChartStrategyTesterCellBridge
+              workspaceId={workspaceId}
+              cellId={cell.id}
+              session={cell.session}
+              attachment={cell.strategyAttachment}
+              active={active}
+              panelOpen={strategyPanelOpen}
+              bottomPanelHost={portalHosts.bottomPanel}
+              onAttachmentChange={handleStrategyAttachmentChange}
+              onEntryStateChange={handleStrategyEntryStateChange}
+              onClosePanel={closeStrategyPanel}
+            />
+          </Suspense>
+        )}
+
       {active && portalHosts.topBar && createPortal(
         <TopBar
           {...model.topBar}
+          identityAccessory={strategyEntryControl}
           extensionControls={(
             <>
               {workspaceControls}

@@ -30,6 +30,7 @@ export interface StrategyDraftView {
 
 export interface StrategyDraftStoreAdapter {
   load(id: string): Promise<unknown | null>;
+  list(): Promise<unknown[]>;
   save(record: StrategyDraftRecord): Promise<void>;
   remove(id: string): Promise<void>;
 }
@@ -136,6 +137,9 @@ export function createLocalStorageStrategyDraftAdapter(
       const record = readEnvelope(storage).drafts[id];
       return record ? cloneRecord(record) : null;
     },
+    async list() {
+      return Object.values(readEnvelope(storage).drafts).map(cloneRecord);
+    },
     async save(record) {
       const normalized = normalizeRecord(record);
       if (!normalized) throw new TypeError("invalid strategy draft record");
@@ -157,6 +161,9 @@ export function createMemoryStrategyDraftAdapter(): StrategyDraftStoreAdapter {
     async load(id) {
       const record = drafts.get(id);
       return record ? cloneRecord(record) : null;
+    },
+    async list() {
+      return [...drafts.values()].map(cloneRecord);
     },
     async save(record) {
       const normalized = normalizeRecord(record);
@@ -202,15 +209,45 @@ export class StrategyDraftStore {
 
   async load(id: string): Promise<StrategyDraftView> {
     if (!DRAFT_ID_PATTERN.test(id)) return this.snapshot(id);
-    const record = normalizeRecord(await this.adapter.load(id));
-    const view: StrategyDraftView = {
-      record,
-      saveState: record ? "SAVED" : "IDLE",
-      error: null,
-    };
+    const loaded = normalizeRecord(await this.adapter.load(id));
+    const current = this.views.get(id);
+    const keepCurrent = current?.record !== null
+      && current?.record !== undefined
+      && (loaded === null || current.record.revision > loaded.revision);
+    const view: StrategyDraftView = keepCurrent
+      ? {
+        record: cloneRecord(current.record!),
+        saveState: current.saveState,
+        error: current.error,
+      }
+      : {
+        record: loaded,
+        saveState: loaded ? "SAVED" : "IDLE",
+        error: null,
+      };
     this.views.set(id, view);
     this.emit(id);
     return this.snapshot(id);
+  }
+
+  async recent(limit = 8): Promise<StrategyDraftRecord[]> {
+    const boundedLimit = Number.isSafeInteger(limit) ? Math.min(50, Math.max(1, limit)) : 8;
+    await Promise.all([...this.pending.values()].map((pending) => pending.catch(() => undefined)));
+    const merged = new Map<string, StrategyDraftRecord>();
+    (await this.adapter.list())
+      .map(normalizeRecord)
+      .filter((record): record is StrategyDraftRecord => record !== null)
+      .forEach((record) => merged.set(record.id, record));
+    this.views.forEach((view) => {
+      const record = view.record;
+      if (!record) return;
+      const existing = merged.get(record.id);
+      if (!existing || record.revision > existing.revision) merged.set(record.id, record);
+    });
+    return [...merged.values()]
+      .sort((left, right) => right.updatedAt - left.updatedAt || left.id.localeCompare(right.id))
+      .slice(0, boundedLimit)
+      .map(cloneRecord);
   }
 
   save(input: SaveStrategyDraftInput): Promise<StrategyDraftRecord> {

@@ -2,10 +2,40 @@ import {
   MAIN_CHART_WINDOW_ID,
   type ChartCellId,
   type ChartCellState,
+  type ChartStrategyAttachmentRecord,
   type ChartWindowId,
   type ChartWindowState,
   type ChartWorkspaceDocument,
 } from "./chartWorkspaceTypes.js";
+
+function cloneStrategyAttachment(
+  attachment: ChartStrategyAttachmentRecord,
+): ChartStrategyAttachmentRecord {
+  return {
+    ...attachment,
+    parameters: JSON.parse(JSON.stringify(attachment.parameters)) as Record<string, unknown>,
+    customRange: attachment.customRange ? { ...attachment.customRange } : null,
+  };
+}
+
+export function updateChartWorkspaceCellStrategyAttachment(
+  document: ChartWorkspaceDocument,
+  cellId: ChartCellId,
+  attachment: ChartStrategyAttachmentRecord | null,
+): ChartWorkspaceDocument {
+  const cell = chartWorkspaceCell(document, cellId);
+  if (JSON.stringify(cell.strategyAttachment) === JSON.stringify(attachment)) return document;
+  return {
+    ...document,
+    cells: {
+      ...document.cells,
+      [cellId]: {
+        ...cell,
+        strategyAttachment: attachment ? cloneStrategyAttachment(attachment) : null,
+      },
+    },
+  };
+}
 
 export function chartWorkspaceCell(
   document: ChartWorkspaceDocument,

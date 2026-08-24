@@ -16,3 +16,21 @@ test("development and preview API proxies never pool upstream sockets", () => {
     assert.equal(proxy.agent.maxSockets, 32);
   }
 });
+
+test("the Monaco React adapter stays in the lazy editor chunk", () => {
+  const manualChunks = viteConfig.build?.rollupOptions?.output?.manualChunks;
+
+  assert.equal(typeof manualChunks, "function");
+  assert.equal(
+    manualChunks("C:/repo/node_modules/@monaco-editor/react/dist/index.mjs"),
+    "vendor-editor",
+  );
+  assert.equal(
+    manualChunks("C:/repo/node_modules/monaco-editor/esm/vs/editor/editor.api.js"),
+    "vendor-editor",
+  );
+  assert.equal(
+    manualChunks("C:/repo/node_modules/react-dom/client.js"),
+    "vendor-react",
+  );
+});

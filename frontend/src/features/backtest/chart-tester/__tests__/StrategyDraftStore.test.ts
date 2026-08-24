@@ -52,6 +52,7 @@ test("concurrent draft saves serialize and preserve the newest revision", async 
 test("adapter failures become an explicit ERROR state", async () => {
   const adapter: StrategyDraftStoreAdapter = {
     load: async () => null,
+    list: async () => [],
     save: async () => { throw new Error("disk unavailable"); },
     remove: async () => undefined,
   };
@@ -59,6 +60,52 @@ test("adapter failures become an explicit ERROR state", async () => {
   await assert.rejects(store.save(draft("source")), /disk unavailable/);
   assert.equal(store.snapshot(draft("source").id).saveState, "ERROR");
   assert.equal(store.snapshot(draft("source").id).error, "disk unavailable");
+  assert.equal(store.snapshot(draft("source").id).record?.source, "source");
+  assert.equal((await store.load(draft("source").id)).record?.source, "source");
+  assert.equal(store.snapshot(draft("source").id).saveState, "ERROR");
+  assert.deepEqual((await store.recent()).map((record) => record.source), ["source"]);
+});
+
+test("loading an older durable draft never erases a newer failed in-memory edit", async () => {
+  const durable = createMemoryStrategyDraftAdapter();
+  let failSave = false;
+  const adapter: StrategyDraftStoreAdapter = {
+    load: (id) => durable.load(id),
+    list: () => durable.list(),
+    save: async (record) => {
+      if (failSave) throw new Error("quota reached");
+      await durable.save(record);
+    },
+    remove: (id) => durable.remove(id),
+  };
+  let now = 100;
+  const store = new StrategyDraftStore(adapter, () => ++now);
+  await store.save(draft("durable"));
+  failSave = true;
+  await assert.rejects(store.save(draft("newer in memory")), /quota reached/);
+
+  const reloaded = await store.load(draft("durable").id);
+  assert.equal(reloaded.record?.revision, 1);
+  assert.equal(reloaded.record?.source, "newer in memory");
+  assert.equal(reloaded.saveState, "ERROR");
+});
+
+test("recent drafts are bounded, newest-first, and ignore malformed adapter rows", async () => {
+  let now = 20;
+  const adapter = createMemoryStrategyDraftAdapter();
+  const store = new StrategyDraftStore(adapter, () => ++now);
+  await store.save(draft("first"));
+  await store.save({ ...draft("second"), id: "draft-abcdefgh" });
+  await store.save({ ...draft("third"), id: "draft-87654321" });
+
+  assert.deepEqual((await store.recent(2)).map((record) => record.source), ["third", "second"]);
+  const malformedAdapter: StrategyDraftStoreAdapter = {
+    load: async () => null,
+    list: async () => [null, { id: "broken" }],
+    save: async () => undefined,
+    remove: async () => undefined,
+  };
+  assert.deepEqual(await new StrategyDraftStore(malformedAdapter).recent(), []);
 });
 
 test("local storage adapter fails closed on malformed content and writes only its own key", async () => {

@@ -1,78 +1,77 @@
-# Unified free-scroll accordion right rail design QA
+# Chart-first Strategy Tester — Phase 4 Design QA
 
-Date: 2026-08-13
+- date: 2026-08-24
+- source first-open visual: `H:\program\CandleScope-backtest-chart-first\docs\assets\backtest-chart-first-phase0\visual-first-1440x900.png`
+- source error visual: `H:\program\CandleScope-backtest-chart-first\docs\assets\backtest-chart-first-phase0\visual-error-1440x900.png`
+- implementation route: live market page with `VITE_CHART_STRATEGY_TESTER_ENABLED=1`
+- implementation first-open capture: `H:\program\CandleScope-backtest-chart-first\docs\evidence\backtest-chart-first-phase4\phase4-first-open-1440x900.png`
+- implementation error capture: `H:\program\CandleScope-backtest-chart-first\docs\evidence\backtest-chart-first-phase4\phase4-script-error-1440x900.png`
+- compact viewport capture: `H:\program\CandleScope-backtest-chart-first\docs\evidence\backtest-chart-first-phase4\phase4-first-open-1366x768.png`
+- viewport: 1440 x 900 CSS px for both approved-source comparisons
+- source pixels: 1440 x 900
+- implementation pixels: 1440 x 900
+- density normalization: 1:1 CSS-pixel and image-pixel comparison
+- states: ordinary-mode first open and script error
 
-Implementation URL: `http://127.0.0.1:15173/`
+## Full-view comparison evidence
 
-Target viewport: 1280 × 720 CSS px, light theme
+The approved source and browser implementation were placed in the same comparison images:
 
-## Source and rendered truth
+- `H:\program\CandleScope-backtest-chart-first\docs\evidence\backtest-chart-first-phase4\qa-first-source-vs-implementation.png`
+- `H:\program\CandleScope-backtest-chart-first\docs\evidence\backtest-chart-first-phase4\qa-error-source-vs-implementation.png`
 
-- Source visual truth: `C:\Users\MECHREVO\.codex\generated_images\019ffae0-4304-7272-8286-283c4e6a027e\exec-b4b7660d-59f6-43d3-8b20-350c7cdf82ee.png`.
-- Source pixels: 1672 × 941. It is a desktop design target rather than a browser capture, so CSS size and source density are unavailable.
-- Browser-rendered implementation: `C:\Users\MECHREVO\.codex\visualizations\2026\08\13\019ffae0-4304-7272-8286-283c4e6a027e\candlescope-free-scroll-accordion\final-live-1280x720.png`.
-- Implementation CSS viewport: 1280 × 720; browser devicePixelRatio: 1.5; captured pixels: 1280 × 720 because the in-app browser capture is normalized to CSS pixel dimensions.
-- Full-view same-input comparison: `C:\Users\MECHREVO\.codex\visualizations\2026\08\13\019ffae0-4304-7272-8286-283c4e6a027e\candlescope-free-scroll-accordion\comparison-source-vs-live.png`.
-- Focused right-rail comparison: `C:\Users\MECHREVO\.codex\visualizations\2026\08\13\019ffae0-4304-7272-8286-283c4e6a027e\candlescope-free-scroll-accordion\comparison-right-rail-focus.png`.
-- Density normalization: the source was scaled to 1280 × 720 with Lanczos filtering; the normalized 1280 × 720 implementation capture was kept unchanged before comparison.
+Both implementation captures use the same 1440 x 900 viewport and the same BTCUSDT 1m chart context as their approved source. Live market bars and prices differ because the browser used the current backend stream; this does not change the Phase 4 component geometry or state.
 
-## Verified state
+## Focused region comparison evidence
 
-- Live rail at 1280 × 720 with watchlist collapsed and order book, tape, and profile expanded simultaneously.
-- One shared `MarketRightRailFrame` owns the live and replay accordion; there is no live/replay layout branch.
-- Each expanded view owns one height separator. Changing a view height grows or shrinks only that view and changes the outer rail scroll length.
-- All collapsed views remain available as 36 px summary headers.
+The chart/panel boundary, panel header, tabs, primary action, first-start cards, Monaco editor, and problem panel were also compared together at original scale:
 
-## Findings and comparison history
+- `H:\program\CandleScope-backtest-chart-first\docs\evidence\backtest-chart-first-phase4\qa-first-panel-crop.png`
+- `H:\program\CandleScope-backtest-chart-first\docs\evidence\backtest-chart-first-phase4\qa-error-panel-crop.png`
 
-### Iteration 1
+The implementation matches the approved information hierarchy, dimensions, spacing rhythm, border treatment, typography scale, color tokens, copy, and control placement. Monaco supplies real syntax coloring and diagnostics instead of the source mock's simplified editor rendering; the diagnostic remains visibly bound to line 8, column 19 and the problem explanation.
 
-- [P1] The previous stacked height allocator redistributed one fixed viewport among open views, so opening more cards compressed every sibling.
-  - Evidence: the pre-change implementation capture showed several right-rail surfaces competing for the same fixed height, while the source target showed independent modules inside a scrolling rail.
-  - Fix: removed `allocateRailViewHeights` and `orderedOpenViews`; replaced the shared frame with one free multi-open accordion whose sections have independent persisted heights and whose parent owns vertical scrolling.
-- [P1] Live and replay preferences treated an empty open set as a special rail-collapse layout.
-  - Fix: separated whole-rail visibility from per-section expansion. An empty open set now leaves useful collapsed headers visible, and `panelCollapsed` remains independently restorable in both runtimes.
-- [P2] Nested order-book and trade-flow scrollers could retain wheel input and make the outer rail feel stuck.
-  - Fix: allowed wheel chaining from internal scrollers to the outer rail at their scroll boundaries while keeping outer overscroll contained.
+## Primary interactions and runtime checks
 
-### Iteration 2
+Browser-verified in headed Chrome through the repository-local Playwright CLI:
 
-- [P2] Initial 360 px defaults made the unified behavior correct but kept too little of the third expanded card visible at 1280 × 720.
-  - Evidence: the first post-change capture showed the three 360 px market panels creating a 1372 px rail and hiding most downstream context.
-  - Fix: calibrated live defaults to 220 px for order book, 220 px for tape, and 300 px for profile. Users can still expand each panel up to its existing maximum.
-- Post-fix evidence: the final full-view and focused comparisons show a 36 px collapsed watchlist header, three independently expanded market modules, a visible outer scrollbar, readable activity-bar labels, and the same chart-to-rail density as the source direction.
-- No actionable P0, P1, or P2 issue remains.
+- exactly three first-start actions; no empty Monaco and no editor resources before a real script is selected;
+- template, recent-script, and paste transitions;
+- delayed Monaco loading, edit, autosave, cursor restore after reload, and error-location focus;
+- honest save failure, retained in-memory draft, visible retry, and successful persistence after retry;
+- Run button and `Ctrl/Cmd+Enter` equivalence without inserting a newline;
+- four tabs and their honest Phase 4 placeholders;
+- pointer and keyboard panel resize;
+- Close and Escape both restore focus to the active chart's strategy entry;
+- four-cell active ownership, cell-local attachments, and maximized-cell ownership;
+- 1366 x 768 has no horizontal or vertical document overflow and retains visible chart and close action;
+- flag-off production build has no entry or panel DOM and loads no ChartStrategy, StrategyScript, vendor-editor, or Monaco resources;
+- final browser console: 0 errors and 0 warnings.
+
+## Findings
+
+No actionable P0, P1, or P2 visual findings remain.
+
+Accepted live-only differences:
+
+- current bars, prices, and order-book connection text differ from the frozen source captures;
+- Monaco's production syntax highlighting and overview-ruler marker are richer than the static approved mock;
+- the Phase 0 review badge is evidence annotation and is not part of the production UI.
 
 ## Required fidelity surfaces
 
-- Fonts and typography: existing Inter, JetBrains Mono, and Chinese fallbacks remain unchanged. The new 11 px accordion titles, 9 px summaries, and 8.5 px activity labels preserve the product's dense hierarchy without clipping or unintended wrapping.
-- Spacing and layout rhythm: collapsed headers are consistently 36 px; expanded cards have independent heights and 7 px keyboard-accessible resize handles. Dividers and 6–8 px internal spacing match the existing CandleScope rail rhythm.
-- Colors and visual tokens: the implementation reuses existing background, border, hover, muted-text, accent-blue, candle-up, and candle-down tokens. No new competing palette or theme branch was introduced.
-- Image quality and asset fidelity: the design uses existing application icons and chart assets. No new raster asset, placeholder, emoji, handcrafted SVG substitute, or CSS-drawn product imagery was introduced.
-- Copy and content: live labels are `自选 / 盘口 / 成交 / 分布`; replay labels are `自选 / 下单 / 仓位 / 市场 / 能力`. Collapsed summaries describe the hidden content without truncating at the verified width.
-- Affordances and accessibility: activity buttons report independent pressed/expanded state; collapsed headers are full-width buttons; resize handles expose horizontal separator semantics, min/max/current values, ArrowUp/ArrowDown, Home/End, and double-click reset.
+- Fonts and typography: passed.
+- Spacing and layout rhythm: passed.
+- Colors and visual tokens: passed.
+- Image and asset fidelity: passed; Phase 4 introduces no replacement raster asset and reuses the product chart/icon surfaces.
+- Copy and content: passed in the visible Chinese state and catalog parity checks.
+- Responsive behavior: passed at 1440 x 900 and 1366 x 768.
 
-## Functional browser evidence
+## Comparison history
 
-- All four live modules were expanded at once; toggling `成交` closed and reopened only that module while the other three remained expanded.
-- Keyboard resize changed only `成交` from 360 px to 380 px; page reload preserved the new height and all expanded states.
-- With a compact 220/220/300 configuration, the outer rail measured 801 px of content in a 612 px viewport, proving that cards grow total scroll length rather than stealing height from siblings.
-- Repeated wheel input over the tape list moved the inner list from 0 to its maximum 1504 and then the outer rail from 0 to its maximum 189, confirming boundary scroll chaining.
-- Live and replay browser console error count: 0.
-- `replay.html` loaded the training hub, but the currently running backend reported `REPLAY_TRAINING_UNAVAILABLE`, so an active replay run could not be captured. Replay ownership was verified through the shared-frame DOM test and 27 replay workspace/preference tests, including empty-state collapse and independent height persistence.
-
-## Automated verification
-
-- `npm run typecheck`: passed.
-- `npm run check:architecture`: passed with 0 active migration allowlist entries.
-- `npm run lint`: passed.
-- Focused rail and replay tests: 44 passed.
-- Full `npm test`: passed on the final isolated run. An earlier concurrent run had one unrelated watchlist-cache worker failure; that file passed 24/24 in isolation before the final full pass.
-- `npm run build`: passed.
-- `git diff --check`: passed.
-
-## Follow-up polish
-
-- [P3] If future plugins add enough activity buttons to overflow the icon strip, a subtle activity-bar scrollbar fade could make that secondary scroll surface more discoverable.
+1. Initial in-app Browser attempt: blocked by its local-URL policy; no visual claim made.
+2. First repository-local Chrome pass: found premature `vendor-editor` preload and a Monaco `Ctrl/Cmd+Enter` conflict; both were fixed and rebuilt.
+3. Interaction pass: found Close/Escape focus returning to `body` after the top bar remounted; focus restoration was changed to target the current cell entry after React commit and reverified.
+4. Final same-viewport pass: approved source and implementation were compared together for first-open and script-error states; no P0/P1/P2 visual finding remained.
 
 final result: passed

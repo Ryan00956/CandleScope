@@ -42,6 +42,7 @@ export interface TopBarProps {
   advancedMarketData: AdvancedMarketRuntimeView;
   replayEntry: ReplayEntryCapabilityView;
   onOpenReplayLauncher(): void;
+  identityAccessory?: ReactNode;
   extensionControls?: ReactNode;
 }
 
@@ -52,6 +53,7 @@ function TopBar({
   advancedMarketData,
   replayEntry,
   onOpenReplayLauncher,
+  identityAccessory,
   extensionControls,
 }: TopBarProps) {
   const {
@@ -107,15 +109,18 @@ function TopBar({
         </button>
         )}
       </>}
-      identity={<SymbolSearch
-        currentSymbol={currentSymbol}
-        onSelect={onSelectSymbol}
-        {...(currentMarketType === undefined ? {} : { currentMarketType })}
-        {...(currentExchange === undefined ? {} : { currentExchange })}
-        {...(exchangeCatalog === undefined ? {} : { exchangeCatalog })}
-        {...(watchlists === undefined ? {} : { watchlists })}
-        {...(onAddToWatchlist === undefined ? {} : { onAddToWatchlist })}
-      />}
+      identity={<>
+        <SymbolSearch
+          currentSymbol={currentSymbol}
+          onSelect={onSelectSymbol}
+          {...(currentMarketType === undefined ? {} : { currentMarketType })}
+          {...(currentExchange === undefined ? {} : { currentExchange })}
+          {...(exchangeCatalog === undefined ? {} : { exchangeCatalog })}
+          {...(watchlists === undefined ? {} : { watchlists })}
+          {...(onAddToWatchlist === undefined ? {} : { onAddToWatchlist })}
+        />
+        {identityAccessory}
+      </>}
       controls={<>
         <button
         className="settings-btn"

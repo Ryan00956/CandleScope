@@ -38,6 +38,7 @@ import AlertNotificationCenter from "../components/alerts/AlertNotificationCente
 import { t } from "../i18n/index.js";
 import { useLocale } from "../i18n/useLocale.js";
 import { requestAlertPanelOpen } from "../features/alerts/alertDeliveryClient.js";
+import { CHART_STRATEGY_TESTER_ENABLED } from "../features/backtest/chart-tester/chartStrategyTesterFeature.js";
 import AppProviders from "./AppProviders.js";
 import LiveChartCell from "./LiveChartCell.js";
 import type {
@@ -541,15 +542,19 @@ function LiveWorkspaceApp() {
   const [drawingToolbarHost, setDrawingToolbarHost] = useState<HTMLElement | null>(null);
   const [rightRailHost, setRightRailHost] = useState<HTMLElement | null>(null);
   const [featureSurfacesHost, setFeatureSurfacesHost] = useState<HTMLElement | null>(null);
+  const [bottomPanelHost, setBottomPanelHost] = useState<HTMLElement | null>(null);
   const [statusBarHost, setStatusBarHost] = useState<HTMLElement | null>(null);
+  const [strategyPanelOpen, setStrategyPanelOpen] = useState(false);
   const portalHosts = useMemo<WorkspacePortalHosts>(() => ({
     topBar: topBarHost,
     intervalSelector: intervalSelectorHost,
     drawingToolbar: drawingToolbarHost,
     rightRail: rightRailHost,
     featureSurfaces: featureSurfacesHost,
+    bottomPanel: bottomPanelHost,
     statusBar: statusBarHost,
   }), [
+    bottomPanelHost,
     drawingToolbarHost,
     featureSurfacesHost,
     intervalSelectorHost,
@@ -658,6 +663,9 @@ function LiveWorkspaceApp() {
                       onChartSettingsChange={workspace.actions.updateCellChartSettings}
                       onPriceScaleChange={workspace.actions.updateCellPriceScale}
                       onIndicatorsChange={workspace.actions.updateCellIndicators}
+                      strategyPanelOpen={strategyPanelOpen}
+                      onStrategyPanelOpenChange={setStrategyPanelOpen}
+                      onStrategyAttachmentChange={workspace.actions.updateCellStrategyAttachment}
                       onOpenReplayLauncher={openReplayLauncher}
                       onActiveEnvironmentChange={handleActiveEnvironmentChange}
                     />
@@ -665,6 +673,9 @@ function LiveWorkspaceApp() {
                 />
               </div>
             )}
+            bottomPanel={CHART_STRATEGY_TESTER_ENABLED
+              ? <div className="workspace-portal-host" ref={setBottomPanelHost} />
+              : null}
             rightRail={<div className="workspace-portal-host" ref={setRightRailHost} />}
           />
         )}

@@ -39,6 +39,7 @@ import {
   type ChartDrawingLayerSetId,
   type ChartCellId,
   type ChartCellPriceScale,
+  type ChartStrategyAttachmentRecord,
   type ChartLinkGroupId,
   type ChartLinkGroup,
   type ChartLinkGroupSettings,
@@ -92,6 +93,7 @@ import {
   chartWorkspaceCell,
   chartWorkspaceWindow,
   replaceChartWorkspaceWindow,
+  updateChartWorkspaceCellStrategyAttachment,
 } from "./chartWorkspaceDocument.js";
 import {
   closeChartWorkspaceWindowCandidate,
@@ -168,6 +170,10 @@ export interface ChartWorkspaceRuntime {
     updateCellChartSettings(cellId: ChartCellId, settings: ChartSettings | ChartCellChartSettings): void;
     updateCellPriceScale(cellId: ChartCellId, priceScale: ChartCellPriceScale): void;
     updateCellIndicators(cellId: ChartCellId, indicators: IndicatorDefinition[]): void;
+    updateCellStrategyAttachment(
+      cellId: ChartCellId,
+      attachment: ChartStrategyAttachmentRecord | null,
+    ): void;
     configureCells(configurations: readonly ChartWorkspaceCellConfiguration[]): void;
     createWindow(): void;
     closeWindow(windowId: ChartWindowId): void;
@@ -950,6 +956,15 @@ export function useChartWorkspaceRuntime(
     });
   }, [updateActiveDocument]);
 
+  const updateCellStrategyAttachment = useCallback((
+    cellId: ChartCellId,
+    attachment: ChartStrategyAttachmentRecord | null,
+  ) => {
+    updateActiveDocument((current) => (
+      updateChartWorkspaceCellStrategyAttachment(current, cellId, attachment)
+    ));
+  }, [updateActiveDocument]);
+
   const configureCells = useCallback((
     configurations: readonly ChartWorkspaceCellConfiguration[],
   ) => {
@@ -1079,6 +1094,7 @@ export function useChartWorkspaceRuntime(
       updateCellChartSettings,
       updateCellPriceScale,
       updateCellIndicators,
+      updateCellStrategyAttachment,
       configureCells,
       createWindow,
       closeWindow,

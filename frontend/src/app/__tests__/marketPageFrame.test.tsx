@@ -52,13 +52,16 @@ test("MarketWorkspaceFrame preserves chart-with-toolbar and right-rail ownership
       toolbar={<div data-slot="toolbar" />}
       exportOverlay={<div data-slot="export" />}
       chart={<div data-slot="chart" />}
+      bottomPanel={<section data-slot="bottom" />}
       rightRail={<aside data-slot="rail" />}
     />,
   );
   assert.match(html, /class="main-content-area"/);
   assert.match(html, /class="chart-with-toolbar"/);
   assert.ok(html.indexOf("data-slot=\"toolbar\"") < html.indexOf("data-slot=\"chart\""));
-  assert.ok(html.indexOf("data-slot=\"chart\"") < html.indexOf("data-slot=\"rail\""));
+  assert.ok(html.indexOf("data-slot=\"chart\"") < html.indexOf("data-slot=\"bottom\""));
+  assert.ok(html.indexOf("data-slot=\"bottom\"") < html.indexOf("data-slot=\"rail\""));
+  assert.match(html, /class="market-workspace-content"/);
 });
 
 test("live and replay top/status adapters share exact source-neutral DOM owners", () => {

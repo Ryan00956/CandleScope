@@ -1,0 +1,164 @@
+{
+  "schemaVersion": "candlescope.backtest-chart-first.phase4/1",
+  "generatedAt": "2026-08-24T09:38:06+08:00",
+  "status": "COMPLETE_READY_FOR_COMMIT",
+  "identity": {
+    "baseGitHead": "ec66a33dd7ffcb0ae4d9f09aee712b69d2ad400e",
+    "branch": "codex/backtest-chart-first-ux",
+    "worktree": "H:\\program\\CandleScope-backtest-chart-first"
+  },
+  "scope": {
+    "phase": 4,
+    "phase5OrLaterCode": false,
+    "frontendUserInterfaceChanged": true,
+    "defaultFlagEnabled": false,
+    "push": false,
+    "merge": false,
+    "deploy": false,
+    "mainWorktreeUserChangesCopied": false
+  },
+  "surface": {
+    "flag": "VITE_CHART_STRATEGY_TESTER_ENABLED=0",
+    "topBarEntryOwnedByActiveCell": true,
+    "bottomPanelOwnedByAppShell": true,
+    "firstStartActionCount": 3,
+    "tabs": ["script", "overview", "trades", "settings"],
+    "primaryActions": ["run"],
+    "exposesDatasetField": false,
+    "exposesSnapshotField": false,
+    "exposesRevisionId": false,
+    "exposesRunId": false,
+    "createsRealRevisionOrRun": false
+  },
+  "lazyLoading": {
+    "bridgeLazy": true,
+    "monacoSecondLazyBoundary": true,
+    "firstOpenMonacoRequests": 0,
+    "firstOpenEditorChunkRequests": 0,
+    "editorLoadsAfterScriptSelection": true,
+    "flagOffTesterOrEditorRequests": 0,
+    "vendorEditorPrematurePreload": false
+  },
+  "drafts": {
+    "storageKey": "candlescope-strategy-drafts-v1",
+    "autosave": true,
+    "cursorRestore": true,
+    "failedWriteRetainsMemoryDraft": true,
+    "retryPersistsAfterRecovery": true,
+    "recentNewestFirst": true,
+    "malformedRowsIgnored": true
+  },
+  "diagnostics": {
+    "backgroundAndRunShareFunction": true,
+    "approvedIssue": {
+      "source": "target_position(targetQty)",
+      "line": 8,
+      "column": 19
+    },
+    "monacoMarker": true,
+    "problemList": true,
+    "draftClearedOnError": false,
+    "ctrlEnterChangesSource": false
+  },
+  "browser": {
+    "browser": "headed Chrome",
+    "driver": "repository-local Playwright CLI",
+    "backend": "real local backend on 127.0.0.1:18080",
+    "marketBarsMinimum": 1500,
+    "viewports": [
+      { "width": 1440, "height": 900, "result": "PASS" },
+      { "width": 1366, "height": 768, "result": "PASS", "documentOverflow": false }
+    ],
+    "singleChart": "PASS",
+    "fourChart": "PASS",
+    "maximizedChart": "PASS",
+    "pointerResize": { "fromPx": 383, "toPx": 471, "result": "PASS" },
+    "keyboardResizeStepPx": 16,
+    "closeFocusReturn": "PASS",
+    "escapeFocusReturn": "PASS",
+    "saveFailureRetry": "PASS",
+    "flagOffDom": "PASS",
+    "consoleErrors": 0,
+    "consoleWarnings": 0
+  },
+  "designQa": {
+    "result": "PASS",
+    "sourceAndImplementationSameInput": true,
+    "sourceViewport": [1440, 900],
+    "implementationViewport": [1440, 900],
+    "p0": 0,
+    "p1": 0,
+    "p2": 0,
+    "evidenceDirectory": "docs/evidence/backtest-chart-first-phase4"
+  },
+  "checks": {
+    "phase4FeatureTargeted": { "result": "PASS", "tests": 2, "failures": 0 },
+    "frontendBacktest": {
+      "result": "PASS",
+      "tests": 62,
+      "suites": 3,
+      "failures": 0,
+      "elapsedMs": 518.2865
+    },
+    "frontendFull": {
+      "result": "PASS",
+      "tests": 3339,
+      "suites": 3,
+      "failures": 0,
+      "elapsedMs": 116167.7752,
+      "finalCodeRerun": true
+    },
+    "frontendTypecheck": { "result": "PASS" },
+    "frontendArchitecture": { "result": "PASS", "allowlistEntries": 0 },
+    "frontendI18n": { "result": "PASS", "catalogKeys": 3628, "sourceFiles": 601 },
+    "frontendLint": { "result": "PASS", "scope": "full frontend" },
+    "frontendBuildFlagOff": {
+      "result": "PASS_WITH_EXISTING_CHUNK_WARNING",
+      "modules": 640,
+      "liveRawKb": 536.30,
+      "liveGzipKb": 155.63,
+      "initialTesterOrEditorRequests": 0
+    },
+    "frontendBuildFlagOn": {
+      "result": "PASS_WITH_EXISTING_CHUNK_WARNING",
+      "modules": 640,
+      "liveRawKb": 536.35,
+      "liveGzipKb": 155.66,
+      "bridgeRawKb": 26.67,
+      "bridgeGzipKb": 8.39,
+      "editorWorkspaceRawKb": 2.27,
+      "editorWorkspaceGzipKb": 1.15,
+      "vendorEditorRawKb": 11.42,
+      "vendorEditorGzipKb": 4.35
+    },
+    "diffCheck": { "result": "PASS" }
+  },
+  "knownNonPassAttempts": [
+    {
+      "step": "first production network inspection",
+      "result": "PREMATURE_VENDOR_EDITOR_PRELOAD",
+      "resolution": "classify monaco and @monaco-editor before generic react in manualChunks; add regression"
+    },
+    {
+      "step": "first Monaco Ctrl+Enter browser run",
+      "result": "EDITOR_INSERTED_NEWLINE_AND_ACTION_HELD_STALE_CALLBACK",
+      "resolution": "register a Monaco editor action and dereference the latest onRun callback"
+    },
+    {
+      "step": "first panel close focus run",
+      "result": "FOCUS_RETURNED_TO_BODY",
+      "resolution": "focus the current cell-id entry after the portal state commit"
+    },
+    {
+      "step": "first full frontend lint after shortcut fix",
+      "result": "REACT_REF_WRITE_DURING_RENDER",
+      "resolution": "synchronize onRunRef in an effect; no lint or contract relaxation"
+    }
+  ],
+  "cleanup": {
+    "taskPortsOpened": [15177],
+    "taskProcessesRemaining": false,
+    "browserSessionsRemaining": false
+  },
+  "decision": "PHASE4_COMPLETE_PHASE5_NOT_STARTED"
+}

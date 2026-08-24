@@ -13,11 +13,31 @@ test("chart strategy tester flag is default off and strict", () => {
   assert.equal(resolveChartStrategyTesterEnabled({ VITE_CHART_STRATEGY_TESTER_ENABLED: true }), true);
 });
 
-test("phase 3 keeps the tester runtime and editor out of the App import graph", () => {
+test("phase 4 keeps runtime, draft storage, and Monaco behind lazy boundaries", () => {
   const app = readFileSync(resolve(process.cwd(), "src/app/App.tsx"), "utf8");
   const cell = readFileSync(resolve(process.cwd(), "src/app/LiveChartCell.tsx"), "utf8");
+  const panel = readFileSync(
+    resolve(process.cwd(), "src/features/backtest/chart-tester/ChartStrategyTesterPanel.tsx"),
+    "utf8",
+  );
+  const workspace = readFileSync(
+    resolve(process.cwd(), "src/features/backtest/chart-tester/StrategyScriptWorkspace.tsx"),
+    "utf8",
+  );
   const exampleEnvironment = readFileSync(resolve(process.cwd(), ".env.example"), "utf8");
-  assert.doesNotMatch(app, /chart-tester|ChartStrategyTesterRuntime|StrategyDraftStore/);
-  assert.doesNotMatch(cell, /chart-tester|ChartStrategyTesterRuntime|StrategyDraftStore/);
+  assert.doesNotMatch(app, /ChartStrategyTesterRuntime|StrategyDraftStore|@monaco-editor/);
+  assert.doesNotMatch(cell, /ChartStrategyTesterRuntime|StrategyDraftStore|@monaco-editor/);
+  assert.match(cell, /lazy\(loadChartStrategyTesterCellBridge\)/);
+  assert.match(cell, /identityAccessory=\{strategyEntryControl\}/);
+  assert.match(cell, /data-chart-strategy-entry=\{cell\.id\}/);
+  assert.match(cell, /globalThis\.setTimeout\(\(\) => \{[\s\S]*data-chart-strategy-entry/);
+  assert.match(cell, /\(currentEntry \?\? strategyEntryRef\.current\)\?\.focus\(\)/);
+  assert.match(app, /bottomPanel=\{CHART_STRATEGY_TESTER_ENABLED/);
+  assert.doesNotMatch(panel, /from\s+["']@monaco-editor\/react/);
+  assert.match(panel, /lazy\(\(\) => import\("\.\/StrategyScriptWorkspace\.js"\)\)/);
+  assert.match(workspace, /KeyMod\.CtrlCmd\s*\|\s*monaco\.KeyCode\.Enter/);
+  assert.match(workspace, /chart-strategy-tester\.run/);
+  assert.match(workspace, /run:\s*\(\)\s*=>\s*onRunRef\.current\(\)/);
+  assert.doesNotMatch(workspace, /onKeyDownCapture/);
   assert.match(exampleEnvironment, /^VITE_CHART_STRATEGY_TESTER_ENABLED=0$/m);
 });

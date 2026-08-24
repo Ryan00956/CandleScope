@@ -52,9 +52,12 @@ export default defineConfig({
       output: {
         manualChunks(id) {
           if (!id.includes('node_modules')) return undefined
+          // `@monaco-editor/react` also contains the word "react" in its path.
+          // Keep this check before the generic React bucket so the editor stays
+          // behind its lazy boundary instead of making the live shell preload it.
+          if (id.includes('monaco-editor') || id.includes('@monaco-editor')) return 'vendor-editor'
           if (id.includes('react')) return 'vendor-react'
           if (id.includes('lightweight-charts')) return 'vendor-charts'
-          if (id.includes('monaco-editor') || id.includes('@monaco-editor')) return 'vendor-editor'
           if (id.includes('html-to-image')) return 'vendor-export'
           return 'vendor'
         },

@@ -7588,6 +7588,7 @@ class TrainingRunService:
                         binding=binding,
                         tracks=ordered,
                         target_virtual_time_ms=source_goal.target_virtual_time_ms,
+                        audit_account_at_barrier=False,
                         source_goal=source_goal,
                     )
                 )
@@ -7605,6 +7606,7 @@ class TrainingRunService:
                             binding=binding,
                             tracks=ordered,
                             target_virtual_time_ms=next_time,
+                            audit_account_at_barrier=False,
                         )
                     )
             control_plan = {
@@ -7739,6 +7741,16 @@ class TrainingRunService:
                         tracks=ordered,
                         target_virtual_time_ms=target,
                         job=advance_job,
+                        # Ordered playback already keeps the exhaustive,
+                        # independent account auditor outside its per-bar Run
+                        # lock.  Manual controls must use the same boundary:
+                        # every wave still finalizes exact account/HEDGE risk,
+                        # reconciles liquidation and commits its global event
+                        # checkpoint before acknowledgement, while the O(history)
+                        # proof remains available at report/review/fork and via
+                        # the explicit audit path.
+                        allow_final_state_batch=True,
+                        audit_account_at_barrier=False,
                         source_goal=source_goal,
                     )
                 )

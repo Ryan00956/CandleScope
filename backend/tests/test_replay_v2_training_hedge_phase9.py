@@ -452,6 +452,72 @@ async def test_high_rate_hedge_playback_yields_control_lock_after_each_bar(
         await service.shutdown(step_timeout=1.0)
 
 
+async def test_manual_hedge_bar_step_keeps_exhaustive_audit_off_hot_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = await _risk_service(tmp_path / "phase9-manual-step-audit-boundary.db")
+    try:
+        base = replace(
+            _sandbox_request(await _request(service), initial_equity="10000"),
+            market_type="futures",
+        )
+        request = await prepare_hedge_request(
+            service,
+            base,
+            root=tmp_path,
+            prefix="phase9-manual-step-audit-boundary",
+            mark_prices=["100"] * 13,
+        )
+        assert service.training is not None
+        created = await service.training.create_run(request)
+        run_id = str(created["run"]["run_id"])
+        session_id = str(created["run"]["adapter_session_id"])
+        await _acquire(
+            service,
+            run_id=run_id,
+            selected_session_id=session_id,
+            command_id="phase9-manual-step-audit-boundary-acquire",
+        )
+        original_audit = service.training.audit_account
+        advance_kwargs: list[dict[str, object]] = []
+        original_advance = service.training._advance_adapter_to
+
+        async def forbidden_account_audit(_run_id: str) -> dict[str, object]:
+            raise AssertionError(
+                "manual BAR advance must not run the exhaustive account auditor"
+            )
+
+        async def observed_advance(**kwargs):
+            advance_kwargs.append(dict(kwargs))
+            return await original_advance(**kwargs)
+
+        monkeypatch.setattr(service.training, "audit_account", forbidden_account_audit)
+        monkeypatch.setattr(service.training, "_advance_adapter_to", observed_advance)
+        advanced = await _send(
+            service,
+            run_id=run_id,
+            session_id=session_id,
+            command_id="phase9-manual-step-audit-boundary-step",
+            command_type=ReplayV2CommandType.ADVANCE,
+            payload={"basis": "BASE_BAR", "count": 1},
+        )
+
+        assert advanced["data"]["plan"]["mode"] == "GLOBAL_ORDERED_INPUT_CLOCK"
+        assert advanced["data"]["plan"]["input_clock"] == (
+            "PINNED_HEDGE_PUBLIC_SIMULATION"
+        )
+        assert advanced["data"]["consumed"] >= 1
+        assert len(advance_kwargs) == 1
+
+        # The independent proof remains exact and callable outside the command
+        # hot path; moving it does not weaken tamper detection or accounting.
+        audit = await original_audit(run_id)
+        assert audit["status"] == "PASS", audit["differences"]
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
 @pytest.mark.parametrize("setup_start_mode", ("MANUAL", "RANDOM"))
 async def test_segment_plan_resolves_cross_verified_explicit_hedge_refs(
     tmp_path: Path,

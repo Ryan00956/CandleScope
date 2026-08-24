@@ -119,6 +119,9 @@ export function useReplayIntegrityRuntime(
   const viewTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const generation = useRef(0);
   const refreshGate = useRef(new ReplayRefreshGate());
+  const equityRefreshGate = useRef(new ReplayRefreshGate());
+  const reportRefreshGate = useRef(new ReplayRefreshGate());
+  const loadedRunRef = useRef<string | null>(null);
   const pendingPolicy = useRef(false);
   const pendingReviewControl = useRef(false);
   const runtimeRef = useRef(runtime);
@@ -179,6 +182,7 @@ export function useReplayIntegrityRuntime(
         setDrawingLoaded(true);
         setBudget(nextDrawing.budget);
         setReport(nextReport);
+        loadedRunRef.current = currentRunId;
         setError(null);
       } catch (cause) {
         if (requestGeneration !== generation.current) return;
@@ -187,6 +191,46 @@ export function useReplayIntegrityRuntime(
         if (requestGeneration === generation.current) {
           setOperation((current) => current === "refresh" ? null : current);
         }
+      }
+    });
+  }, []);
+
+  const refreshEquity = useCallback(async (): Promise<void> => {
+    const currentRunId = replayRunId(viewerRef.current);
+    if (currentRunId === null) return;
+    return equityRefreshGate.current.run(currentRunId, async () => {
+      const requestGeneration = generation.current;
+      try {
+        const nextEquity = await defaultReplayV2Api.equityRun(
+          currentRunId,
+          "AUTO",
+          1_000,
+        );
+        if (requestGeneration !== generation.current
+          || replayRunId(viewerRef.current) !== currentRunId) return;
+        setEquity(nextEquity);
+        setError(null);
+      } catch (cause) {
+        if (requestGeneration !== generation.current) return;
+        setError(cause instanceof Error ? cause.message : t("replay.rt.integrityLoad"));
+      }
+    });
+  }, []);
+
+  const refreshReport = useCallback(async (): Promise<void> => {
+    const currentRunId = replayRunId(viewerRef.current);
+    if (currentRunId === null) return;
+    return reportRefreshGate.current.run(currentRunId, async () => {
+      const requestGeneration = generation.current;
+      try {
+        const nextReport = await defaultReplayV2Api.reportRun(currentRunId);
+        if (requestGeneration !== generation.current
+          || replayRunId(viewerRef.current) !== currentRunId) return;
+        setReport(nextReport);
+        setError(null);
+      } catch (cause) {
+        if (requestGeneration !== generation.current) return;
+        setError(cause instanceof Error ? cause.message : t("replay.rt.integrityLoad"));
       }
     });
   }, []);
@@ -203,25 +247,27 @@ export function useReplayIntegrityRuntime(
     setForked(null);
     setBudget(null);
     setError(null);
+    loadedRunRef.current = null;
     if (runId !== null) void refresh();
   }, [refresh, runId]);
 
   useEffect(() => {
-    if (runId === null || !clockIsAdvancing) return;
-    const timer = setInterval(() => { void refresh(); }, 750);
-    return () => clearInterval(timer);
-  }, [clockIsAdvancing, refresh, runId]);
-
-  useEffect(() => {
-    if (runId === null || clockIsAdvancing) return;
-    const timer = setTimeout(() => { void refresh(); }, 50);
+    if (
+      runId === null
+      || clockIsAdvancing
+      || loadedRunRef.current !== runId
+    ) return;
+    // Rules, integrity and drawings are revisioned evidence, not per-bar
+    // projections.  The training stream already carries the live portfolio;
+    // only the chart-oriented equity series needs one post-commit refresh.
+    const timer = setTimeout(() => { void refreshEquity(); }, 50);
     return () => clearTimeout(timer);
   }, [
     clockIsAdvancing,
     effectiveState,
     globalClock?.generation,
     globalClock?.tick,
-    refresh,
+    refreshEquity,
     runId,
     runtime.store.revision,
   ]);
@@ -231,9 +277,9 @@ export function useReplayIntegrityRuntime(
     // The terminal adapter snapshot and immutable v2 report commit are
     // separate projections of one command. Retry while the report is absent;
     // a transient read cannot strand an already-ended training page forever.
-    const timer = setInterval(() => { void refresh(); }, 1_000);
+    const timer = setInterval(() => { void refreshReport(); }, 1_000);
     return () => clearInterval(timer);
-  }, [effectiveState, refresh, report, runId]);
+  }, [effectiveState, refreshReport, report, runId]);
 
   const buildCommand = useCallback((
     type: ReplayV2CommandType,

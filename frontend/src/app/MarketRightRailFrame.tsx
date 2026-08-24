@@ -112,6 +112,7 @@ export default function MarketRightRailFrame({
   const widthStartRef = useRef<{ x: number; width: number } | null>(null);
   const heightStartRef = useRef<{ y: number; viewId: string; height: number } | null>(null);
   const transientWidthRef = useRef<number | null>(null);
+  const transientHeightsRef = useRef<Record<string, number> | null>(null);
   const [widthResizing, setWidthResizing] = useState(false);
   const [heightResizingViewId, setHeightResizingViewId] = useState<string | null>(null);
   const [transientWidth, setTransientWidth] = useState<number | null>(null);
@@ -196,21 +197,23 @@ export default function MarketRightRailFrame({
         minViewHeight(view),
         maxViewHeight(view),
       );
-      setTransientHeights({
+      const nextHeights = {
         ...viewHeights,
         [start.viewId]: Math.round(next),
-      });
+      };
+      transientHeightsRef.current = nextHeights;
+      setTransientHeights(nextHeights);
     };
     const onUp = () => {
       const start = heightStartRef.current;
+      const committed = transientHeightsRef.current;
       setHeightResizingViewId(null);
-      setTransientHeights((current) => {
-        if (current && onViewHeightChange && start) {
-          const next = current[start.viewId];
-          if (next !== undefined) onViewHeightChange(start.viewId, next);
-        }
-        return null;
-      });
+      setTransientHeights(null);
+      if (committed && onViewHeightChange && start) {
+        const next = committed[start.viewId];
+        if (next !== undefined) onViewHeightChange(start.viewId, next);
+      }
+      transientHeightsRef.current = null;
       heightStartRef.current = null;
     };
     document.addEventListener("pointermove", onMove);

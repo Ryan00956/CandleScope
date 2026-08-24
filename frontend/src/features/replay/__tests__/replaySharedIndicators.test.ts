@@ -35,6 +35,7 @@ import { MAX_SERIES_BARS } from "../../market-data/phase1WindowPolicy.js";
 import {
   clearReplaySharedIndicatorPreferences,
   loadReplayOrderFlowPreferences,
+  REPLAY_INDICATOR_PLAYING_REFRESH_MS,
   replayIndicatorStorageKey,
   replayOrderFlowStorageKey,
   saveReplayOrderFlowPreferences,
@@ -430,6 +431,17 @@ test("provided-bars compute can cover the full bounded replay series window", ()
     buildIndicatorOhlcvSignature(rows, { limit: MAX_SERIES_BARS }),
     buildIndicatorOhlcvSignature(rows.slice(1), { limit: MAX_SERIES_BARS }),
   );
+});
+
+test("playing replay coalesces indicator boundaries and paused replay stays exact", () => {
+  const adapter = source("src/features/replay/useReplaySharedIndicatorRuntime.ts");
+  assert.equal(REPLAY_INDICATOR_PLAYING_REFRESH_MS, 500);
+  assert.match(adapter, /const playing = runtime\.store\.state === "PLAYING"/);
+  assert.match(adapter, /globalThis\.setTimeout\([\s\S]*REPLAY_INDICATOR_PLAYING_REFRESH_MS/);
+  assert.match(adapter, /const indicatorRevision = playing[\s\S]*: seriesRevision/);
+  assert.match(adapter, /const indicatorCursorMs = playing[\s\S]*: cursorMs/);
+  assert.match(adapter, /selectRevealedIndicatorBars\(seriesStore\.snapshot\(\), indicatorCursorMs\)/);
+  assert.match(adapter, /visibleThroughSeconds: indicatorCursorMs === null/);
 });
 
 test("v2 composition reuses the shared indicator product without hosted/cache reachability", () => {

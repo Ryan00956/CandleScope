@@ -403,7 +403,9 @@ function LiveWorkspaceApp() {
     cellId: ChartCellId;
     value: ActiveChartEnvironment;
   } | null>(null);
-  const [showReplayLauncher, setShowReplayLauncher] = useState(false);
+  const [replayLaunchContext, setReplayLaunchContext] = useState<
+    ReturnType<typeof buildLiveReplayLaunchContext> | null
+  >(null);
   const [workspacePanelOpen, setWorkspacePanelOpen] = useState(false);
   const currentActiveEnvironment = activeEnvironment?.workspaceId === workspace.view.activeWorkspaceId
     && activeEnvironment.workspaceRuntimeKey === workspace.view.runtimeKey
@@ -466,18 +468,23 @@ function LiveWorkspaceApp() {
     currentSession: activeSession,
   });
 
-  const openReplayLauncher = useCallback(() => setShowReplayLauncher(true), []);
-  const closeReplayLauncher = useCallback(() => setShowReplayLauncher(false), []);
+  const openReplayLauncher = useCallback(() => {
+    setReplayLaunchContext(buildLiveReplayLaunchContext({
+      exchange: activeSession.exchange,
+      marketType: activeSession.marketType,
+      symbol: activeSession.symbol,
+      displayInterval: activeSession.interval,
+      watchlists: watchlist.view.watchlists,
+    }));
+  }, [
+    activeSession.exchange,
+    activeSession.interval,
+    activeSession.marketType,
+    activeSession.symbol,
+    watchlist.view.watchlists,
+  ]);
+  const closeReplayLauncher = useCallback(() => setReplayLaunchContext(null), []);
   const closeWorkspacePanel = useCallback(() => setWorkspacePanelOpen(false), []);
-  const replayLaunchContext = useMemo(() => showReplayLauncher
-    ? buildLiveReplayLaunchContext({
-        exchange: activeSession.exchange,
-        marketType: activeSession.marketType,
-        symbol: activeSession.symbol,
-        displayInterval: activeSession.interval,
-        watchlists: watchlist.view.watchlists,
-      })
-    : null, [activeSession, showReplayLauncher, watchlist.view.watchlists]);
 
   const handleActiveEnvironmentChange = useCallback((
     cellId: ChartCellId,
@@ -693,7 +700,7 @@ function LiveWorkspaceApp() {
         </Suspense>,
         featureSurfacesHost,
       )}
-      {showReplayLauncher && replayLaunchContext !== null && (
+      {replayLaunchContext !== null && (
         <Suspense fallback={null}>
           <ReplayLauncherDialog
             launchContext={replayLaunchContext}

@@ -532,6 +532,7 @@ async def test_empty_hedge_display_step_batches_marks_without_losing_audit_event
         bar_prices=["100"] * (forward_bars + 1_000),
         leading_bars=500,
         now_ms=1_710_000_000_000 + 700 * 60_000,
+        event_buffer_size=512,
     )
     try:
         catalog = await service.catalog(
@@ -618,14 +619,10 @@ async def test_empty_hedge_display_step_batches_marks_without_losing_audit_event
         consumed = after_sequence - before_sequence
 
         assert 200 <= consumed <= 240
-        assert len(adapter_batch_sizes) <= 5
         if funding_event_offset_bars == 0:
-            assert all(size is not None and size > 1 for size in adapter_batch_sizes)
+            assert adapter_batch_sizes == [512]
         else:
-            assert adapter_batch_sizes[0] is None
-            assert all(
-                size is not None and size > 1 for size in adapter_batch_sizes[1:]
-            )
+            assert adapter_batch_sizes == [None, 512]
         assert len([size for size in hedge_apply_sizes if size > 0]) <= 5
         assert max(hedge_apply_sizes) >= 50
         assert hedge_finalize_count <= 6

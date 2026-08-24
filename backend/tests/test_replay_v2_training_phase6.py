@@ -865,6 +865,7 @@ async def _risk_service(
     bar_prices: list[str] | None = None,
     leading_bars: int = 0,
     now_ms: int = NOW_MS,
+    event_buffer_size: int | None = None,
 ) -> ReplayService:
     repository = ImmutableReplayHistoryFake()
     prices = bar_prices or (
@@ -886,6 +887,11 @@ async def _risk_service(
             replay_settings(path),
             replay_historical_book_enabled=True,
             replay_historical_book_max_archive_bytes=64 * 1024 * 1024,
+            **(
+                {}
+                if event_buffer_size is None
+                else {"event_buffer_size": event_buffer_size}
+            ),
         ),
         store=ReplaySQLiteStore(path, now_ms=lambda: now_ms),
         repository=repository,

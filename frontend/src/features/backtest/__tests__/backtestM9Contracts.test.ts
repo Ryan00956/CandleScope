@@ -5,6 +5,7 @@ import test from "node:test";
 const app = readFileSync(new URL("../BacktestApp.tsx", import.meta.url), "utf8");
 const api = readFileSync(new URL("../backtestApi.ts", import.meta.url), "utf8");
 const chart = readFileSync(new URL("../BacktestResultChart.tsx", import.meta.url), "utf8");
+const equity = readFileSync(new URL("../BacktestEquityCurve.tsx", import.meta.url), "utf8");
 const projection = readFileSync(new URL("../chart-tester/chartStrategyResultProjection.ts", import.meta.url), "utf8");
 
 test("M9 workspace exposes immutable revision compile, smoke, trace, compare and clone paths", () => {
@@ -23,7 +24,8 @@ test("M9 workspace exposes immutable revision compile, smoke, trace, compare and
 test("M9 long curves and tables have explicit render bounds", () => {
   assert.match(app, /boundedRows\(report\.fills\)/);
   assert.match(app, /limit = 1_000/);
-  assert.match(chart, /boundBacktestProjectionRows\(data\)/);
+  assert.match(chart, /BacktestEquityCurve/);
+  assert.match(equity, /boundBacktestProjectionRows\(data\)/);
   assert.match(projection, /limit = 2_000/);
   assert.match(projection, /slice\(-limit\)/);
 });

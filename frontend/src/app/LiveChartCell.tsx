@@ -90,6 +90,7 @@ import StatusBar from "./StatusBar.js";
 import TopBar from "./TopBar.js";
 import { CHART_STRATEGY_TESTER_ENABLED } from "../features/backtest/chart-tester/chartStrategyTesterFeature.js";
 import type { ChartStrategyTesterEntryState } from "../features/backtest/chart-tester/chartStrategyTesterUiModel.js";
+import type { ChartStrategyResultMarkerSource } from "../features/backtest/chart-tester/chartStrategyResultMarkerSource.js";
 
 const ExportPanel = lazy(() => import("../features/export/ExportPanel.js"));
 const DrawingToolbar = lazy(() => {
@@ -596,6 +597,27 @@ function LiveChartCell({
     if (linkedViewportFrameRef.current !== null) return;
     linkedViewportFrameRef.current = requestAnimationFrame(flushLinkedViewportRange);
   }, [flushLinkedViewportRange]);
+  const strategyMarkerSourceRef = useRef<ChartStrategyResultMarkerSource | null>(null);
+  const [strategyMarkerSource, setStrategyMarkerSource] = useState<ChartStrategyResultMarkerSource | null>(null);
+  const handleStrategyMarkerSourceChange = useCallback((source: ChartStrategyResultMarkerSource | null) => {
+    strategyMarkerSourceRef.current = source;
+    setStrategyMarkerSource(source);
+  }, []);
+  const upstreamViewportRangeChangeRef = useRef(
+    model.chartWorkspace.chart.chartProps.onViewportRangeChange,
+  );
+  useLayoutEffect(() => {
+    upstreamViewportRangeChangeRef.current = model.chartWorkspace.chart.chartProps.onViewportRangeChange;
+  }, [model.chartWorkspace.chart.chartProps.onViewportRangeChange]);
+  const handleChartViewportRangeChange = useCallback((range: ChartSurfaceVisibleRange) => {
+    upstreamViewportRangeChangeRef.current?.(range);
+    strategyMarkerSourceRef.current?.setVisibleRange(range);
+  }, []);
+  const handleLocateStrategyTrade = useCallback((timeMs: number) => {
+    const timeSeconds = timeMs / 1_000;
+    chartSurface.actions.setLinkedVisibleTimeAnchor(timeSeconds);
+    chartSurface.actions.setLinkedCrosshairTime(timeSeconds);
+  }, [chartSurface.actions]);
   useEffect(() => () => {
     if (linkedViewportFrameRef.current !== null) {
       cancelAnimationFrame(linkedViewportFrameRef.current);
@@ -612,6 +634,7 @@ function LiveChartCell({
       drawingKeyBase: drawingScopeBase,
       paneLayoutScope: cellStorageScope,
       onCrosshairMove: handleLinkedCrosshairMove,
+      onViewportRangeChange: handleChartViewportRangeChange,
       onUserViewportRangeChange: handleLinkedViewportRangeChange,
     },
   }), [
@@ -620,6 +643,7 @@ function LiveChartCell({
     drawingScopeBase,
     handleLinkedCrosshairMove,
     handleLinkedViewportRangeChange,
+    handleChartViewportRangeChange,
     model.chartWorkspace.chart,
   ]);
   const featureSurfaces = useMemo(() => ({
@@ -764,6 +788,7 @@ function LiveChartCell({
           <ChartCellCanvas
             chart={chartModel}
             tradeFlow={tradeFlow}
+            strategyMarkerSource={strategyMarkerSource}
             pluginMarkerSource={plugins.view.markerSource}
             pluginChartLayerSource={plugins.view.chartLayerSource}
             drawingInteractionReady={drawingInteractionReady}
@@ -789,6 +814,10 @@ function LiveChartCell({
               active={active}
               panelOpen={strategyPanelOpen}
               bottomPanelHost={portalHosts.bottomPanel}
+              seriesStore={marketData.view.seriesStore}
+              getCurrentVisibleRange={chartSurface.actions.getVisibleRange}
+              onMarkerSourceChange={handleStrategyMarkerSourceChange}
+              onLocateTrade={handleLocateStrategyTrade}
               onAttachmentChange={handleStrategyAttachmentChange}
               onEntryStateChange={handleStrategyEntryStateChange}
               onClosePanel={closeStrategyPanel}

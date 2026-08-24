@@ -4,6 +4,10 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import ChartStrategyTesterPanel from "../ChartStrategyTesterPanel.js";
+import {
+  loadChartStrategyPanelPreferences,
+  saveChartStrategyPanelPreferences,
+} from "../chartStrategyPanelPreferences.js";
 import { StrategyDraftStore, createMemoryStrategyDraftAdapter } from "../StrategyDraftStore.js";
 import { createChartStrategyTesterState } from "../chartStrategyTesterState.js";
 
@@ -89,4 +93,24 @@ test("stop observing appears only after a backend Run ID exists", () => {
 
   assert.doesNotMatch(render(resolving), /data-testid="chart-strategy-stop-observing"/);
   assert.match(render(queued), /data-testid="chart-strategy-stop-observing"/);
+});
+
+test("panel height and active tab persist by cell scope without cross-cell copying", () => {
+  const values = new Map<string, string>();
+  const storage = {
+    getItem(key: string) { return values.get(key) ?? null; },
+    setItem(key: string, value: string) { values.set(key, value); },
+  };
+  saveChartStrategyPanelPreferences("workspace\u0000cell-1", {
+    height: 444,
+    activeTab: "trades",
+  }, storage);
+  assert.deepEqual(loadChartStrategyPanelPreferences("workspace\u0000cell-1", storage), {
+    height: 444,
+    activeTab: "trades",
+  });
+  assert.deepEqual(loadChartStrategyPanelPreferences("workspace\u0000cell-2", storage), {
+    height: 383,
+    activeTab: "script",
+  });
 });

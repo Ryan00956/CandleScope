@@ -16,6 +16,7 @@ import { useLocale } from "../i18n/useLocale.js";
 export interface ChartCellCanvasProps {
   chart: ChartWorkspaceChartModel;
   tradeFlow: TradeFlowRuntime;
+  strategyMarkerSource?: ExternalMarkerSource | null;
   pluginMarkerSource?: ExternalMarkerSource | null;
   pluginChartLayerSource?: PluginChartLayerSource | null;
   errorBoundary?: ComponentType<PropsWithChildren>;
@@ -27,6 +28,7 @@ export interface ChartCellCanvasProps {
 function ChartCellCanvas({
   chart,
   tradeFlow,
+  strategyMarkerSource = null,
   pluginMarkerSource = null,
   pluginChartLayerSource = null,
   errorBoundary = ChartErrorBoundary,
@@ -39,8 +41,12 @@ function ChartCellCanvas({
   const advancedPanes = useAdvancedMarketPanes(chart.advancedMarketData);
   const tradeFlowPanes = useTradeFlowPanes(tradeFlow, chart.chartProps.seriesStore);
   const markerSource = React.useMemo(
-    () => combineExternalMarkerSources([tradeFlow.view.markerSource, pluginMarkerSource]),
-    [pluginMarkerSource, tradeFlow.view.markerSource],
+    () => combineExternalMarkerSources([
+      tradeFlow.view.markerSource,
+      pluginMarkerSource,
+      strategyMarkerSource,
+    ]),
+    [pluginMarkerSource, strategyMarkerSource, tradeFlow.view.markerSource],
   );
   const upstreamDrawingInteractionReadyChange =
     chart.chartProps.onDrawingInteractionReadyChange;

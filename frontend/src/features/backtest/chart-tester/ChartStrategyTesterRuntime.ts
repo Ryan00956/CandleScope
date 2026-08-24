@@ -55,9 +55,11 @@ export class ChartStrategyTesterRuntime {
 
   dispatch(event: ChartStrategyTesterEvent): ChartStrategyTesterState {
     if (this.disposed) return this.state;
+    const projectionWasVisible = this.state.projectionVisible;
     const next = reduceChartStrategyTesterState(this.state, event);
     if (next === this.state) return this.state;
     this.state = next;
+    if (projectionWasVisible && !next.projectionVisible) this.markerSource?.clear?.();
     this.listeners.forEach((listener) => listener(next));
     return next;
   }

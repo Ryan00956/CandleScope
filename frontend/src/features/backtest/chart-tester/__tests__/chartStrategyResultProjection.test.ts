@@ -14,6 +14,7 @@ import {
 function chart(): BacktestChartData {
   return {
     run_id: "bt_1",
+    chart_hash: "sha256:chart-1",
     symbol: "BTCUSDT",
     interval: "1m",
     bars: [],

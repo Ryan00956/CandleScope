@@ -260,6 +260,7 @@ export function buildChartStrategyRunBody(input: {
     gap_policy: "REJECT",
     quick_preset_id: quickPresetId,
     quick_preset_revision: presetRevision,
+    chart_range_mode: input.frozen.attachment.rangeMode,
   };
 }
 

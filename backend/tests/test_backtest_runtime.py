@@ -293,6 +293,8 @@ def test_runtime_command_script_produces_chart_markers_trades_and_equity(
         assert len(chart["bars"]) == 12
         assert len(chart["fills"]) == 2
         assert chart["symbol"] == "BTCUSDT"
+        assert chart["chart_hash"].startswith("sha256:")
+        assert runtime.chart_data(str(created["run_id"]))["chart_hash"] == chart["chart_hash"]
     finally:
         runtime.shutdown()
 

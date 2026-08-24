@@ -129,3 +129,36 @@ test("cell scopes isolate identical cell ids across workspaces", () => {
     chartStrategyTesterCellScope("workspace-b", "cell-1"),
   );
 });
+
+test("a chart-context transition clears completed markers before publishing stale state", () => {
+  const factory = new ChartStrategyTesterRuntimeFactory(true);
+  const runtime = factory.activate(activation("cell-1"));
+  assert.ok(runtime);
+  let markerClears = 0;
+  runtime.setMarkerSource({ clear: () => { markerClears += 1; } });
+  const token = runtime.beginRequest();
+  runtime.dispatch({
+    type: "REQUEST_COMPLETED",
+    token,
+    identity: {
+      cellScope: runtime.cellScope,
+      chartContextHash: "sha256:context",
+      strategyRevisionId: "revision-1",
+      parameterHash: "sha256:parameters",
+      datasetId: "dataset-1",
+      dataEpoch: "epoch-12345678",
+      snapshotHash: "sha256:snapshot",
+      startTimeMs: 1,
+      endTimeMs: 2,
+      executionProfileRevision: "execution-1",
+      runId: "bt_result_12345678",
+    },
+  });
+  assert.equal(runtime.snapshot().projectionVisible, true);
+  const changed = activation("cell-1");
+  changed.session = { ...changed.session, interval: "15m" };
+  factory.activate(changed);
+  assert.equal(markerClears, 1);
+  assert.equal(runtime.snapshot().status, "STALE");
+  assert.equal(runtime.snapshot().projectionVisible, false);
+});

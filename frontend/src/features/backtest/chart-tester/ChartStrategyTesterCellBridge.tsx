@@ -1,8 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import type { ChartSession } from "../../chart-session/chartSessionTypes.js";
 import type { ChartStrategyAttachmentRecord } from "../../chart-workspace/chartWorkspaceTypes.js";
+import { SeriesWindowStore } from "../../market-data/window/seriesWindowStore.js";
+import type { ChartSurfaceVisibleRange } from "../../../chart-adapter/useChartSurfaceRuntime.js";
+import { parseIntervalSeconds } from "../../../utils/intervals.js";
 import { defaultBacktestApi, type ChartContextResolution } from "../backtestApi.js";
 import { pollBacktestRunToTerminal } from "../backtestRunClient.js";
 import { ChartStrategyTesterRuntimeFactory } from "./ChartStrategyTesterRuntime.js";
@@ -24,6 +27,16 @@ import {
   type ResultProjectionIdentity,
 } from "./chartStrategyTesterState.js";
 import ChartStrategyTesterPanel from "./ChartStrategyTesterPanel.js";
+import {
+  chartStrategyResultCache,
+  type ChartStrategyResultBundle,
+} from "./chartStrategyResultCache.js";
+import {
+  createChartStrategyResultMarkerSource,
+  type ChartStrategyResultMarkerSource,
+} from "./chartStrategyResultMarkerSource.js";
+import { t } from "../../../i18n/index.js";
+import { useLocale } from "../../../i18n/useLocale.js";
 import "./chartStrategyTester.css";
 
 const runtimeFactory = new ChartStrategyTesterRuntimeFactory(true);
@@ -36,6 +49,10 @@ export interface ChartStrategyTesterCellBridgeProps {
   active: boolean;
   panelOpen: boolean;
   bottomPanelHost: HTMLElement | null;
+  seriesStore: SeriesWindowStore | null;
+  getCurrentVisibleRange(): ChartSurfaceVisibleRange | null;
+  onMarkerSourceChange(source: ChartStrategyResultMarkerSource | null): void;
+  onLocateTrade(timeMs: number): void;
   onAttachmentChange(attachment: ChartStrategyAttachmentRecord | null): void;
   onEntryStateChange(state: ChartStrategyTesterEntryState): void;
   onClosePanel(): void;
@@ -49,10 +66,15 @@ export default function ChartStrategyTesterCellBridge({
   active,
   panelOpen,
   bottomPanelHost,
+  seriesStore,
+  getCurrentVisibleRange,
+  onMarkerSourceChange,
+  onLocateTrade,
   onAttachmentChange,
   onEntryStateChange,
   onClosePanel,
 }: ChartStrategyTesterCellBridgeProps) {
+  const locale = useLocale();
   const draftStore = useMemo(() => getChartStrategyDraftStore(), []);
   const cellScope = `${workspaceId}\u0000${cellId}`;
   const [runtimeState, setRuntimeState] = useState(() => (
@@ -60,6 +82,9 @@ export default function ChartStrategyTesterCellBridge({
   ));
   const [resolution, setResolution] = useState<ChartContextResolution | null>(null);
   const [sourceDiagnostics, setSourceDiagnostics] = useState<Array<Record<string, unknown>>>([]);
+  const [result, setResult] = useState<ChartStrategyResultBundle | null>(null);
+  const [resultLoading, setResultLoading] = useState(false);
+  const [resultError, setResultError] = useState<string | null>(null);
   const [pendingDataDraftRevision, setPendingDataDraftRevision] = useState<number | null>(null);
   const inFlightRef = useRef<Promise<void> | null>(null);
   const pendingDataRef = useRef<{
@@ -76,6 +101,52 @@ export default function ChartStrategyTesterCellBridge({
     && loadedDraftRevision?.draftId === activeDraftId
     ? loadedDraftRevision.revision
     : null;
+  const projectionSeriesStore = useMemo(() => seriesStore ?? new SeriesWindowStore({
+    intervalSeconds: parseIntervalSeconds(session.interval),
+    seriesKey: `chart-strategy:${cellScope}`,
+  }), [cellScope, seriesStore, session.interval]);
+  const resultMarkerLabels = useMemo(() => {
+    void locale;
+    return {
+      actions: {
+        OPEN_LONG: t("backtest.openLong"),
+        CLOSE_LONG: t("backtest.closeLong"),
+        OPEN_SHORT: t("backtest.openShort"),
+        CLOSE_SHORT: t("backtest.closeShort"),
+        ADD_LONG: t("backtest.addLong"),
+        ADD_SHORT: t("backtest.addShort"),
+        REDUCE_LONG: t("backtest.reduceLong"),
+        REDUCE_SHORT: t("backtest.reduceShort"),
+        REVERSE_TO_LONG: t("backtest.reverseLong"),
+        REVERSE_TO_SHORT: t("backtest.reverseShort"),
+      },
+      rejection: t("backtest.reject"),
+    };
+  }, [locale]);
+  const resultMarkerSource = useMemo(() => createChartStrategyResultMarkerSource({
+    seriesStore: projectionSeriesStore,
+    labels: resultMarkerLabels,
+  }), [projectionSeriesStore, resultMarkerLabels]);
+
+  useLayoutEffect(() => {
+    resultMarkerSource.setVisibleRange(getCurrentVisibleRange());
+    onMarkerSourceChange(resultMarkerSource);
+    return () => {
+      onMarkerSourceChange(null);
+      resultMarkerSource.dispose();
+    };
+  }, [getCurrentVisibleRange, onMarkerSourceChange, resultMarkerSource]);
+
+  useLayoutEffect(() => {
+    const runtime = runtimeFactory.get(workspaceId, cellId);
+    if (!runtime) return;
+    runtime.syncInputs(attachment ? {
+      session,
+      attachment,
+      draftContentRevision,
+    } : null);
+  }, [attachment, cellId, draftContentRevision, session, workspaceId]);
+
   useEffect(() => {
     let cancelled = false;
     const runtime = runtimeFactory.activate({
@@ -86,6 +157,7 @@ export default function ChartStrategyTesterCellBridge({
       draftContentRevision,
       editorOpen: active && panelOpen,
     });
+    runtime?.setMarkerSource(resultMarkerSource);
     const publish = (nextState: typeof runtimeState) => {
       if (!cancelled) setRuntimeState(nextState);
     };
@@ -97,7 +169,50 @@ export default function ChartStrategyTesterCellBridge({
       cancelled = true;
       unsubscribe?.();
     };
-  }, [active, attachment, cellId, cellScope, draftContentRevision, panelOpen, session, workspaceId]);
+  }, [active, attachment, cellId, cellScope, draftContentRevision, panelOpen, resultMarkerSource, session, workspaceId]);
+
+  useEffect(() => {
+    const identity = runtimeState.resultIdentity;
+    if (!identity || runtimeState.status !== "COMPLETED") return undefined;
+    const controller = new AbortController();
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (cancelled) return;
+      setResultLoading(true);
+      setResultError(null);
+    });
+    void chartStrategyResultCache.load(defaultBacktestApi, identity.runId, controller.signal)
+      .then((bundle) => {
+        if (cancelled) return;
+        const runtime = runtimeFactory.get(workspaceId, cellId);
+        const current = runtime?.snapshot();
+        if (!runtime || !current || current.resultIdentity?.runId !== identity.runId) return;
+        setResult(bundle);
+        runtime.setResultReference(bundle);
+        if (current.projectionVisible) resultMarkerSource.setResult(bundle.chart);
+        else resultMarkerSource.clear();
+      })
+      .catch((reason: unknown) => {
+        if (cancelled || controller.signal.aborted) return;
+        setResultError(reason instanceof Error ? reason.message : t("chartTester.result.unavailable"));
+      })
+      .finally(() => {
+        if (!cancelled) setResultLoading(false);
+      });
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [cellId, resultMarkerSource, runtimeState.resultIdentity, runtimeState.status, workspaceId]);
+
+  useEffect(() => {
+    if (result && runtimeState.projectionVisible
+      && runtimeState.resultIdentity?.runId === result.run.run_id) {
+      resultMarkerSource.setResult(result.chart);
+    } else {
+      resultMarkerSource.clear();
+    }
+  }, [result, resultMarkerSource, runtimeState.projectionVisible, runtimeState.resultIdentity?.runId]);
 
   useEffect(() => {
     const draftId = attachment?.strategyDraftId;
@@ -322,6 +437,10 @@ export default function ChartStrategyTesterCellBridge({
       resolution={resolution}
       sourceDiagnostics={sourceDiagnostics}
       pendingDataDraftRevision={pendingDataDraftRevision}
+      result={result}
+      resultLoading={resultLoading}
+      resultError={resultError}
+      onLocateTrade={onLocateTrade}
       onPrepareData={handlePrepareData}
       onStopObserving={handleStopObserving}
       onResumeObserving={handleResumeObserving}

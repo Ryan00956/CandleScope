@@ -4,6 +4,10 @@ export interface BacktestRunRecord {
   fidelity_mode: string;
   source_event_kind: string;
   config_hash: string;
+  config_json?: string;
+  dataset_id?: string;
+  data_epoch?: string;
+  snapshot_hash?: string;
   failure_code?: string | null;
   result?: {
     report_hash?: string;
@@ -164,6 +168,7 @@ export interface BacktestChartBar {
 
 export interface BacktestChartData {
   run_id: string;
+  chart_hash: string;
   symbol: string;
   interval: string;
   bars: BacktestChartBar[];

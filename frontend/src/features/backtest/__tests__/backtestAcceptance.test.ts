@@ -79,6 +79,7 @@ function fakeApi(run: BacktestRunRecord, exported: Record<string, unknown>): Bac
     async getChart() {
       return {
         run_id: run.run_id,
+        chart_hash: "sha256:chart-1",
         symbol: "BTCUSDT",
         interval: "1m",
         bars: [],

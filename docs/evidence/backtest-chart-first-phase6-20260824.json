@@ -1,0 +1,104 @@
+{
+  "schemaVersion": "candlescope.backtest-chart-first.phase6/1",
+  "generatedAt": "2026-08-24T11:40:21+08:00",
+  "status": "COMPLETE_READY_FOR_COMMIT",
+  "identity": {
+    "baseGitHead": "0ef04873728804944690b824982fa0dd754e4344",
+    "branch": "codex/backtest-chart-first-ux",
+    "worktree": "H:\\program\\CandleScope-backtest-chart-first"
+  },
+  "scope": {
+    "phase": 6,
+    "phase7OrLaterCode": false,
+    "defaultFlagEnabled": false,
+    "push": false,
+    "merge": false,
+    "deploy": false,
+    "productionDataChanged": false,
+    "mainWorktreeUserChangesCopied": false
+  },
+  "identityContract": {
+    "cacheKey": "runId|reportHash|chartHash",
+    "runId": "bt_5ebf71207bc04de69fd56c6528c999cb",
+    "reportHash": "sha256:feee4412a4995119ffae2c83bf4913bdbdbdec4bfb95dcd622317716ad01377f",
+    "chartHash": "sha256:464a4c13e0710211402b411b6334760db5aa140fa1a22d34b08202204339ebc9",
+    "crossRunPayloadFailsClosed": true,
+    "missingHashFailsClosed": true,
+    "stableSnapshotIdentity": true
+  },
+  "resultSurface": {
+    "tabs": ["script", "overview", "trades", "settings"],
+    "fixedResultContextBar": true,
+    "allAvailableExactCopy": "全部本地可用数据",
+    "claimsAllHistory": false,
+    "absoluteBoundsShown": true,
+    "credibilityDeepLink": true,
+    "zeroAndMissingStatesExplicit": true,
+    "tradeVirtualization100k": "PASS",
+    "markerVisibleRangeOverscan": true,
+    "markerLimit": 5000,
+    "staleClearsMarkersSameFrame": true,
+    "panelPreferencesPerCell": true,
+    "resultCopiedBetweenCells": false
+  },
+  "browser": {
+    "browser": "headed Chrome",
+    "driver": "repository-local Playwright CLI",
+    "frontend": "http://127.0.0.1:15178",
+    "backend": "isolated LOCAL_OFFLINE backend on 127.0.0.1:18088",
+    "fixtureBars": 60,
+    "fixtureNetworkForbidden": true,
+    "realBacktestRequestsAll200": true,
+    "mainChartRoute": "CONTROLLED_PLAYWRIGHT_1H_ONLY_FROM_REAL_RUN_CHART",
+    "runReportChartApisIntercepted": false,
+    "otherIntervalsExpectedLocalOfflineFailures": true,
+    "consoleClaimedClean": false,
+    "viewports": [
+      { "width": 1440, "height": 900, "result": "PASS" },
+      { "width": 1366, "height": 768, "result": "PASS", "documentOverflow": false }
+    ],
+    "markers": ["开多 104.0104", "平多 105.9894", "开多 100.01"],
+    "staleMarkersHidden": "PASS",
+    "fourCellIsolation": "PASS",
+    "tradeLocatorCurrentCellOnly": "PASS",
+    "deepLink": "PASS",
+    "panelHeight": { "beforePx": 383, "afterPx": 459, "restoredAfterReload": true },
+    "export": {
+      "page": { "width": 2732, "height": 1536, "includesResults": true },
+      "chart": { "width": 1033, "height": 357, "includesResults": false },
+      "mainPane": { "width": 1033, "height": 357, "includesResults": false },
+      "singlePaneChartAndMainPaneByteIdentical": true
+    }
+  },
+  "checks": {
+    "frontendBacktest": { "result": "PASS", "tests": 81, "suites": 3, "failures": 0, "finalFixRerun": true },
+    "frontendFull": { "result": "PASS", "tests": 3358, "suites": 3, "failures": 0, "elapsedMs": 151287.5872 },
+    "backendFocused": { "result": "PASS", "tests": 18, "failures": 0 },
+    "backendBacktestFull": { "result": "PASS", "tests": 226, "failures": 0, "existingDeprecationWarnings": 4 },
+    "frontendTypecheck": { "result": "PASS" },
+    "frontendLint": { "result": "PASS", "scope": "full frontend" },
+    "frontendArchitecture": { "result": "PASS", "allowlistEntries": 0 },
+    "frontendI18n": { "result": "PASS", "catalogKeys": 3712, "sourceFiles": 609 },
+    "frontendBuildFlagOff": { "result": "PASS_WITH_EXISTING_CHUNK_WARNING", "modules": 648, "liveRawKb": 537.13, "liveGzipKb": 155.86 },
+    "frontendBuildFlagOn": { "result": "PASS_WITH_EXISTING_CHUNK_WARNING", "modules": 648, "bridgeRawKb": 59.11, "bridgeGzipKb": 17.58 },
+    "pythonCompile": { "result": "PASS" },
+    "diffCheck": { "result": "PASS" }
+  },
+  "screenshots": [
+    { "path": "docs/evidence/backtest-chart-first-phase6/completed-1440x900.png", "sha256": "a7552bc3ac19ee7f477ab5274f170feeacb8a49a2a52771f20f3afeb9532bea1" },
+    { "path": "docs/evidence/backtest-chart-first-phase6/completed-1366x768.png", "sha256": "1d5a71881ef4a58c6656f9b3d5c0db79d98c58602b5c78f5eb8839f6c8ed5ebd" },
+    { "path": "docs/evidence/backtest-chart-first-phase6/four-cell-result-markers-cell1-1440x900.png", "sha256": "73df69f1c30580edd2b0481f6987ca48761b959e723de3b1cbcb60e55c149a41" },
+    { "path": "docs/evidence/backtest-chart-first-phase6/stale-markers-hidden-1440x900.png", "sha256": "ab7e8af4eb9ed79f11a74a5595bf9fdc8d38a6880c62ace160cc1c19e43479d4" },
+    { "path": "docs/evidence/backtest-chart-first-phase6/four-cell-isolation-1440x900.png", "sha256": "9483e5b34d2e2f172f974338356bf6a125f93865d28c15934c23fab2d8d3af06" },
+    { "path": "docs/evidence/backtest-chart-first-phase6/export-page-with-results.png", "sha256": "7f95fe1e39b97dd6f28953e86b5bf32d18ca4f5037a4d4e4feeadb2b5ff79d74" },
+    { "path": "docs/evidence/backtest-chart-first-phase6/export-chart-with-markers-no-results.png", "sha256": "97fec4b4cac4ce2caaf3bcc768d46c23ec44fbd6a0e29573ffb225e7a481d55b" },
+    { "path": "docs/evidence/backtest-chart-first-phase6/export-main-pane-with-markers-no-results.png", "sha256": "97fec4b4cac4ce2caaf3bcc768d46c23ec44fbd6a0e29573ffb225e7a481d55b" }
+  ],
+  "knownNonPassAttempts": [
+    { "step": "first M9 targeted contract after equity extraction", "result": "OLD_SOURCE_PATH_ONLY", "resolution": "validate extracted component and compatibility re-export" },
+    { "step": "first final lint and typecheck", "result": "HELPER_EFFECT_DEPENDENCY_NULLABILITY_FAILURES", "resolution": "split helpers, defer publications, and tighten nullable/hash types" },
+    { "step": "final marker source review", "result": "UNSTABLE_SNAPSHOT_REFERENCE", "resolution": "memoize by revision and add strict reference regression" },
+    { "step": "first controlled Playwright chart route", "result": "URL_GLOBAL_UNAVAILABLE", "resolution": "remove route and reinstall handler without the unavailable global" }
+  ],
+  "decision": "PHASE6_COMPLETE_PHASE7_NOT_STARTED"
+}

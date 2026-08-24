@@ -47,6 +47,7 @@ class RunCreateRequest(BaseModel):
     fee_source: str | None = Field(default=None, max_length=80)
     quick_preset_id: str | None = Field(default=None, max_length=80)
     quick_preset_revision: str | None = Field(default=None, max_length=40)
+    chart_range_mode: Literal["ALL_AVAILABLE", "VISIBLE", "CUSTOM"] | None = None
     funding_rate: str = Field(default="0", max_length=64)
     funding_interval_hours: int = Field(default=8, ge=1, le=168)
     funding_mode: str = Field(default="OFF", max_length=32)

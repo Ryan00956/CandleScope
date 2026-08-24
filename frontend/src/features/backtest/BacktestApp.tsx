@@ -18,6 +18,7 @@ import {
   isBacktestEntryEnabled,
   isPythonStrategyEntryEnabled,
 } from "./backtestFlags.js";
+import { backtestRunIdFromSearch } from "./backtestDeepLink.js";
 import PythonStudioPanel from "./PythonStudioPanel.js";
 import {
   composePythonExport,
@@ -101,6 +102,9 @@ export default function BacktestApp() {
   const enabled = useMemo(() => isBacktestEntryEnabled(), []);
   const pythonEnabled = useMemo(() => isPythonStrategyEntryEnabled(), []);
   const restoredStudio = useMemo(() => restorePythonStudioState(pythonEnabled), [pythonEnabled]);
+  const deepLinkedRunId = useMemo(() => backtestRunIdFromSearch(
+    typeof window === "undefined" ? "" : window.location.search,
+  ), []);
   const [datasets, setDatasets] = useState<BacktestDataset[]>([]);
   const [capabilities, setCapabilities] = useState<BacktestCapabilities | null>(null);
   const [runs, setRuns] = useState<BacktestRunRecord[]>([]);
@@ -406,9 +410,11 @@ export default function BacktestApp() {
       if (restoredRevision) setStrategyRevisionId(restoredRevision);
       if (restoredStudio?.smokePassed) setSmokePassed(true);
       setSelectedRunId(
-        restoredStudio?.runId && nextRuns.some((item) => item.run_id === restoredStudio.runId)
-          ? restoredStudio.runId
-          : nextRuns[0]?.run_id ?? null,
+        deepLinkedRunId && nextRuns.some((item) => item.run_id === deepLinkedRunId)
+          ? deepLinkedRunId
+          : restoredStudio?.runId && nextRuns.some((item) => item.run_id === restoredStudio.runId)
+            ? restoredStudio.runId
+            : nextRuns[0]?.run_id ?? null,
       );
       setSelectedStudyId(
         restoredStudio?.studyId && nextStudies.some((item) => item.study_id === restoredStudio.studyId)
@@ -422,7 +428,7 @@ export default function BacktestApp() {
       if (!controller.signal.aborted) setLoading(false);
     });
     return () => controller.abort();
-  }, [enabled, restoredStudio]);
+  }, [deepLinkedRunId, enabled, restoredStudio]);
 
   useEffect(() => {
     if (!enabled || (!hasActiveRun && !hasActiveStudy)) return undefined;

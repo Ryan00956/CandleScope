@@ -37,20 +37,31 @@ import type {
   ChartStrategyTesterState,
   ChartStrategyTesterStatus,
 } from "./chartStrategyTesterState.js";
+import type { ChartStrategyResultBundle } from "./chartStrategyResultCache.js";
+import {
+  ChartStrategyResultContextBar,
+  ChartStrategyResultOverview,
+  ChartStrategyTradeList,
+} from "./ChartStrategyResultViews.js";
+import {
+  CHART_STRATEGY_MAX_PANEL_HEIGHT,
+  CHART_STRATEGY_MIN_PANEL_HEIGHT,
+  clampChartStrategyPanelHeight,
+  loadChartStrategyPanelPreferences,
+  saveChartStrategyPanelPreferences,
+  type ChartStrategyPanelTab,
+} from "./chartStrategyPanelPreferences.js";
 
 const StrategyScriptWorkspace = lazy(() => import("./StrategyScriptWorkspace.js"));
 
-type PanelTab = "script" | "overview" | "trades" | "settings";
+type PanelTab = ChartStrategyPanelTab;
 type StartView = "start" | "templates" | "recent" | "editor";
 
-const MIN_PANEL_HEIGHT = 260;
-const MAX_PANEL_HEIGHT = 520;
+const MIN_PANEL_HEIGHT = CHART_STRATEGY_MIN_PANEL_HEIGHT;
+const MAX_PANEL_HEIGHT = CHART_STRATEGY_MAX_PANEL_HEIGHT;
 
 function clampPanelHeight(value: number): number {
-  const viewportLimit = typeof window === "undefined"
-    ? MAX_PANEL_HEIGHT
-    : Math.max(MIN_PANEL_HEIGHT, Math.floor(window.innerHeight * 0.68));
-  return Math.min(MAX_PANEL_HEIGHT, viewportLimit, Math.max(MIN_PANEL_HEIGHT, Math.round(value)));
+  return clampChartStrategyPanelHeight(value);
 }
 
 function sameCursor(left: StrategyDraftCursor | null, right: StrategyDraftCursor | null): boolean {
@@ -127,6 +138,10 @@ export interface ChartStrategyTesterPanelProps {
   resolution: ChartContextResolution | null;
   sourceDiagnostics: Array<Record<string, unknown>>;
   pendingDataDraftRevision: number | null;
+  result?: ChartStrategyResultBundle | null;
+  resultLoading?: boolean;
+  resultError?: string | null;
+  onLocateTrade?(timeMs: number): void;
   onPrepareData(): void;
   onStopObserving(): void;
   onResumeObserving(): void;
@@ -146,6 +161,10 @@ export default function ChartStrategyTesterPanel({
   resolution,
   sourceDiagnostics,
   pendingDataDraftRevision,
+  result = null,
+  resultLoading = false,
+  resultError = null,
+  onLocateTrade = () => undefined,
   onPrepareData,
   onStopObserving,
   onResumeObserving,
@@ -153,8 +172,10 @@ export default function ChartStrategyTesterPanel({
   onClose,
 }: ChartStrategyTesterPanelProps) {
   const locale = useLocale();
-  const [height, setHeight] = useState(() => clampPanelHeight(383));
-  const [activeTab, setActiveTab] = useState<PanelTab>("script");
+  const [height, setHeight] = useState(() => loadChartStrategyPanelPreferences(cellScope).height);
+  const [activeTab, setActiveTab] = useState<PanelTab>(() => (
+    attachment ? loadChartStrategyPanelPreferences(cellScope).activeTab : "script"
+  ));
   const [startView, setStartView] = useState<StartView>(attachment ? "editor" : "start");
   const currentAttachment = attachment;
   const [draft, setDraft] = useState<StrategyDraftRecord | null>(null);
@@ -175,6 +196,15 @@ export default function ChartStrategyTesterPanel({
   }>({ draft: null, source: "", cursor: null });
 
   useEffect(() => () => resizeCleanupRef.current?.(), []);
+  useEffect(() => {
+    saveChartStrategyPanelPreferences(cellScope, { height, activeTab });
+  }, [activeTab, cellScope, height]);
+  const resultCacheKey = result?.cacheKey ?? null;
+  useEffect(() => {
+    if (!resultCacheKey) return undefined;
+    const timer = window.setTimeout(() => setActiveTab("overview"), 0);
+    return () => window.clearTimeout(timer);
+  }, [resultCacheKey]);
   useEffect(() => {
     pendingSaveRef.current = { draft: activeDraft, source, cursor };
   }, [activeDraft, cursor, source]);
@@ -537,6 +567,25 @@ export default function ChartStrategyTesterPanel({
         </button>
       </header>
 
+      {result && (
+        <ChartStrategyResultContextBar
+          result={result}
+          locale={locale}
+          stale={runState.status === "STALE" || !runState.projectionVisible}
+        />
+      )}
+      {!result && resultLoading && (
+        <div className="chart-strategy-result-loading" role="status">
+          {t("chartTester.result.loading")}
+        </div>
+      )}
+      {!result && resultError && (
+        <div className="chart-strategy-result-load-error" role="alert">
+          <strong>{t("chartTester.result.unavailable")}</strong>
+          <span>{resultError}</span>
+        </div>
+      )}
+
       <div className="chart-strategy-tester-body" role="tabpanel">
         {activeTab === "script" && startView === "start" && (
           <div className="chart-strategy-start-view">
@@ -693,23 +742,31 @@ export default function ChartStrategyTesterPanel({
         )}
 
         {activeTab === "overview" && (
-          <div className="chart-strategy-run-overview" data-testid="chart-strategy-run-overview">
-            <p className="chart-strategy-eyebrow">{t("chartTester.overviewEyebrow")}</p>
-            <h2>{t(runStatusKey(runState.status))}</h2>
-            <p>{runState.status === "COMPLETED"
-              ? t("chartTester.overview.completedDetail")
-              : t("chartTester.overview.pendingDetail")}</p>
-            {actionableCopy && (
-              <div className="chart-strategy-actionable-error">
-                <strong>{actionableCopy.message}</strong>
-                <span>{actionableCopy.action}</span>
-                <details>
-                  <summary>{t("chartTester.error.details")}</summary>
-                  <code>{runState.actionableError?.code}</code>
-                </details>
-              </div>
-            )}
-          </div>
+          result ? (
+            <ChartStrategyResultOverview
+              result={result}
+              stale={runState.status === "STALE" || !runState.projectionVisible}
+              onOpenTrades={() => setActiveTab("trades")}
+            />
+          ) : (
+            <div className="chart-strategy-run-overview" data-testid="chart-strategy-run-overview">
+              <p className="chart-strategy-eyebrow">{t("chartTester.overviewEyebrow")}</p>
+              <h2>{t(runStatusKey(runState.status))}</h2>
+              <p>{runState.status === "COMPLETED"
+                ? t("chartTester.result.loading")
+                : t("chartTester.overview.pendingDetail")}</p>
+              {actionableCopy && (
+                <div className="chart-strategy-actionable-error">
+                  <strong>{actionableCopy.message}</strong>
+                  <span>{actionableCopy.action}</span>
+                  <details>
+                    <summary>{t("chartTester.error.details")}</summary>
+                    <code>{runState.actionableError?.code}</code>
+                  </details>
+                </div>
+              )}
+            </div>
+          )
         )}
 
         {activeTab === "settings" && currentAttachment && (
@@ -730,10 +787,14 @@ export default function ChartStrategyTesterPanel({
         )}
 
         {activeTab === "trades" && (
-          <div className="chart-strategy-placeholder">
-            <strong>{t("chartTester.tab.trades")}</strong>
-            <p>{t("chartTester.placeholder.trades")}</p>
-          </div>
+          result
+            ? <ChartStrategyTradeList result={result} locale={locale} onLocateTrade={onLocateTrade} />
+            : (
+              <div className="chart-strategy-placeholder">
+                <strong>{t("chartTester.tab.trades")}</strong>
+                <p>{resultError ?? t("chartTester.placeholder.trades")}</p>
+              </div>
+            )
         )}
       </div>
     </section>

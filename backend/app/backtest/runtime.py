@@ -34,6 +34,8 @@ from app.market_dataset.snapshot import (
 from app.simulation.trade_bar_builder import derive_complete_trade_bars
 from app.simulation.contract_accounting import merge_contract_timeline
 
+from .identity import canonical_json
+
 from .errors import BacktestError
 from .chart_context import ChartBacktestContextResolver
 from .service import BacktestService
@@ -339,7 +341,7 @@ class BacktestRuntime:
         if truncated:
             bars = bars[-max_bars:]
         report = self.service.get_report(run_id)
-        return {
+        payload = {
             "run_id": run_id,
             "symbol": self._manifest(str(record["dataset_id"]))["symbol"],
             "interval": interval,
@@ -349,6 +351,8 @@ class BacktestRuntime:
             "equity_curve": list(report.get("equity_curve") or [])[-max_bars:],
             "truncated": truncated,
         }
+        payload["chart_hash"] = "sha256:" + sha256_hex(canonical_json(payload))
+        return payload
 
     def _legacy_trade_chart_bars(
         self,

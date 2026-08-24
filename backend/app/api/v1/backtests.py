@@ -44,6 +44,9 @@ class RunCreateRequest(BaseModel):
     slippage_bps: str = Field(default="1", max_length=64)
     taker_fee_bps: str = Field(default="0", max_length=64)
     maker_fee_bps: str = Field(default="0", max_length=64)
+    fee_source: str | None = Field(default=None, max_length=80)
+    quick_preset_id: str | None = Field(default=None, max_length=80)
+    quick_preset_revision: str | None = Field(default=None, max_length=40)
     funding_rate: str = Field(default="0", max_length=64)
     funding_interval_hours: int = Field(default=8, ge=1, le=168)
     funding_mode: str = Field(default="OFF", max_length=32)
@@ -83,6 +86,17 @@ class RunCreateRequest(BaseModel):
     study_id: str | None = None
     python_runtime_mode: str | None = Field(default=None, max_length=32)
     python_trusted_confirmed: bool = False
+
+    @model_validator(mode="after")
+    def require_explicit_quick_fee_identity(self) -> "RunCreateRequest":
+        if not self.quick_preset_id:
+            return self
+        required_fee_fields = {"taker_fee_bps", "maker_fee_bps", "slippage_bps"}
+        missing = sorted(required_fee_fields - self.model_fields_set)
+        if not self.quick_preset_revision or not self.fee_source or missing:
+            suffix = f"; missing explicit fields: {', '.join(missing)}" if missing else ""
+            raise ValueError(f"quick backtests require a versioned, confirmed fee preset{suffix}")
+        return self
 
 
 class StudyCreateRequest(BaseModel):

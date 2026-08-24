@@ -9,12 +9,15 @@
 > Phase 3 已完成 workspace schema 8、每 cell attachment、独立草稿存储、纯 stale/generation
 > 状态机与按需 runtime 生命周期。Phase 4 已在默认关闭的 flag 后接入活动图表独占的策略入口、
 > 三种开始方式、懒加载 Monaco、草稿自动保存与恢复、轻量诊断、四标签底部工作区及完整浏览器矩阵。
+> Phase 5 已接通安全 Pyne provider、revision 幂等复用、resolve/smoke/validate/re-resolve/create/poll
+> 流水线、显式 NEEDS_DATA 确认、停止/恢复观察，以及高级研究可见和导出。
 > 证据见
 > [Phase 0 结果](evidence/BACKTEST_CHART_FIRST_PHASE0_RESULT_20260824_zh.md) 与
 > [Phase 1 结果](evidence/BACKTEST_CHART_FIRST_PHASE1_RESULT_20260824_zh.md)、
 > [Phase 2 结果](evidence/BACKTEST_CHART_FIRST_PHASE2_RESULT_20260824_zh.md) 与
 > [Phase 3 结果](evidence/BACKTEST_CHART_FIRST_PHASE3_RESULT_20260824_zh.md) 与
-> [Phase 4 结果](evidence/BACKTEST_CHART_FIRST_PHASE4_RESULT_20260824_zh.md)。
+> [Phase 4 结果](evidence/BACKTEST_CHART_FIRST_PHASE4_RESULT_20260824_zh.md) 与
+> [Phase 5 结果](evidence/BACKTEST_CHART_FIRST_PHASE5_RESULT_20260824_zh.md)。
 >
 > 文档类型：产品合同 + 仓库级执行计划
 >
@@ -1235,6 +1238,13 @@ backend/tests/test_backtest_run_comparison_v3.py
 关闭前端 flag；bottomPanel 渲染 `null`，普通行情页恢复原布局。
 
 ## Phase 5：一个“运行”按钮与第一次回测
+
+实施状态（2026-08-24）：`COMPLETE`。
+
+- 执行计划：[BACKTEST_CHART_FIRST_PHASE5_PLAN_20260824_zh.md](evidence/BACKTEST_CHART_FIRST_PHASE5_PLAN_20260824_zh.md)
+- 结果证据：[BACKTEST_CHART_FIRST_PHASE5_RESULT_20260824_zh.md](evidence/BACKTEST_CHART_FIRST_PHASE5_RESULT_20260824_zh.md)
+- 机器可读证据：[backtest-chart-first-phase5-20260824.json](evidence/backtest-chart-first-phase5-20260824.json)
+- 浏览器截图：[backtest-chart-first-phase5](evidence/backtest-chart-first-phase5/)
 
 ### 目标
 

@@ -13,6 +13,11 @@ from app.backtest.strategy.builtin import (
     build_builtin_provider,
 )
 from app.backtest.strategy.pine_adapter import MATRIX_VERSION, analyze_pine_strategy
+from app.backtest.strategy.chart_pyne import (
+    CHART_PYNE_REVISION,
+    ChartPyneStrategyProvider,
+    compile_chart_pyne,
+)
 from app.backtest.strategy.protocol import StrategyProviderError, canonical_hash
 
 STRATEGY_REVISION_SCHEMA = "STRATEGY_REVISION_V2"
@@ -23,6 +28,7 @@ LANGUAGES = frozenset(
         "BUILTIN_TEMPLATE",
         "PINE_SUBSET",
         "PYNE_ORDER_DSL",
+        "PYNE_CHART_V1",
         "EXTERNAL_ARTIFACT_REF",
         "PYTHON_SOURCE",
     }
@@ -85,6 +91,9 @@ def compile_revision(payload: Mapping[str, object], *, now_ms: int) -> dict[str,
             )
         # The current safe Pine subset has one frozen interpreter identity.
         base = "pine-long-flat-v1"
+    elif language == "PYNE_CHART_V1":
+        compile_chart_pyne(source)
+        base = CHART_PYNE_REVISION
     elif language == "PYNE_ORDER_DSL":
         base = BUILTIN_ORDER_COMMAND_REVISION
         try:
@@ -195,7 +204,9 @@ def compile_revision(payload: Mapping[str, object], *, now_ms: int) -> dict[str,
     compiled_hash = canonical_hash(compiled)
     revision_id = "srv2_" + uuid.uuid4().hex
     provider = (
-        None
+        ChartPyneStrategyProvider()
+        if base == CHART_PYNE_REVISION
+        else None
         if base in {"pine-long-flat-v1", "python-source-v1"}
         else build_builtin_provider(base)
     )

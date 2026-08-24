@@ -123,6 +123,7 @@
 
 .chart-strategy-run-button:hover,
 .chart-strategy-run-button:focus-visible { filter: brightness(1.12); outline: 2px solid rgba(59, 130, 246, 0.35); }
+.chart-strategy-run-button:disabled { cursor: progress; filter: saturate(0.72); opacity: 0.78; }
 
 .chart-strategy-close-button,
 .chart-strategy-link-button {
@@ -271,6 +272,73 @@
 .chart-strategy-problem p { margin: 6px 0 0; color: var(--text-secondary); font-size: 10px; line-height: 1.5; }
 .chart-strategy-problem button { margin-top: 8px; padding: 0; border: 0; color: #93c5fd; background: transparent; font-size: 10px; cursor: pointer; }
 
+.chart-strategy-run-status {
+  margin-bottom: 12px;
+  padding: 10px;
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  border-radius: 6px;
+  background: rgba(37, 99, 235, 0.08);
+}
+
+.chart-strategy-run-status strong,
+.chart-strategy-run-status p,
+.chart-strategy-run-status small { display: block; }
+.chart-strategy-run-status strong { color: #bfdbfe; font-size: 11px; }
+.chart-strategy-run-status p { margin: 6px 0 0; color: var(--text-secondary); font-size: 10px; line-height: 1.45; }
+.chart-strategy-run-status small { margin-top: 6px; color: #93c5fd; font-size: 10px; }
+.chart-strategy-run-status.status-failed,
+.chart-strategy-run-status.status-unsupported { border-color: rgba(239, 68, 68, 0.38); background: rgba(239, 68, 68, 0.08); }
+.chart-strategy-run-status.status-failed strong,
+.chart-strategy-run-status.status-unsupported strong { color: #fecaca; }
+.chart-strategy-run-status.status-completed { border-color: rgba(34, 197, 94, 0.32); background: rgba(34, 197, 94, 0.08); }
+.chart-strategy-run-status.status-completed strong { color: #bbf7d0; }
+
+.chart-strategy-run-overview {
+  max-width: 760px;
+  min-height: 210px;
+  padding: 22px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: #0b1220;
+}
+
+.chart-strategy-run-overview h2 { margin: 0; font-size: 18px; }
+.chart-strategy-run-overview > p:not(.chart-strategy-eyebrow) { max-width: 620px; color: var(--text-secondary); font-size: 11px; line-height: 1.6; }
+
+.chart-strategy-actionable-error {
+  display: grid;
+  gap: 7px;
+  margin-top: 18px;
+  padding: 13px;
+  border-left: 3px solid var(--candle-down);
+  background: rgba(239, 68, 68, 0.08);
+}
+.chart-strategy-actionable-error strong { color: #fecaca; font-size: 11px; }
+.chart-strategy-actionable-error span { color: var(--text-secondary); font-size: 10px; }
+.chart-strategy-actionable-error details { color: var(--text-muted); font-size: 9px; }
+.chart-strategy-actionable-error code { display: block; margin-top: 6px; }
+
+.chart-strategy-quick-settings {
+  display: grid;
+  max-width: 920px;
+  grid-template-columns: repeat(5, minmax(120px, 1fr));
+  gap: 10px;
+}
+
+.chart-strategy-quick-settings > div {
+  min-width: 0;
+  min-height: 104px;
+  padding: 14px;
+  border: 1px solid #263348;
+  border-radius: 7px;
+  background: #0b1220;
+}
+
+.chart-strategy-quick-settings span,
+.chart-strategy-quick-settings strong { display: block; }
+.chart-strategy-quick-settings span { color: var(--text-muted); font: 650 9px/1 var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; }
+.chart-strategy-quick-settings strong { margin-top: 19px; color: var(--text-primary); font-size: 12px; line-height: 1.45; }
+
 .chart-strategy-entry-button {
   display: inline-flex;
   min-width: 98px;
@@ -309,4 +377,5 @@
   .chart-strategy-start-grid button > strong { margin-top: 12px; }
   .chart-strategy-editor-layout { grid-template-columns: 1fr; }
   .chart-strategy-problems { min-height: 120px; }
+  .chart-strategy-quick-settings { grid-template-columns: 1fr 1fr; }
 }

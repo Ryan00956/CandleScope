@@ -121,12 +121,18 @@ class IsolatedStrategyProvider:
 
 
 def _provider_process_main(connection: Any, revision_id: str) -> None:
+    from app.backtest.strategy.chart_pyne import (
+        CHART_PYNE_REVISION,
+        ChartPyneStrategyProvider,
+    )
     from app.backtest.strategy.registry import build_default_strategy_registry
     from app.backtest.strategy.pine_adapter import PineStrategyProvider
 
     try:
         provider = (
-            PineStrategyProvider()
+            ChartPyneStrategyProvider()
+            if revision_id == CHART_PYNE_REVISION
+            else PineStrategyProvider()
             if revision_id == "pine-long-flat-v1"
             else build_default_strategy_registry().build(revision_id)
         )

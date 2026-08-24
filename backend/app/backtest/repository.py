@@ -97,6 +97,39 @@ class BacktestRepository:
         self.connection.commit()
 
     @_locked
+    def get_or_insert_strategy_revision(
+        self, payload: dict[str, Any]
+    ) -> tuple[dict[str, Any], bool]:
+        """Atomically reuse an active immutable compile identity or insert it."""
+
+        existing = self.connection.execute(
+            """
+            SELECT * FROM backtest_strategy_revisions
+            WHERE language = ? AND source_hash = ? AND dependency_hash = ?
+              AND runtime_revision = ? AND archived_at_ms IS NULL
+            ORDER BY created_at_ms, revision_id
+            LIMIT 1
+            """,
+            (
+                payload["language"],
+                payload["source_hash"],
+                payload["dependency_hash"],
+                payload["runtime_revision"],
+            ),
+        ).fetchone()
+        if existing is not None:
+            return dict(existing), False
+        stored = {key: value for key, value in payload.items() if key != "diagnostics"}
+        columns = ", ".join(stored)
+        placeholders = ", ".join(f":{name}" for name in stored)
+        self.connection.execute(
+            f"INSERT INTO backtest_strategy_revisions({columns}) VALUES ({placeholders})",
+            stored,
+        )
+        self.connection.commit()
+        return dict(stored), True
+
+    @_locked
     def get_strategy_revision(self, revision_id: str) -> dict[str, Any] | None:
         row = self.connection.execute(
             "SELECT * FROM backtest_strategy_revisions WHERE revision_id = ?",
@@ -163,7 +196,8 @@ class BacktestRepository:
         columns = ", ".join(payload)
         placeholders = ", ".join(f":{name}" for name in payload)
         self.connection.execute(
-            f"INSERT INTO backtest_strategy_smokes({columns}) VALUES ({placeholders})",
+            f"INSERT INTO backtest_strategy_smokes({columns}) VALUES ({placeholders}) "
+            "ON CONFLICT(receipt_hash) DO NOTHING",
             payload,
         )
         self.connection.commit()

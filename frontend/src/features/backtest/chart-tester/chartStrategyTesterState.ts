@@ -91,6 +91,12 @@ export type ChartStrategyTesterEvent =
     token: ChartStrategyTesterGenerationToken;
     error: ChartStrategyTesterError;
   }
+  | {
+    type: "BIND_STRATEGY_REVISION";
+    token: ChartStrategyTesterGenerationToken;
+    strategyRevisionId: string;
+  }
+  | { type: "STOP_OBSERVING" }
   | { type: "CLEAR_RESULT" }
   | { type: "DETACH" };
 
@@ -231,8 +237,30 @@ export function reduceChartStrategyTesterState(
       actionableError: null,
     };
   }
+  if (event.type === "STOP_OBSERVING") {
+    return {
+      ...state,
+      status: state.inputs ? "READY" : "DETACHED",
+      generation: state.generation + 1,
+      projectionVisible: false,
+      actionableError: null,
+    };
+  }
   if (event.token.cellScope !== state.cellScope
     || event.token.generation !== state.generation) return state;
+  if (event.type === "BIND_STRATEGY_REVISION") {
+    if (!state.inputs) return state;
+    return {
+      ...state,
+      inputs: {
+        ...state.inputs,
+        attachment: {
+          ...state.inputs.attachment,
+          strategyRevisionId: event.strategyRevisionId,
+        },
+      },
+    };
+  }
   if (event.type === "REQUEST_STATUS") {
     return {
       ...state,

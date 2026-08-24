@@ -63,12 +63,16 @@ export class ChartStrategyTesterRuntime {
   }
 
   syncInputs(inputs: ChartStrategyTesterInputs | null): ChartStrategyTesterState {
-    return this.dispatch({ type: "SYNC_INPUTS", inputs });
+    const before = this.state.generation;
+    const next = this.dispatch({ type: "SYNC_INPUTS", inputs });
+    if (next.generation !== before) this.abortRequests();
+    return next;
   }
 
   beginRequest(
     status: "RESOLVING" | "QUEUED" | "RUNNING" = "RESOLVING",
   ): ChartStrategyTesterGenerationToken {
+    this.abortRequests();
     this.dispatch({ type: "BEGIN_REQUEST", status });
     return currentChartStrategyTesterToken(this.state);
   }
@@ -92,6 +96,13 @@ export class ChartStrategyTesterRuntime {
     }
     this.abortControllers.add(controller);
     return () => this.abortControllers.delete(controller);
+  }
+
+  abortRequests(reason = "chart strategy observation stopped"): void {
+    const error = new Error(reason);
+    error.name = "AbortError";
+    this.abortControllers.forEach((controller) => controller.abort(error));
+    this.abortControllers.clear();
   }
 
   trackCleanup(cleanup: () => void): () => void {
@@ -129,7 +140,7 @@ export class ChartStrategyTesterRuntime {
     if (this.disposed) return;
     this.disposed = true;
     this.timers.forEach((timer) => clearTimeout(timer));
-    this.abortControllers.forEach((controller) => controller.abort());
+    this.abortRequests("chart strategy runtime disposed");
     this.cleanups.forEach((cleanup) => cleanup());
     this.markerSource?.clear?.();
     this.markerSource?.dispose?.();

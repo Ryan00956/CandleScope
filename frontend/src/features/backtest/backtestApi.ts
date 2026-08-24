@@ -33,6 +33,7 @@ export interface StrategyRevisionRecord extends BacktestStrategyDescriptor {
   schema_version?: string;
   base_revision_id?: string;
   diagnostics?: Array<Record<string, unknown>>;
+  reused?: boolean;
 }
 
 export interface BacktestCapabilities {
@@ -232,16 +233,37 @@ export interface BacktestSnapshot {
   fidelity_capabilities: string[];
 }
 
+export class BacktestApiError extends Error {
+  constructor(
+    readonly code: string,
+    readonly apiMessage: string,
+    readonly details: Record<string, unknown>,
+    readonly status: number,
+  ) {
+    super(`${code}: ${apiMessage}`);
+    this.name = "BacktestApiError";
+  }
+}
+
 async function readJson<T>(response: Response): Promise<T> {
   if (!response.ok) {
     const payload = (await response.json().catch(() => null)) as {
-      error?: { code?: string; message?: string };
+      error?: { code?: string; message?: string; details?: Record<string, unknown> };
     } | null;
     const detail = payload?.error;
-    throw new Error(
-      detail?.code && detail.message
-        ? `${detail.code}: ${detail.message}`
-        : `backtest API ${response.status}`,
+    if (detail?.code && detail.message) {
+      throw new BacktestApiError(
+        detail.code,
+        detail.message,
+        detail.details ?? {},
+        response.status,
+      );
+    }
+    throw new BacktestApiError(
+      "BACKTEST_API_UNAVAILABLE",
+      `backtest API ${response.status}`,
+      {},
+      response.status,
     );
   }
   return (await response.json()) as T;

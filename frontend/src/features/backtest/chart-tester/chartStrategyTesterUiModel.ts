@@ -71,11 +71,16 @@ export const CHART_STRATEGY_TEMPLATES: readonly ChartStrategyTemplate[] = Object
 ]);
 
 export interface ChartStrategyDraftIssue {
-  code: "EMPTY_SOURCE" | "UNDECLARED_TARGET" | "UNBALANCED_DELIMITER";
+  code:
+    | "EMPTY_SOURCE"
+    | "UNDECLARED_TARGET"
+    | "UNBALANCED_DELIMITER"
+    | "SERVER_DIAGNOSTIC";
   line: number;
   column: number;
   endColumn: number;
   variable: string | null;
+  message?: string;
 }
 
 function lineAndColumn(source: string, offset: number): { line: number; column: number } {

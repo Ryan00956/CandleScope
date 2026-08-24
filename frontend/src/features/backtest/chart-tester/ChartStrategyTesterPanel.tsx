@@ -13,6 +13,7 @@ import {
 
 import type { ChartSession } from "../../chart-session/chartSessionTypes.js";
 import type { ChartStrategyAttachmentRecord } from "../../chart-workspace/chartWorkspaceTypes.js";
+import type { ChartContextResolution } from "../backtestApi.js";
 import { t } from "../../../i18n/index.js";
 import { useLocale } from "../../../i18n/useLocale.js";
 import type {
@@ -32,6 +33,10 @@ import {
   type ChartStrategyRunRequest,
   type ChartStrategyTesterEntryState,
 } from "./chartStrategyTesterUiModel.js";
+import type {
+  ChartStrategyTesterState,
+  ChartStrategyTesterStatus,
+} from "./chartStrategyTesterState.js";
 
 const StrategyScriptWorkspace = lazy(() => import("./StrategyScriptWorkspace.js"));
 
@@ -52,7 +57,10 @@ function sameCursor(left: StrategyDraftCursor | null, right: StrategyDraftCursor
   return left?.line === right?.line && left?.column === right?.column;
 }
 
-function attachmentForDraft(record: StrategyDraftRecord): ChartStrategyAttachmentRecord {
+function attachmentForDraft(
+  record: StrategyDraftRecord,
+  session: ChartSession,
+): ChartStrategyAttachmentRecord {
   return {
     schemaVersion: 1,
     strategyDraftId: record.id,
@@ -63,7 +71,9 @@ function attachmentForDraft(record: StrategyDraftRecord): ChartStrategyAttachmen
     rangeMode: "ALL_AVAILABLE",
     customRange: null,
     fidelityPreference: "FAST",
-    quickPresetId: "CRYPTO_PERP_STANDARD_V1",
+    quickPresetId: session.marketType === "spot"
+      ? "CRYPTO_SPOT_STANDARD_V1"
+      : "CRYPTO_PERP_STANDARD_V1",
     autoRun: false,
   };
 }
@@ -78,10 +88,31 @@ function issueCopy(issue: ChartStrategyDraftIssue): { title: string; detail: str
       detail: t("chartTester.issue.unknownVariable", { variable: issue.variable ?? "target" }),
     };
   }
+  if (issue.code === "SERVER_DIAGNOSTIC") {
+    return {
+      title: t("chartTester.issue.location", { line: issue.line, column: issue.column }),
+      detail: issue.message || t("chartTester.issue.serverDetail"),
+    };
+  }
   return {
     title: t("chartTester.issue.location", { line: issue.line, column: issue.column }),
     detail: t("chartTester.issue.delimiter", { delimiter: issue.variable ?? "?" }),
   };
+}
+
+function runStatusKey(status: ChartStrategyTesterStatus) {
+  switch (status) {
+    case "DETACHED": return "chartTester.status.detached" as const;
+    case "RESOLVING": return "chartTester.status.resolving" as const;
+    case "NEEDS_DATA": return "chartTester.status.needs_data" as const;
+    case "READY": return "chartTester.status.ready" as const;
+    case "QUEUED": return "chartTester.status.queued" as const;
+    case "RUNNING": return "chartTester.status.running" as const;
+    case "COMPLETED": return "chartTester.status.completed" as const;
+    case "STALE": return "chartTester.status.stale" as const;
+    case "FAILED": return "chartTester.status.failed" as const;
+    case "UNSUPPORTED": return "chartTester.status.unsupported" as const;
+  }
 }
 
 export interface ChartStrategyTesterPanelProps {
@@ -92,6 +123,14 @@ export interface ChartStrategyTesterPanelProps {
   onAttachmentChange(attachment: ChartStrategyAttachmentRecord | null): void;
   onEntryStateChange(state: ChartStrategyTesterEntryState): void;
   onRunRequest(request: ChartStrategyRunRequest): void;
+  runState: ChartStrategyTesterState;
+  resolution: ChartContextResolution | null;
+  sourceDiagnostics: Array<Record<string, unknown>>;
+  pendingDataDraftRevision: number | null;
+  onPrepareData(): void;
+  onStopObserving(): void;
+  onResumeObserving(): void;
+  onSourceDirty(): void;
   onClose(): void;
 }
 
@@ -103,6 +142,14 @@ export default function ChartStrategyTesterPanel({
   onAttachmentChange,
   onEntryStateChange,
   onRunRequest,
+  runState,
+  resolution,
+  sourceDiagnostics,
+  pendingDataDraftRevision,
+  onPrepareData,
+  onStopObserving,
+  onResumeObserving,
+  onSourceDirty,
   onClose,
 }: ChartStrategyTesterPanelProps) {
   const locale = useLocale();
@@ -189,15 +236,36 @@ export default function ChartStrategyTesterPanel({
     return () => window.clearTimeout(timer);
   }, [activeDraft, source]);
 
-  const visibleIssues = activeDraft ? issues : [];
+  const serverIssues = useMemo<ChartStrategyDraftIssue[]>(() => sourceDiagnostics.map((item) => ({
+    code: "SERVER_DIAGNOSTIC",
+    line: Math.max(1, Number(item.line ?? 1)),
+    column: Math.max(1, Number(item.column ?? 1)),
+    endColumn: Math.max(2, Number(item.column ?? 1) + 1),
+    variable: null,
+    message: String(item.message ?? t("chartTester.issue.serverDetail")),
+  })), [sourceDiagnostics]);
+  const visibleIssues = activeDraft ? [...issues, ...serverIssues] : [];
+
+  useEffect(() => {
+    const primaryServerIssue = serverIssues[0];
+    if (!primaryServerIssue) return;
+    const timer = window.setTimeout(() => {
+      setActiveTab("script");
+      setStartView("editor");
+      setFocusIssue(primaryServerIssue);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [serverIssues]);
 
   useEffect(() => {
     if (!currentAttachment) onEntryStateChange("unattached");
-    else if (visibleIssues.length > 0) onEntryStateChange("error");
+    else if (visibleIssues.length > 0 || runState.status === "FAILED" || runState.status === "UNSUPPORTED") {
+      onEntryStateChange("error");
+    }
     else if (saveState === "SAVING") onEntryStateChange("saving");
     else if (runReady) onEntryStateChange("ready");
     else onEntryStateChange("editing");
-  }, [currentAttachment, onEntryStateChange, runReady, saveState, visibleIssues.length]);
+  }, [currentAttachment, onEntryStateChange, runReady, runState.status, saveState, visibleIssues.length]);
 
   const refreshRecent = useCallback(() => {
     void draftStore.recent(8).then(setRecentDrafts).catch(() => setRecentDrafts([]));
@@ -212,7 +280,7 @@ export default function ChartStrategyTesterPanel({
     shouldFocus: boolean,
     nextSaveState: StrategyDraftAutoSaveState = "SAVED",
   ) => {
-    const nextAttachment = attachmentForDraft(record);
+    const nextAttachment = attachmentForDraft(record, session);
     setDraft(record);
     setSource(record.source);
     setCursor(record.cursor);
@@ -223,7 +291,7 @@ export default function ChartStrategyTesterPanel({
     setFocusOnMount(shouldFocus);
     setRunReady(false);
     onAttachmentChange(nextAttachment);
-  }, [onAttachmentChange]);
+  }, [onAttachmentChange, session]);
 
   const createDraft = useCallback(async (
     displayName: string,
@@ -325,6 +393,55 @@ export default function ChartStrategyTesterPanel({
 
   const panelStyle = { "--chart-strategy-panel-height": `${height}px` } as CSSProperties;
   const showEditor = activeTab === "script" && startView === "editor" && activeDraft !== null;
+  const runBusy = ["RESOLVING", "QUEUED", "RUNNING"].includes(runState.status);
+  const pendingDataMatchesSource = runState.status === "NEEDS_DATA"
+    && pendingDataDraftRevision === strategyDraftContentRevision(source);
+  const runLabel = pendingDataMatchesSource
+    ? t("chartTester.prepareDataRun")
+    : runState.status === "RESOLVING"
+      ? t("chartTester.run.resolving")
+      : runState.status === "QUEUED"
+        ? t("chartTester.run.queued")
+        : runState.status === "RUNNING"
+          ? t("chartTester.run.running")
+          : t("chartTester.run");
+  const canResume = Boolean(runState.activeRunId)
+    && !runBusy
+    && runState.status !== "COMPLETED";
+  const costPreset = resolution?.cost_preset;
+  const accountPreset = resolution?.account_execution_preset;
+  const rangeText = resolution?.coverage.requested_start_ms != null
+    && resolution.coverage.requested_end_ms != null
+    ? t("chartTester.settings.dateAbsolute", {
+      start: new Date(resolution.coverage.requested_start_ms).toLocaleDateString(locale),
+      end: new Date(resolution.coverage.requested_end_ms).toLocaleDateString(locale),
+    })
+    : currentAttachment?.rangeMode === "ALL_AVAILABLE"
+      ? t("chartTester.settings.allAvailable")
+      : t("chartTester.settings.selectedRange");
+  const actionableCopy = useMemo(() => {
+    const code = runState.actionableError?.code ?? "";
+    if (!code) return null;
+    if (code.includes("FEE") || code.includes("PRESET")) {
+      return { message: t("chartTester.error.fee"), action: t("chartTester.error.action.settings") };
+    }
+    if (code.includes("INTERVAL")) {
+      return { message: t("chartTester.error.interval"), action: t("chartTester.error.action.interval") };
+    }
+    if (code.includes("FIDELITY")) {
+      return { message: t("chartTester.error.fidelity"), action: t("chartTester.error.action.fast") };
+    }
+    if (code.includes("PROVIDER") || code.includes("SMOKE")) {
+      return { message: t("chartTester.error.strategy"), action: t("chartTester.error.action.strategy") };
+    }
+    if (code.includes("DATA") || code.includes("SNAPSHOT") || code.includes("CONTEXT")) {
+      return { message: t("chartTester.error.data"), action: t("chartTester.error.action.retry") };
+    }
+    if (code.includes("BUDGET")) {
+      return { message: t("chartTester.error.busy"), action: t("chartTester.error.action.wait") };
+    }
+    return { message: t("chartTester.error.backend"), action: t("chartTester.error.action.retry") };
+  }, [runState.actionableError?.code]);
 
   return (
     <section
@@ -390,8 +507,29 @@ export default function ChartStrategyTesterPanel({
           </button>
         )}
         {currentAttachment && (
-          <button type="button" className="chart-strategy-run-button" onClick={run}>
-            {t("chartTester.run")}
+          <button
+            type="button"
+            className="chart-strategy-run-button"
+            disabled={runBusy}
+            data-run-status={runState.status}
+            onClick={pendingDataMatchesSource ? onPrepareData : run}
+          >
+            {runLabel}
+          </button>
+        )}
+        {runBusy && runState.activeRunId && (
+          <button
+            type="button"
+            className="chart-strategy-link-button"
+            data-testid="chart-strategy-stop-observing"
+            onClick={onStopObserving}
+          >
+            {t("chartTester.stopObserving")}
+          </button>
+        )}
+        {canResume && (
+          <button type="button" className="chart-strategy-link-button" onClick={onResumeObserving}>
+            {t("chartTester.resumeObserving")}
           </button>
         )}
         <button type="button" className="chart-strategy-close-button" onClick={onClose}>
@@ -500,7 +638,11 @@ export default function ChartStrategyTesterPanel({
                   issues={visibleIssues}
                   focusIssue={focusIssue}
                   focusOnMount={focusOnMount}
-                  onSourceChange={(value) => { setSource(value); setRunReady(false); }}
+                  onSourceChange={(value) => {
+                    setSource(value);
+                    setRunReady(false);
+                    onSourceDirty();
+                  }}
                   onCursorChange={setCursor}
                   onRun={run}
                 />
@@ -509,6 +651,19 @@ export default function ChartStrategyTesterPanel({
             <aside className="chart-strategy-problems" aria-label={t("chartTester.problemsAria")}>
               <div className="chart-strategy-problems-head">{t("chartTester.problems")}</div>
               <div className="chart-strategy-problems-body">
+                {runState.status !== "READY" && runState.status !== "DETACHED" && (
+                  <div className={`chart-strategy-run-status status-${runState.status.toLowerCase()}`} data-testid="chart-strategy-run-status">
+                    <strong>{t(runStatusKey(runState.status))}</strong>
+                    {runState.status === "NEEDS_DATA" && resolution && (
+                      <p>{t("chartTester.status.needsDataDetail", {
+                        bars: resolution.materialize.estimated_bars ?? t("chartTester.unknown"),
+                      })}</p>
+                    )}
+                    {actionableCopy && runState.status === "FAILED" && (
+                      <><p>{actionableCopy.message}</p><small>{actionableCopy.action}</small></>
+                    )}
+                  </div>
+                )}
                 {visibleIssues.length === 0 ? (
                   <p className="chart-strategy-no-problems">
                     {runReady ? t("chartTester.readyForRun") : t("chartTester.noProblems")}
@@ -537,10 +692,47 @@ export default function ChartStrategyTesterPanel({
           </div>
         )}
 
-        {activeTab !== "script" && (
+        {activeTab === "overview" && (
+          <div className="chart-strategy-run-overview" data-testid="chart-strategy-run-overview">
+            <p className="chart-strategy-eyebrow">{t("chartTester.overviewEyebrow")}</p>
+            <h2>{t(runStatusKey(runState.status))}</h2>
+            <p>{runState.status === "COMPLETED"
+              ? t("chartTester.overview.completedDetail")
+              : t("chartTester.overview.pendingDetail")}</p>
+            {actionableCopy && (
+              <div className="chart-strategy-actionable-error">
+                <strong>{actionableCopy.message}</strong>
+                <span>{actionableCopy.action}</span>
+                <details>
+                  <summary>{t("chartTester.error.details")}</summary>
+                  <code>{runState.actionableError?.code}</code>
+                </details>
+              </div>
+            )}
+          </div>
+        )}
+
+        {activeTab === "settings" && currentAttachment && (
+          <div className="chart-strategy-quick-settings" data-testid="chart-strategy-quick-settings">
+            <div><span>{t("chartTester.settings.capital")}</span><strong>{accountPreset?.initial_cash ?? "10,000"} USDT</strong></div>
+            <div><span>{t("chartTester.settings.position")}</span><strong>{t("chartTester.settings.positionValue", {
+              percent: accountPreset?.equity_percent ?? "10",
+              leverage: accountPreset?.leverage ?? "1",
+            })}</strong></div>
+            <div><span>{t("chartTester.settings.fee")}</span><strong>{costPreset?.fee_bps
+              ? t("chartTester.settings.feeValue", { fee: costPreset.fee_bps, slippage: costPreset.slippage_bps ?? "—" })
+              : t("chartTester.settings.feePending")}</strong></div>
+            <div><span>{t("chartTester.settings.date")}</span><strong>{rangeText}</strong></div>
+            <div><span>{t("chartTester.settings.fidelity")}</span><strong>{currentAttachment.fidelityPreference === "FAST"
+              ? t("chartTester.settings.fast")
+              : t("chartTester.settings.precise")}</strong></div>
+          </div>
+        )}
+
+        {activeTab === "trades" && (
           <div className="chart-strategy-placeholder">
-            <strong>{t(`chartTester.tab.${activeTab}`)}</strong>
-            <p>{t(`chartTester.placeholder.${activeTab}`)}</p>
+            <strong>{t("chartTester.tab.trades")}</strong>
+            <p>{t("chartTester.placeholder.trades")}</p>
           </div>
         )}
       </div>

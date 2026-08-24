@@ -1,0 +1,167 @@
+{
+  "schemaVersion": "candlescope.backtest-chart-first.phase5/1",
+  "generatedAt": "2026-08-24T11:05:00+08:00",
+  "status": "COMPLETE_READY_FOR_COMMIT",
+  "identity": {
+    "baseGitHead": "7979738e09f88199813886a94b54442366d0c4c0",
+    "branch": "codex/backtest-chart-first-ux",
+    "worktree": "H:\\program\\CandleScope-backtest-chart-first"
+  },
+  "scope": {
+    "phase": 5,
+    "phase6OrLaterCode": false,
+    "frontendUserInterfaceChanged": true,
+    "backendStrategyProviderAdded": true,
+    "defaultFlagEnabled": false,
+    "push": false,
+    "merge": false,
+    "deploy": false,
+    "productionDataChanged": false,
+    "mainWorktreeUserChangesCopied": false
+  },
+  "pipeline": {
+    "provider": "PYNE_CHART_V1",
+    "runtimeRevision": "chart-pyne-v1",
+    "usesEval": false,
+    "orderedStages": [
+      "revision",
+      "resolve",
+      "smoke",
+      "validate",
+      "reresolve",
+      "create",
+      "poll"
+    ],
+    "stableRunIdempotencyKey": true,
+    "revisionGetOrInsertLocked": true,
+    "sameSourceReusesRevision": true,
+    "sourceChangeCreatesRevision": true,
+    "unknownFeeFailsClosed": true,
+    "validateCreateIdentityDriftFailsClosed": true,
+    "stoppingObservationCancelsBackendRun": false
+  },
+  "browser": {
+    "browser": "headed Chrome",
+    "driver": "repository-local Playwright CLI",
+    "frontend": "http://127.0.0.1:15178",
+    "backend": "real isolated LOCAL_OFFLINE backend on 127.0.0.1:18088",
+    "fixtureBars": 60,
+    "fixtureNetworkForbidden": true,
+    "realBacktestRequestsAll200": true,
+    "mainChartExpectedLocalOfflineFailures": true,
+    "consoleClaimedClean": false,
+    "viewports": [
+      { "width": 1440, "height": 900, "result": "PASS" },
+      { "width": 1366, "height": 768, "result": "PASS", "documentOverflow": false }
+    ],
+    "fourCellIsolation": "PASS",
+    "recentScriptRestore": "PASS",
+    "doubleClickCreatesOneRun": "PASS",
+    "stopAndResumeByRunId": "PASS",
+    "advancedWorkbenchVisibility": "PASS",
+    "export": {
+      "runId": "bt_f6697fdbddce414cb981849b1b140e17",
+      "bytes": 20177,
+      "sha256": "30469b34494ca49255a38eafc7b7c455f7cc37d554a051503f39bde0b14b3b79"
+    },
+    "needsData": {
+      "browserEvidence": "CONTROLLED_UI_CONTRACT_ONLY",
+      "estimatedBars": 60,
+      "realMaterializeClaimed": false,
+      "pipelineUnitContract": "PASS"
+    }
+  },
+  "realRuns": [
+    {
+      "revisionId": "srv2_de154131e2db4c30aae76d7e786faf13",
+      "runId": "bt_5a0d82ab851f4a21aaa9721f00670aa8",
+      "state": "COMPLETED"
+    },
+    {
+      "revisionId": "srv2_1a559d08509144969c4bf848dfa8f95d",
+      "runId": "bt_f6697fdbddce414cb981849b1b140e17",
+      "state": "COMPLETED",
+      "doubleClickDeduplicated": true,
+      "sameInputRepeatReused": true
+    },
+    {
+      "revisionId": "srv2_6818e9e4097349d0bb8e35d8bc0014e1",
+      "runId": "bt_26c7aecfa56f482fb1487c9ea1faac47",
+      "state": "COMPLETED",
+      "observationStoppedWithoutCancellation": true,
+      "observationResumed": true
+    }
+  ],
+  "screenshots": [
+    {
+      "path": "docs/evidence/backtest-chart-first-phase5/real-completed-overview-1440x900.png",
+      "sha256": "00e937158955c390100019debd9dd935d81a7c877d2745b65ffcee5f5fd43dd3"
+    },
+    {
+      "path": "docs/evidence/backtest-chart-first-phase5/settings-five-summaries-1440x900.png",
+      "sha256": "7e54a28e6eaccbf63e3b501a40357ad2eeff5c15bdb077daaf39a2e912f53413"
+    },
+    {
+      "path": "docs/evidence/backtest-chart-first-phase5/actionable-source-error-1440x900.png",
+      "sha256": "6bd529200195553a7eae10798206dc9ead503c241b41b7d4f2d0d31beab9d75e"
+    },
+    {
+      "path": "docs/evidence/backtest-chart-first-phase5/four-cell-isolation-1366x768.png",
+      "sha256": "feed34c6f900b2f13ae6a9c77b5e5ad0271f1212b6fc0e2962954f7b2593d99b"
+    },
+    {
+      "path": "docs/evidence/backtest-chart-first-phase5/needs-data-confirmation-1366x768.png",
+      "sha256": "e77529b1a63eaf4dfcc73d6f4b19beb438e8fec862af770eb3337cc5039d6692"
+    }
+  ],
+  "checks": {
+    "frontendBacktest": { "result": "PASS", "tests": 70, "suites": 3, "failures": 0 },
+    "frontendFull": {
+      "result": "PASS",
+      "tests": 3347,
+      "suites": 3,
+      "failures": 0,
+      "elapsedMs": 133688.7863,
+      "finalCodeRerun": true
+    },
+    "backendRelated": { "result": "PASS", "tests": 27, "failures": 0 },
+    "frontendTypecheck": { "result": "PASS" },
+    "frontendLint": { "result": "PASS", "scope": "full frontend" },
+    "frontendArchitecture": { "result": "PASS", "allowlistEntries": 0 },
+    "frontendI18n": { "result": "PASS", "catalogKeys": 3677, "sourceFiles": 602 },
+    "frontendBuildFlagOff": {
+      "result": "PASS_WITH_EXISTING_CHUNK_WARNING",
+      "modules": 641,
+      "liveRawKb": 536.34,
+      "liveGzipKb": 155.66
+    },
+    "frontendBuildFlagOn": {
+      "result": "PASS_WITH_EXISTING_CHUNK_WARNING",
+      "modules": 641,
+      "liveRawKb": 536.52,
+      "liveGzipKb": 155.74,
+      "bridgeRawKb": 44.66,
+      "bridgeGzipKb": 13.28
+    },
+    "pythonCompile": { "result": "PASS" },
+    "diffCheck": { "result": "PASS" }
+  },
+  "knownNonPassAttempts": [
+    {
+      "step": "first double-click browser run",
+      "result": "STOP_OBSERVING_VISIBLE_BEFORE_RUN_ID",
+      "resolution": "render stop only after a backend Run ID exists; add component regression"
+    },
+    {
+      "step": "first repeated identical smoke",
+      "result": "SQLITE_UNIQUE_RECEIPT_HASH_500",
+      "resolution": "make smoke receipt insert idempotent with ON CONFLICT DO NOTHING"
+    },
+    {
+      "step": "first final full frontend lint",
+      "result": "TWO_SYNCHRONOUS_EFFECT_STATE_UPDATES",
+      "resolution": "publish runtime snapshots and diagnostics asynchronously with cancellation"
+    }
+  ],
+  "decision": "PHASE5_COMPLETE_PHASE6_NOT_STARTED"
+}

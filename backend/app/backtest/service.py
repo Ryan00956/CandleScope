@@ -99,6 +99,7 @@ from .strategy.protocol import StrategyProviderSession
 from .strategy.pyne_adapter import PyneHostPlanner
 from .strategy.registry import StrategyRevisionRegistry, build_default_strategy_registry
 from .strategy.builtin import build_builtin_provider
+from .strategy.chart_pyne import CHART_PYNE_REVISION, ChartPyneStrategyProvider
 from .strategy.pine_adapter import PineStrategyProvider
 from .strategy.workspace import compile_revision
 from .strategy.python_basket import (
@@ -254,12 +255,17 @@ class BacktestService:
                 str(exc),
                 details={"next_step": "fix the located source error and compile again"},
             ) from exc
-        self.repository.insert_strategy_revision(record)
+        if bool(payload.get("_force_new_revision")):
+            self.repository.insert_strategy_revision(record)
+            persisted, inserted = record, True
+        else:
+            persisted, inserted = self.repository.get_or_insert_strategy_revision(record)
         return {
-            **self._revision_wire(record),
-            "schema_version": record["schema_version"],
-            "base_revision_id": record["base_revision_id"],
+            **self._revision_wire(persisted),
+            "schema_version": persisted["schema_version"],
+            "base_revision_id": persisted["base_revision_id"],
             "diagnostics": record["diagnostics"],
+            "reused": not inserted,
         }
 
     def inspect_python_strategy_bundle(
@@ -462,6 +468,7 @@ class BacktestService:
                 "base_revision_id": source["base_revision_id"],
                 "source_text": source["source_text"],
                 "parameter_schema": json.loads(str(source["parameter_schema_json"])),
+                "_force_new_revision": True,
             },
             now_ms=now_ms,
         )
@@ -519,7 +526,9 @@ class BacktestService:
                 )
             else:
                 provider = (
-                    PineStrategyProvider()
+                    ChartPyneStrategyProvider()
+                    if row["base_revision_id"] == CHART_PYNE_REVISION
+                    else PineStrategyProvider()
                     if row["base_revision_id"] == "pine-long-flat-v1"
                     else build_builtin_provider(str(row["base_revision_id"]))
                 )
@@ -3692,6 +3701,25 @@ class BacktestService:
             host_policy = HostPolicyConfig.from_mapping(payload)
         except StrategyProviderError as exc:
             raise BacktestError("SCHEMA_UNKNOWN_FIELD", str(exc)) from exc
+        quick_preset_id = str(payload.get("quick_preset_id") or "").strip()
+        quick_preset_revision = str(payload.get("quick_preset_revision") or "").strip()
+        fee_source = str(payload.get("fee_source") or "").strip()
+        quick_fee_fields = ("taker_fee_bps", "maker_fee_bps", "slippage_bps")
+        missing_quick_fee_fields = [
+            name for name in quick_fee_fields
+            if name not in payload or not str(payload.get(name) or "").strip()
+        ]
+        if quick_preset_id and (
+            not quick_preset_revision or not fee_source or missing_quick_fee_fields
+        ):
+            raise BacktestError(
+                "FEE_PRESET_UNKNOWN",
+                "quick backtests require a versioned, confirmed fee preset",
+                details={
+                    "next_step": "select or confirm the market fee preset",
+                    "missing_fields": missing_quick_fee_fields,
+                },
+            )
         strategy_source = payload.get("strategy_source")
         if strategy_source is not None and len(str(strategy_source)) > 2_000:
             raise BacktestError(
@@ -3760,7 +3788,9 @@ class BacktestService:
                         probe = None
                     else:
                         probe = (
-                            PineStrategyProvider()
+                            ChartPyneStrategyProvider()
+                            if base_revision == CHART_PYNE_REVISION
+                            else PineStrategyProvider()
                             if base_revision == "pine-long-flat-v1"
                             else build_builtin_provider(base_revision)
                         )
@@ -3879,6 +3909,14 @@ class BacktestService:
             "exchange": str(payload.get("exchange") or "binance"),
             "market_type": str(payload.get("market_type") or "usdm"),
         }
+        if quick_preset_id:
+            execution_config.update(
+                {
+                    "quick_preset_id": quick_preset_id,
+                    "quick_preset_revision": quick_preset_revision,
+                    "fee_source": fee_source,
+                }
+            )
         if "signal_trace_mode" in payload:
             trace_mode = str(payload.get("signal_trace_mode") or "LEGACY_INLINE_V1")
             if trace_mode not in {"LEGACY_INLINE_V1", "PAGED_V1"}:

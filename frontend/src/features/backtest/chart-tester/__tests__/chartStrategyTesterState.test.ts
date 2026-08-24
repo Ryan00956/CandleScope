@@ -180,3 +180,39 @@ test("a response token or result from cell A cannot write cell B", () => {
   });
   assert.equal(second, secondBefore);
 });
+
+test("owned revision binding does not stale or invalidate the active generation", () => {
+  let state = createChartStrategyTesterState(inputs(), "workspace\u0000cell-a");
+  state = reduceChartStrategyTesterState(state, { type: "BEGIN_REQUEST" });
+  const token = currentChartStrategyTesterToken(state);
+  const bound = reduceChartStrategyTesterState(state, {
+    type: "BIND_STRATEGY_REVISION",
+    token,
+    strategyRevisionId: "srv2_bound",
+  });
+  assert.equal(bound.generation, token.generation);
+  assert.equal(bound.status, "RESOLVING");
+  assert.equal(bound.inputs?.attachment.strategyRevisionId, "srv2_bound");
+  assert.deepEqual(bound.staleReasons, []);
+});
+
+test("stop observing preserves Run id while invalidating late polling events", () => {
+  let state = createChartStrategyTesterState(inputs(), "workspace\u0000cell-a");
+  state = reduceChartStrategyTesterState(state, { type: "BEGIN_REQUEST", status: "RUNNING" });
+  const token = currentChartStrategyTesterToken(state);
+  state = reduceChartStrategyTesterState(state, {
+    type: "REQUEST_STATUS",
+    token,
+    status: "RUNNING",
+    activeRunId: "bt_background",
+  });
+  const stopped = reduceChartStrategyTesterState(state, { type: "STOP_OBSERVING" });
+  assert.equal(stopped.status, "READY");
+  assert.equal(stopped.activeRunId, "bt_background");
+  assert.equal(stopped.generation, token.generation + 1);
+  assert.equal(reduceChartStrategyTesterState(stopped, {
+    type: "REQUEST_FAILED",
+    token,
+    error: { code: "LATE", message: "late", action: null },
+  }), stopped);
+});

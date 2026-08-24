@@ -429,7 +429,7 @@ def test_schema_v5_to_v4_rollback_uses_consistent_backup_and_preserves_authority
     from app.backtest.python_bundle_rollback import rollback_python_bundles
     from app.backtest.schema import SCHEMA_VERSION
 
-    assert SCHEMA_VERSION == 6
+    assert SCHEMA_VERSION == 7
     assert rollback_python_bundles(settings.db_path)["schemaVersion"] == 5
 
     backup = tmp_path / "rollback" / "backtest-v5.db"

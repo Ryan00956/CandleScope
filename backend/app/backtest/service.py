@@ -123,6 +123,8 @@ FIDELITY_MATRIX = {
     "QUEUE_EXACT": ("ORDER_LEVEL", "ORDER_LEVEL_REQUIRED"),
 }
 
+RESEARCH_LAUNCH_CONTEXT_SCHEMA = "candlescope.backtest-research-launch-context/1"
+
 
 class BacktestService:
     def __init__(
@@ -1227,6 +1229,55 @@ class BacktestService:
 
     def list_runs(self) -> list[dict[str, object]]:
         return self.repository.list_runs()
+
+    def create_research_launch_context(
+        self, payload: Mapping[str, object], *, now_ms: int | None = None
+    ) -> dict[str, object]:
+        stamp = now_ms or _now_ms()
+        body = dict(payload)
+        for field in ("latest_run_id", "baseline_run_id"):
+            run_id = body.get(field)
+            if run_id is not None and self.repository.get_run_by_id(str(run_id)) is None:
+                raise BacktestError("SCHEMA_UNKNOWN_FIELD", f"unknown run {run_id}")
+        revision_id = body.get("strategy_revision_id")
+        if revision_id is not None:
+            known_builtin = str(revision_id) in self.strategy_registry.revision_ids()
+            known_persisted = self.repository.get_strategy_revision(str(revision_id)) is not None
+            if not known_builtin and not known_persisted:
+                raise BacktestError(
+                    "SCHEMA_UNKNOWN_FIELD", f"unknown strategy revision {revision_id}"
+                )
+        context_id = f"brc_{uuid.uuid4().hex}"
+        context = {
+            "schema_version": RESEARCH_LAUNCH_CONTEXT_SCHEMA,
+            "context_id": context_id,
+            **body,
+            "created_at_ms": stamp,
+        }
+        encoded = canonical_json(context)
+        context_hash = "sha256:" + sha256_hex(context)
+        self.repository.insert_research_launch_context(
+            {
+                "context_id": context_id,
+                "schema_version": RESEARCH_LAUNCH_CONTEXT_SCHEMA,
+                "payload_json": encoded,
+                "payload_hash": context_hash,
+                "created_at_ms": stamp,
+            }
+        )
+        return {**context, "context_hash": context_hash}
+
+    def get_research_launch_context(self, context_id: str) -> dict[str, object]:
+        stored = self.repository.get_research_launch_context(context_id)
+        if stored is None:
+            raise BacktestError("SCHEMA_UNKNOWN_FIELD", f"unknown research context {context_id}")
+        context = json.loads(str(stored["payload_json"]))
+        expected_hash = "sha256:" + sha256_hex(context)
+        if expected_hash != stored["payload_hash"]:
+            raise BacktestError(
+                "IDENTITY_MUTATION", "research launch context integrity check failed"
+            )
+        return {**context, "context_hash": expected_hash}
 
     def cancel_run(
         self, run_id: str, *, now_ms: int | None = None

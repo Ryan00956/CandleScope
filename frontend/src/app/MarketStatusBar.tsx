@@ -2,7 +2,7 @@ import type { HTMLAttributes, ReactNode } from "react";
 
 
 export interface MarketStatusBarProps {
-  readonly source?: "live" | "replay" | "local";
+  readonly source?: "live" | "replay" | "local" | "research";
   readonly className?: string;
   readonly connectionStatus: string;
   readonly left: ReactNode;

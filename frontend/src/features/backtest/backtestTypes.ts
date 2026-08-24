@@ -17,6 +17,44 @@ export interface BacktestRunRecord {
   };
 }
 
+export interface BacktestResearchDatasetIdentity {
+  dataset_id: string;
+  data_epoch: string;
+  snapshot_hash: string;
+}
+
+export interface BacktestResearchLaunchContext {
+  schema_version: "candlescope.backtest-research-launch-context/1";
+  context_id: string;
+  context_hash: string;
+  source_workspace_id: string | null;
+  source_cell_id: string | null;
+  strategy_draft_id: string;
+  strategy_revision_id: string | null;
+  parameters: Record<string, unknown>;
+  quick_preset_id: string;
+  chart_session: {
+    exchange: string;
+    market_type: string;
+    symbol: string;
+    interval: string;
+  };
+  range: {
+    mode: "ALL_AVAILABLE" | "VISIBLE" | "CUSTOM";
+    start_time_ms: number | null;
+    end_time_ms: number | null;
+  };
+  dataset_identity: BacktestResearchDatasetIdentity | null;
+  latest_run_id: string | null;
+  baseline_run_id: string | null;
+  created_at_ms: number;
+}
+
+export type BacktestResearchLaunchContextInput = Omit<
+  BacktestResearchLaunchContext,
+  "schema_version" | "context_id" | "context_hash" | "created_at_ms"
+>;
+
 export type TradeExplanationVariable =
   | { kind: "string"; value: string }
   | { kind: "decimal"; value: string }

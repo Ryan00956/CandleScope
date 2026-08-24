@@ -56,6 +56,7 @@ function unavailableIntervalMessage(
 
 export function useChartSession({
   chartSurfaceActions,
+  exchangeCatalogEnabled = true,
   initialSession: configuredInitialSession = null,
   controlledSession = null,
   onSessionChange = null,
@@ -83,7 +84,7 @@ export function useChartSession({
     : null;
   const lastControlledSessionKeyRef = useRef(controlledSessionKey);
 
-  const { exchangeCatalog, exchangeCatalogStatus } = useExchangeCatalog();
+  const { exchangeCatalog, exchangeCatalogStatus } = useExchangeCatalog(exchangeCatalogEnabled);
   const {
     customIntervalRecords,
     savedCustomIntervals,

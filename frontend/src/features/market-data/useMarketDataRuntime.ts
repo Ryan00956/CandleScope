@@ -172,6 +172,7 @@ export function canRequestRightWindowRestoreDuringRuntime({
 export interface UseMarketDataRuntimeOptions {
   session: ChartSessionRuntime;
   realtimePriceRef: MutableRefObject<number | null>;
+  enabled?: boolean;
   foregroundPreloadGate?: ForegroundPreloadGate;
   backgroundPrefetchEnabled?: boolean;
   intervalPrefetchEnabled?: boolean;
@@ -186,6 +187,7 @@ export type MarketDataRuntime = MarketDataRuntimeContract;
 export function useMarketDataRuntime({
   session,
   realtimePriceRef,
+  enabled: runtimeEnabled = true,
   foregroundPreloadGate,
   backgroundPrefetchEnabled = true,
   intervalPrefetchEnabled = backgroundPrefetchEnabled,
@@ -214,9 +216,11 @@ export function useMarketDataRuntime({
   const {
     exchangeCatalogStatus,
     historyIntervalAvailable,
-    marketDataReady,
-    webSocketReady,
+    marketDataReady: sessionMarketDataReady,
+    webSocketReady: sessionWebSocketReady,
   } = session.status;
+  const marketDataReady = runtimeEnabled && sessionMarketDataReady;
+  const webSocketReady = runtimeEnabled && sessionWebSocketReady;
   const lastSessionTransition = session.events?.lastTransition ?? null;
   const {
     indicatorRangeRequests,
@@ -284,6 +288,14 @@ export function useMarketDataRuntime({
   const [connectionStatus, setConnectionStatus] = useState("loading");
   const [dataSource, setDataSource] = useState<string | null>(null);
   const [wsStatus, setWsStatus] = useState<KlineWebSocketStatus>("idle");
+  useEffect(() => {
+    if (runtimeEnabled) return;
+    setLoading(false);
+    setInitialHistoryPending(false);
+    setError(null);
+    setConnectionStatus("idle");
+    setWsStatus("idle");
+  }, [runtimeEnabled]);
   const lastEnabledSeriesRef = useRef<MarketSeries | null>(null);
   const activeSessionKeyRef = useRef(sessionKey);
   activeSessionKeyRef.current = sessionKey;

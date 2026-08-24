@@ -44,6 +44,9 @@ function fakeApi(run: BacktestRunRecord, exported: Record<string, unknown>): Bac
     async listDatasets() {
       return [];
     },
+    async listStrategyRevisions() {
+      return [];
+    },
     async previewSnapshot() {
       return {
         data_epoch: "sha256:e",
@@ -99,6 +102,15 @@ function fakeApi(run: BacktestRunRecord, exported: Record<string, unknown>): Bac
     },
     async listStudies() {
       return [];
+    },
+    async getStudy() {
+      throw new Error("unused");
+    },
+    async createResearchLaunchContext() {
+      throw new Error("unused");
+    },
+    async getResearchLaunchContext() {
+      throw new Error("unused");
     },
     async createStudy() {
       throw new Error("unused");

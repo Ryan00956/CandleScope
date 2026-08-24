@@ -98,7 +98,7 @@ def test_scale_and_basket_contracts_remain_research_overlays(tmp_path: Path) -> 
 
 
 def test_schema_v6_rollback_is_fail_closed_then_forward_empty(tmp_path: Path) -> None:
-    assert SCHEMA_VERSION == 6
+    assert SCHEMA_VERSION == 7
     empty = tmp_path / "empty.db"
     connection = __import__("sqlite3").connect(empty)
     apply_schema(connection, now_ms=1)

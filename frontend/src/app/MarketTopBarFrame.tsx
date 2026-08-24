@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import BrandMark, { BrandWordmark } from "../components/brand/BrandMark.js";
 
 export interface MarketTopBarFrameProps {
-  readonly source?: "live" | "replay" | "local";
+  readonly source?: "live" | "replay" | "local" | "research";
   readonly className?: string;
   readonly brandIcon?: ReactNode;
   readonly brandText?: ReactNode;

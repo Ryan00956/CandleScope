@@ -6,10 +6,19 @@ import "@fontsource/inter/latin-500.css";
 import "@fontsource/inter/latin-600.css";
 import "@fontsource/inter/latin-700.css";
 import BacktestApp from "./features/backtest/BacktestApp.js";
+import AppProviders, { ChartErrorBoundary } from "./app/AppProviders.js";
+import { MarketDataWorkspaceProvider } from "./features/market-data/MarketDataWorkspaceProvider.js";
+import {
+  isBacktestLegacyWorkbenchEnabled,
+  isBacktestResearchEnabled,
+} from "./features/backtest/backtestFlags.js";
+import BacktestResearchApp from "./features/backtest/research/BacktestResearchApp.js";
 import { readPersistedLocale } from "./features/settings/chartAppearanceSettings.js";
 import { bindDocumentLocale, hydrateLocale } from "./i18n/index.js";
 import "./index.css";
 import "./features/backtest/backtest.css";
+import "./features/backtest/research/backtestResearch.css";
+import BacktestResearchDisabled from "./features/backtest/research/BacktestResearchDisabled.js";
 
 hydrateLocale(readPersistedLocale());
 bindDocumentLocale({
@@ -20,8 +29,19 @@ bindDocumentLocale({
 const root = document.getElementById("root");
 if (!(root instanceof HTMLElement)) throw new Error("Backtest document root is missing");
 
+const researchEnabled = isBacktestResearchEnabled();
+const legacyEnabled = isBacktestLegacyWorkbenchEnabled();
+
 createRoot(root).render(
   <StrictMode>
-    <BacktestApp />
+    <ChartErrorBoundary>
+      {researchEnabled ? (
+        <AppProviders>
+          <MarketDataWorkspaceProvider>
+            <BacktestResearchApp />
+          </MarketDataWorkspaceProvider>
+        </AppProviders>
+      ) : legacyEnabled ? <BacktestApp /> : <BacktestResearchDisabled />}
+    </ChartErrorBoundary>
   </StrictMode>,
 );

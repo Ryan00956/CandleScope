@@ -86,6 +86,28 @@ class BacktestRepository:
         return [dict(row) for row in rows]
 
     @_locked
+    def insert_research_launch_context(self, payload: dict[str, Any]) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO backtest_research_launch_contexts(
+                context_id, schema_version, payload_json, payload_hash, created_at_ms
+            ) VALUES (
+                :context_id, :schema_version, :payload_json, :payload_hash, :created_at_ms
+            )
+            """,
+            payload,
+        )
+        self.connection.commit()
+
+    @_locked
+    def get_research_launch_context(self, context_id: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM backtest_research_launch_contexts WHERE context_id = ?",
+            (context_id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    @_locked
     def insert_strategy_revision(self, payload: dict[str, Any]) -> None:
         stored = {key: value for key, value in payload.items() if key != "diagnostics"}
         columns = ", ".join(stored)

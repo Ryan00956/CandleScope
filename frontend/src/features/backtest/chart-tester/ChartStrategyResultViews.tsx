@@ -138,10 +138,12 @@ export function ChartStrategyResultContextBar({
   result,
   locale,
   stale,
+  onOpenAdvanced,
 }: {
   result: ChartStrategyResultBundle;
   locale: string;
   stale: boolean;
+  onOpenAdvanced?: () => void;
 }) {
   const { config, chart, run } = result;
   const rangeLabel = config.chart_range_mode === "ALL_AVAILABLE"
@@ -169,9 +171,15 @@ export function ChartStrategyResultContextBar({
       <span title={rangeBounds}>{rangeLabel} · {rangeBounds}</span>
       <span>{fidelityLabel(run.fidelity_mode)}</span>
       <span title={fee}>{fee}</span>
-      <a href={`/backtest.html?run=${encodeURIComponent(run.run_id)}`}>
-        {t("chartTester.result.credibility")}
-      </a>
+      {onOpenAdvanced ? (
+        <button type="button" className="chart-strategy-advanced-link" onClick={onOpenAdvanced}>
+          {t("chartTester.result.credibility")}
+        </button>
+      ) : (
+        <a href={`/backtest.html?run=${encodeURIComponent(run.run_id)}`}>
+          {t("chartTester.result.credibility")}
+        </a>
+      )}
     </div>
   );
 }
@@ -191,11 +199,13 @@ export function ChartStrategyResultOverview({
   stale,
   comparison,
   onOpenTrades,
+  onOpenAdvanced,
 }: {
   result: ChartStrategyResultBundle;
   stale: boolean;
   comparison?: RecentRunCompareV1 | null;
   onOpenTrades(): void;
+  onOpenAdvanced?: () => void;
 }) {
   const { report, chart, run } = result;
   const trades = report.trades ?? [];
@@ -253,7 +263,9 @@ export function ChartStrategyResultOverview({
                   : t("chartTester.compare.incompatible")
                 : t("chartTester.compare.noBaseline")}</span>
             </div>
-            <a href={advancedHref}>{t("chartTester.compare.full")}</a>
+            {onOpenAdvanced
+              ? <button type="button" className="chart-strategy-advanced-link" onClick={onOpenAdvanced}>{t("chartTester.compare.full")}</button>
+              : <a href={advancedHref}>{t("chartTester.compare.full")}</a>}
           </div>
           {directComparison && (
             <div className="chart-strategy-run-comparison-grid">
@@ -302,7 +314,9 @@ export function ChartStrategyResultOverview({
           <div><dt>{t("chartTester.result.profitGuarantee")}</dt><dd>{credibility?.profit_guarantee === false ? t("chartTester.result.no") : "—"}</dd></div>
           <div><dt>{t("chartTester.result.reportHash")}</dt><dd title={result.reportHash}>{result.reportHash.slice(0, 18)}…</dd></div>
         </dl>
-        <a href={advancedHref}>{t("chartTester.openAdvanced")}</a>
+        {onOpenAdvanced
+          ? <button type="button" className="chart-strategy-advanced-link" onClick={onOpenAdvanced}>{t("chartTester.openAdvanced")}</button>
+          : <a href={advancedHref}>{t("chartTester.openAdvanced")}</a>}
       </details>
     </div>
   );

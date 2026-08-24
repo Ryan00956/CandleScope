@@ -1,6 +1,8 @@
 import type {
   BacktestReport,
   BacktestChartData,
+  BacktestResearchLaunchContext,
+  BacktestResearchLaunchContextInput,
   BacktestRunRecord,
   RecentRunCompareV1,
   RunCompareV3,
@@ -38,6 +40,7 @@ export interface StrategyRevisionRecord extends BacktestStrategyDescriptor {
 }
 
 export interface BacktestCapabilities {
+  runtime_mode?: "LIVE" | "LOCAL_OFFLINE";
   flags: Record<string, boolean>;
   fidelity_modes: string[];
   strategies: BacktestStrategyDescriptor[];
@@ -152,6 +155,7 @@ export interface BacktestApiClient {
     signal?: AbortSignal,
   ): Promise<ChartContextResolution>;
   listRuns(signal?: AbortSignal): Promise<BacktestRunRecord[]>;
+  listStrategyRevisions(signal?: AbortSignal): Promise<StrategyRevisionRecord[]>;
   validate(body: Record<string, unknown>, signal?: AbortSignal): Promise<{ ok: boolean }>;
   createRun(
     body: Record<string, unknown>,
@@ -165,6 +169,7 @@ export interface BacktestApiClient {
   cancelRun(runId: string, signal?: AbortSignal): Promise<BacktestRunRecord>;
   resumeRun(runId: string, signal?: AbortSignal): Promise<BacktestRunRecord>;
   listStudies(signal?: AbortSignal): Promise<BacktestStudyRecord[]>;
+  getStudy(studyId: string, signal?: AbortSignal): Promise<BacktestStudyRecord>;
   createStudy(body: Record<string, unknown>, signal?: AbortSignal): Promise<BacktestStudyRecord>;
   startStudy(studyId: string, signal?: AbortSignal): Promise<BacktestStudyRecord>;
   cancelStudy(studyId: string, signal?: AbortSignal): Promise<BacktestStudyRecord>;
@@ -186,6 +191,14 @@ export interface BacktestApiClient {
   getPythonBundle(bundleId: string, signal?: AbortSignal): Promise<Record<string, unknown>>;
   createPythonRevision(bundleId: string, signal?: AbortSignal): Promise<StrategyRevisionRecord>;
   getPythonRuntimeReceipt(revisionId: string, signal?: AbortSignal): Promise<Record<string, unknown>>;
+  createResearchLaunchContext(
+    body: BacktestResearchLaunchContextInput,
+    signal?: AbortSignal,
+  ): Promise<BacktestResearchLaunchContext>;
+  getResearchLaunchContext(
+    contextId: string,
+    signal?: AbortSignal,
+  ): Promise<BacktestResearchLaunchContext>;
 }
 
 export interface BacktestDataset {
@@ -319,6 +332,12 @@ export function createBacktestApi(base = "/api/v1/backtests"): BacktestApiClient
       );
       return payload.runs;
     },
+    async listStrategyRevisions(signal) {
+      const payload = await readJson<{ items: StrategyRevisionRecord[] }>(
+        await fetch(`${base}/strategy-revisions`, requestOptions({}, signal)),
+      );
+      return payload.items;
+    },
     async validate(body, signal) {
       return readJson(
         await fetch(`${base}/runs/validate`, requestOptions({
@@ -391,6 +410,12 @@ export function createBacktestApi(base = "/api/v1/backtests"): BacktestApiClient
         await fetch(`${base}/studies`, requestOptions({}, signal)),
       );
       return payload.studies;
+    },
+    async getStudy(studyId, signal) {
+      return readJson(await fetch(
+        `${base}/studies/${encodeURIComponent(studyId)}`,
+        requestOptions({}, signal),
+      ));
     },
     async createStudy(body, signal) {
       return readJson(
@@ -508,6 +533,19 @@ export function createBacktestApi(base = "/api/v1/backtests"): BacktestApiClient
     async getPythonRuntimeReceipt(revisionId, signal) {
       return readJson(await fetch(
         `${base}/strategy-revisions/${encodeURIComponent(revisionId)}/runtime-receipt`,
+        requestOptions({}, signal),
+      ));
+    },
+    async createResearchLaunchContext(body, signal) {
+      return readJson(await fetch(`${base}/research/contexts`, requestOptions({
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }, signal)));
+    },
+    async getResearchLaunchContext(contextId, signal) {
+      return readJson(await fetch(
+        `${base}/research/contexts/${encodeURIComponent(contextId)}`,
         requestOptions({}, signal),
       ));
     },

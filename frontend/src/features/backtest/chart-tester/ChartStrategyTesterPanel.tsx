@@ -170,6 +170,7 @@ export interface ChartStrategyTesterPanelProps {
   onResumeObserving(): void;
   onSourceDirty(): void;
   onClose(): void;
+  onOpenAdvanced?(): void;
 }
 
 export default function ChartStrategyTesterPanel({
@@ -198,6 +199,7 @@ export default function ChartStrategyTesterPanel({
   onResumeObserving,
   onSourceDirty,
   onClose,
+  onOpenAdvanced,
 }: ChartStrategyTesterPanelProps) {
   const locale = useLocale();
   const [height, setHeight] = useState(() => loadChartStrategyPanelPreferences(cellScope).height);
@@ -600,6 +602,7 @@ export default function ChartStrategyTesterPanel({
           result={result}
           locale={locale}
           stale={runState.status === "STALE" || !runState.projectionVisible}
+          {...(onOpenAdvanced ? { onOpenAdvanced } : {})}
         />
       )}
       {currentAttachment && autoRunPauseReason && (
@@ -782,6 +785,7 @@ export default function ChartStrategyTesterPanel({
               stale={runState.status === "STALE" || !runState.projectionVisible}
               comparison={comparison}
               onOpenTrades={() => setActiveTab("trades")}
+              {...(onOpenAdvanced ? { onOpenAdvanced } : {})}
             />
           ) : (
             <div className="chart-strategy-run-overview" data-testid="chart-strategy-run-overview">

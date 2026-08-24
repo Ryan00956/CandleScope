@@ -240,6 +240,61 @@ class ReviewBridgeRequest(BaseModel):
     end_time_ms: int
 
 
+class ResearchChartSessionPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    exchange: str = Field(min_length=1, max_length=40)
+    market_type: str = Field(min_length=1, max_length=40)
+    symbol: str = Field(min_length=1, max_length=80)
+    interval: str = Field(min_length=1, max_length=32)
+
+
+class ResearchRangePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    mode: Literal["ALL_AVAILABLE", "VISIBLE", "CUSTOM"]
+    start_time_ms: int | None = None
+    end_time_ms: int | None = None
+
+    @model_validator(mode="after")
+    def validate_range(self) -> "ResearchRangePayload":
+        if self.mode != "ALL_AVAILABLE" and (
+            self.start_time_ms is None or self.end_time_ms is None
+        ):
+            raise ValueError("VISIBLE and CUSTOM ranges require start/end times")
+        if (
+            self.start_time_ms is not None
+            and self.end_time_ms is not None
+            and self.start_time_ms >= self.end_time_ms
+        ):
+            raise ValueError("start_time_ms must be less than end_time_ms")
+        return self
+
+
+class ResearchDatasetIdentityPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    dataset_id: str = Field(min_length=1, max_length=80)
+    data_epoch: str = Field(min_length=8, max_length=80)
+    snapshot_hash: str = Field(min_length=8, max_length=80)
+
+
+class ResearchLaunchContextRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source_workspace_id: str | None = Field(default=None, min_length=1, max_length=160)
+    source_cell_id: str | None = Field(default=None, min_length=1, max_length=160)
+    strategy_draft_id: str = Field(pattern=r"^draft-[A-Za-z0-9_-]{8,152}$")
+    strategy_revision_id: str | None = Field(default=None, min_length=1, max_length=128)
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    quick_preset_id: str = Field(min_length=1, max_length=80)
+    chart_session: ResearchChartSessionPayload
+    range: ResearchRangePayload
+    dataset_identity: ResearchDatasetIdentityPayload | None = None
+    latest_run_id: str | None = Field(
+        default=None, pattern=r"^bt_[A-Za-z0-9_-]{8,128}$"
+    )
+    baseline_run_id: str | None = Field(
+        default=None, pattern=r"^bt_[A-Za-z0-9_-]{8,128}$"
+    )
+
+
 def _require_contract_snapshot(
     preview: dict[str, Any], contract_data_mode: str
 ) -> None:
@@ -296,7 +351,11 @@ def _error(exc: BacktestError) -> JSONResponse:
 @router.get("/capabilities")
 def capabilities(request: Request) -> dict[str, Any]:
     try:
-        return _service(request).capabilities()
+        payload = _service(request).capabilities()
+        return {
+            **payload,
+            "runtime_mode": getattr(request.app.state, "runtime_mode", "LIVE"),
+        }
     except BacktestError as exc:
         return _error(exc)
 
@@ -561,6 +620,26 @@ def create_run(
 def list_runs(request: Request) -> dict[str, Any]:
     try:
         return {"runs": _service(request).list_runs()}
+    except BacktestError as exc:
+        return _error(exc)
+
+
+@router.post("/research/contexts")
+def create_research_launch_context(
+    request: Request, payload: ResearchLaunchContextRequest
+) -> dict[str, Any]:
+    try:
+        return _service(request).create_research_launch_context(payload.model_dump())
+    except BacktestError as exc:
+        return _error(exc)
+
+
+@router.get("/research/contexts/{context_id}")
+def get_research_launch_context(request: Request, context_id: str) -> dict[str, Any]:
+    try:
+        if not context_id.startswith("brc_") or len(context_id) > 132:
+            raise BacktestError("SCHEMA_UNKNOWN_FIELD", "invalid research context id")
+        return _service(request).get_research_launch_context(context_id)
     except BacktestError as exc:
         return _error(exc)
 

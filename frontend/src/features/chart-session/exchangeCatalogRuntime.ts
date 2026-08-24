@@ -334,11 +334,14 @@ export function isNativeIntervalSupported(
     .some((item) => intervalsSemanticallyEquivalent(item.value, interval));
 }
 
-export function useExchangeCatalog(): ExchangeCatalogRuntime {
+export function useExchangeCatalog(enabled = true): ExchangeCatalogRuntime {
   const [exchangeCatalog, setExchangeCatalog] = useState<ExchangeCatalog>({});
-  const [exchangeCatalogStatus, setExchangeCatalogStatus] = useState<ExchangeCatalogStatus>("loading");
+  const [exchangeCatalogStatus, setExchangeCatalogStatus] = useState<ExchangeCatalogStatus>(
+    enabled ? "loading" : "fallback",
+  );
 
   useEffect(() => {
+    if (!enabled) return undefined;
     let cancelled = false;
     fetchExchanges()
       .then((payload) => {
@@ -353,7 +356,9 @@ export function useExchangeCatalog(): ExchangeCatalogRuntime {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [enabled]);
 
-  return { exchangeCatalog, exchangeCatalogStatus };
+  return enabled
+    ? { exchangeCatalog, exchangeCatalogStatus }
+    : { exchangeCatalog: {}, exchangeCatalogStatus: "fallback" };
 }

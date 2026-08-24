@@ -4,7 +4,11 @@ import { dirname, join, sep } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { isBacktestEntryEnabled } from "../backtestFlags.js";
+import {
+  isBacktestEntryEnabled,
+  isBacktestLegacyWorkbenchEnabled,
+  isBacktestResearchEnabled,
+} from "../backtestFlags.js";
 import { createBacktestStore, reportHidesApproximate } from "../backtestStore.js";
 
 const featureRoot = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -20,6 +24,13 @@ test("backtest entry is closed unless the frontend flag is explicitly on", () =>
   assert.equal(isBacktestEntryEnabled({ VITE_BACKTEST_ENTRY_ENABLED: "0" }), false);
   assert.equal(isBacktestEntryEnabled({}), false);
   assert.equal(isBacktestEntryEnabled({ VITE_BACKTEST_ENTRY_ENABLED: "1" }), true);
+  assert.equal(isBacktestResearchEnabled({}), false);
+  assert.equal(isBacktestResearchEnabled({ VITE_BACKTEST_RESEARCH_ENABLED: "1" }), true);
+  assert.equal(isBacktestLegacyWorkbenchEnabled({}), true);
+  assert.equal(
+    isBacktestLegacyWorkbenchEnabled({ VITE_BACKTEST_LEGACY_WORKBENCH_ENABLED: "0" }),
+    false,
+  );
 });
 
 test("backtest feature does not import replay stores or controllers", () => {

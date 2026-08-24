@@ -108,7 +108,7 @@ def test_schema_rollback_fails_closed_with_data_and_succeeds_when_empty(
     tmp_path: Path,
 ) -> None:
     service = BacktestService.start(_settings(tmp_path), now_ms=1)
-    assert SCHEMA_VERSION == 6
+    assert SCHEMA_VERSION == 7
     service.create_python_strategy_bundle(directory=str(FIXTURE), now_ms=2)
     with pytest.raises(RuntimeError, match="fail-closed"):
         rollback_python_bundles(service.settings.db_path)

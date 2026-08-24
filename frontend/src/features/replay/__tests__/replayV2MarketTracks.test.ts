@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { ReplayV2ApiClient } from "../replayV2Api.js";
 import { parseReplayMarketTracksResponse } from "../replayV2Types.js";
 import {
+  applyReplayTrainingRunStreamMessage,
   buildReplayTrainingRunStreamUrl,
   ReplayTrainingRunStream,
   type ReplayTrainingRunStreamSocket,
@@ -392,6 +393,34 @@ test("Phase 6 contract portfolio parser keeps account, ledger, and liquidation d
     parsed.portfolio.positions[0]?.maintenance_margin_proof?.fidelity,
     "VERSIONED_MAINTENANCE_TIER_APPLIED",
   );
+  const liveParsed = parseReplayMarketTracksResponse({
+    ...payload,
+    portfolio: {
+      ...contractPortfolio,
+      hedge_state: {
+        schema_version: "replay.hedge-relational-live.v1",
+        detail: "LIVE_HEADS",
+        audit_history: "AUTHORITATIVE_REST_FULL",
+        position_legs: [],
+        leg_accounting: [],
+        margin_buckets: [],
+        insurance_funds: [],
+        history_heads: {
+          latest_risk_snapshot: null,
+        },
+        liquidation_case_hashes: [],
+        state_hash: `sha256:${"c".repeat(64)}`,
+      },
+    },
+  });
+  if (liveParsed.portfolio.schema_version !== "replay.training.portfolio.v2") {
+    assert.fail("live contract portfolio did not survive parsing");
+  }
+  assert.equal(
+    liveParsed.portfolio.hedge_state.schema_version,
+    "replay.hedge-relational-live.v1",
+  );
+  assert.equal(liveParsed.portfolio.hedge_state.detail, "LIVE_HEADS");
   const extrapolated = parseReplayMarketTracksResponse({
     ...payload,
     portfolio: {
@@ -804,7 +833,7 @@ test("Run stream uses replay.v3 and publishes strict account projections", () =>
       runId: "run-1",
       baseUrl: "wss://example.test/",
     }),
-    "wss://example.test/api/v1/stream/replay/runs/run-1?protocol=replay.v3",
+    "wss://example.test/api/v1/stream/replay/runs/run-1?protocol=replay.v3&projection=delta.v1",
   );
   let socket: ReplayTrainingRunStreamSocket | null = null;
   let projectionCount = 0;
@@ -832,6 +861,116 @@ test("Run stream uses replay.v3 and publishes strict account projections", () =>
     data: JSON.stringify(marketTracksResponse()),
   } as MessageEvent<string>);
   assert.equal(projectionCount, 1);
+  stream.stop();
+});
+
+test("Run stream delta applies only on a continuous authoritative sequence", () => {
+  const snapshot = applyReplayTrainingRunStreamMessage({
+    protocol: "replay.v3",
+    schema_version: "replay.training.market-tracks-stream.v1",
+    type: "SNAPSHOT",
+    run_id: "run-1",
+    sequence: 7,
+    projection: marketTracksResponse(),
+  }, null);
+  const delta = applyReplayTrainingRunStreamMessage({
+    protocol: "replay.v3",
+    schema_version: "replay.training.market-tracks-stream.v1",
+    type: "DELTA",
+    run_id: "run-1",
+    base_sequence: 7,
+    sequence: 8,
+    operations: [{
+      op: "SET",
+      path: ["global_clock", "tick"],
+      value: 2,
+    }],
+  }, snapshot);
+  assert.equal(delta.sequence, 8);
+  assert.equal(delta.projection.global_clock?.tick, 2);
+
+  assert.throws(() => applyReplayTrainingRunStreamMessage({
+    protocol: "replay.v3",
+    schema_version: "replay.training.market-tracks-stream.v1",
+    type: "DELTA",
+    run_id: "run-1",
+    base_sequence: 6,
+    sequence: 9,
+    operations: [],
+  }, delta), /sequence has a gap/);
+  assert.throws(() => applyReplayTrainingRunStreamMessage({
+    protocol: "replay.v3",
+    schema_version: "replay.training.market-tracks-stream.v1",
+    type: "DELTA",
+    run_id: "run-1",
+    base_sequence: 8,
+    sequence: 9,
+    operations: [{
+      op: "SET",
+      path: ["__proto__", "polluted"],
+      value: true,
+    }],
+  }, delta), /is invalid/);
+  assert.throws(() => applyReplayTrainingRunStreamMessage({
+    protocol: "replay.v3",
+    schema_version: "replay.training.market-tracks-stream.v1",
+    type: "DELTA",
+    run_id: "run-1",
+    base_sequence: 8,
+    sequence: 9,
+    operations: [],
+  }, delta), /operation count is invalid/);
+});
+
+test("Run stream reconnects for an authoritative snapshot after a delta gap", async () => {
+  const sockets: Array<ReplayTrainingRunStreamSocket & { closeCode: number | null }> = [];
+  const errors: boolean[] = [];
+  const stream = new ReplayTrainingRunStream({
+    runId: "run-1",
+    baseUrl: "ws://example.test",
+    backoffMs: [1],
+    socketFactory: () => {
+      const socket: ReplayTrainingRunStreamSocket & { closeCode: number | null } = {
+        onopen: null,
+        onmessage: null,
+        onerror: null,
+        onclose: null,
+        closeCode: null,
+        close: (code) => { socket.closeCode = code ?? null; },
+      };
+      sockets.push(socket);
+      return socket;
+    },
+    onProjection: () => undefined,
+    onError: (_error, fatal) => errors.push(fatal),
+  });
+  stream.start();
+  sockets[0]!.onmessage?.({
+    data: JSON.stringify({
+      protocol: "replay.v3",
+      schema_version: "replay.training.market-tracks-stream.v1",
+      type: "SNAPSHOT",
+      run_id: "run-1",
+      sequence: 0,
+      projection: marketTracksResponse(),
+    }),
+  } as MessageEvent<string>);
+  sockets[0]!.onmessage?.({
+    data: JSON.stringify({
+      protocol: "replay.v3",
+      schema_version: "replay.training.market-tracks-stream.v1",
+      type: "DELTA",
+      run_id: "run-1",
+      base_sequence: 2,
+      sequence: 3,
+      operations: [],
+    }),
+  } as MessageEvent<string>);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+
+  assert.equal(sockets[0]!.closeCode, 1012);
+  assert.equal(sockets.length, 2);
+  assert.deepEqual(errors, [false]);
   stream.stop();
 });
 

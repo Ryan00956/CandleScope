@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from app.replay.service import ReplayService
+from app.replay.training.account import InstrumentRule
 from app.replay.training.errors import TrainingRunError
 from app.replay.training.hedge_inputs import build_hedge_public_history_archive
 from app.replay.training.models import (
@@ -255,6 +256,32 @@ async def test_same_symbol_hedge_legs_add_protect_partial_close_and_flatten(
         assert all(
             len(item["protection"]["orders"]) == 2 for item in portfolio["positions"]
         )
+        live = (await service.training.get_live_market_tracks(run_id))["portfolio"]
+        for field in (
+            "cash_balance",
+            "equity",
+            "available_equity",
+            "reserved_margin",
+            "margin_used",
+            "maintenance_margin",
+            "realized_pnl",
+            "unrealized_pnl",
+            "fees_paid",
+            "funding_cashflow",
+            "liquidation_fees_paid",
+            "risk_ratio",
+            "positions",
+            "orders",
+            "history",
+        ):
+            assert live[field] == portfolio[field], field
+        assert live["hedge_state"]["schema_version"] == (
+            "replay.hedge-relational-live.v1"
+        )
+        assert live["ledger"]["detail"] == "LIVE_HEAD"
+        assert live["ledger"]["entry_count"] == portfolio["ledger"]["entry_count"]
+        assert live["ledger"]["tail_hash"] == portfolio["ledger"]["tail_hash"]
+        assert live["ledger"]["reconciliation_delta"] is None
         for position_side in ("LONG", "SHORT"):
             await _send(
                 service,
@@ -1297,6 +1324,40 @@ async def _multitrack_run(
             },
         )
     return run_id, secondary_session, track_id
+
+
+async def test_contract_projection_parses_each_active_rule_once_per_track(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = await _risk_service(
+        tmp_path / "phase9-projection-rule-cache.db",
+        symbols=("BTCUSDT", "ETHUSDT"),
+    )
+    try:
+        run_id, _secondary_session, _secondary_track_id = await _multitrack_run(
+            service,
+            tmp_path,
+            prefix="phase9-projection-rule-cache",
+        )
+        original = InstrumentRule.from_mapping
+        rule_parses = 0
+
+        def observed(
+            _cls: type[InstrumentRule],
+            value: object,
+        ) -> InstrumentRule:
+            nonlocal rule_parses
+            rule_parses += 1
+            return original(value)
+
+        monkeypatch.setattr(InstrumentRule, "from_mapping", classmethod(observed))
+        projection = await service.training.get_market_tracks(run_id)  # type: ignore[union-attr]
+
+        assert len(projection["portfolio"]["positions"]) == 4
+        assert rule_parses == 2
+    finally:
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_real_add_track_uses_track_specific_mark_funding_and_audit(

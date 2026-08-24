@@ -135,6 +135,7 @@ STABLE_ORDER_RESPONSE_EVENTS = 512
 ORDERED_PLAYBACK_INTERACTIVE_BATCH_UNITS = 1
 ORDERED_PLAYBACK_FINAL_STATE_MIN_RATE = 60
 ORDERED_PLAYBACK_FINAL_STATE_TARGET_HZ = 3
+ORDERED_SOURCE_COHORT_PLAN_EVENTS = 32
 _NATIVE_DISPLAY_PIN_PROOF_CACHE_SIZE = 4_096
 _MARKET_TRACK_PLAN_CACHE_SIZE = 1_024
 _MARKET_TRACK_PLAN_TTL_MS = 60_000
@@ -1410,6 +1411,13 @@ class TrainingRunService:
         }
 
     @staticmethod
+    def _requires_barrier_account_audit(binding: Mapping[str, object]) -> bool:
+        return (
+            binding.get("account_data_mode")
+            == AccountDataMode.HISTORICAL_EXACT.value
+        )
+
+    @staticmethod
     def _public_hedge_input_audit(
         audit: Mapping[str, object],
     ) -> dict[str, object]:
@@ -1568,15 +1576,27 @@ class TrainingRunService:
         projection = await self.store.get_market_tracks(normalized)
         return await self._with_global_clock(normalized, projection)
 
+    async def get_live_market_tracks(self, run_id: str) -> dict[str, object]:
+        """Return the bounded UI projection; audit history remains REST-only."""
+
+        normalized = self._identifier(run_id, field_name="run_id")
+        projection = await self.store.get_market_tracks(
+            normalized,
+            live_portfolio=True,
+        )
+        return await self._with_global_clock(normalized, projection)
+
     async def subscribe_market_tracks(
         self,
         run_id: str,
+        *,
+        live: bool = False,
     ) -> tuple[dict[str, object], asyncio.Queue[None]]:
         """Atomically attach a coalescing Run projection subscriber.
 
-        Registration happens before the initial read. A concurrent commit can
-        therefore only cause one harmless follow-up snapshot; it cannot create
-        a gap between the HTTP-equivalent initial projection and the live tail.
+        Registration happens before the requested initial read. A concurrent
+        commit can therefore only cause one harmless follow-up snapshot; it
+        cannot create a gap between the initial projection and the live tail.
         """
 
         normalized = self._identifier(run_id, field_name="run_id")
@@ -1584,7 +1604,11 @@ class TrainingRunService:
         subscribers = self._market_track_subscribers.setdefault(normalized, set())
         subscribers.add(queue)
         try:
-            projection = await self.get_market_tracks(normalized)
+            projection = await (
+                self.get_live_market_tracks(normalized)
+                if live
+                else self.get_market_tracks(normalized)
+            )
         except BaseException:
             self.unsubscribe_market_tracks(normalized, queue)
             raise
@@ -7261,6 +7285,8 @@ class TrainingRunService:
                             status_code=409,
                             details={"track_id": track["track_id"]},
                         )
+                if self._requires_barrier_account_audit(binding):
+                    await self.store.invalidate_account_audit(command.run_id)
                 generation, stop = actor.begin_ordered_playback(
                     client_instance_id=command.client_instance_id,
                     basis=basis,
@@ -7738,14 +7764,9 @@ class TrainingRunService:
                         tracks=ordered,
                         target_virtual_time_ms=target,
                         job=advance_job,
-                        # Ordered playback already keeps the exhaustive,
-                        # independent account auditor outside its per-bar Run
-                        # lock.  Manual controls must use the same boundary:
-                        # every wave still finalizes exact account/HEDGE risk,
-                        # reconciles liquidation and commits its global event
-                        # checkpoint before acknowledgement, while the O(history)
-                        # proof remains available at report/review/fork and via
-                        # the explicit audit path.
+                        # Finalize exact account/HEDGE state at each internal
+                        # wave, then run the exhaustive history proof once at
+                        # the user-command acknowledgement barrier below.
                         allow_final_state_batch=True,
                         audit_account_at_barrier=False,
                         source_goal=source_goal,
@@ -7767,6 +7788,8 @@ class TrainingRunService:
                     advance_key,
                     None,
                 )
+        if self._requires_barrier_account_audit(binding):
+            await self.audit_account(command.run_id)
         selected = await self.replay_service.get_session(selected_session_id)
         final = self._snapshot(selected)
         viewer = await self.store.get_viewer_state(command.run_id)
@@ -7854,12 +7877,14 @@ class TrainingRunService:
         )
         terminal_state = "PAUSED"
         terminal_reason: str | None = None
+        audit_at_terminal = False
         try:
             while not stop.is_set():
                 async with actor.serialized():
                     if not actor.playback_is_active(generation):
                         break
                     binding = await self.store.run_binding(run_id)
+                    audit_at_terminal = self._requires_barrier_account_audit(binding)
                     projection_tracks = await self.store.get_market_track_heads(run_id)
                     tracks = TrainingRunActor.ordered_full_tracks(
                         track
@@ -8216,6 +8241,11 @@ class TrainingRunService:
                         state=terminal_state,
                         reason=terminal_reason,
                     )
+                    if audit_at_terminal:
+                        # Playback can contain many internal waves. Keep its
+                        # proof exact while paying the O(history) audit once at
+                        # the terminal PAUSE/ENDED/ERROR barrier.
+                        await self.audit_account(run_id)
             self._notify_market_tracks(run_id)
 
     async def _ordered_source_goal(
@@ -8577,8 +8607,14 @@ class TrainingRunService:
                 target_virtual_time_ms=target_virtual_time_ms,
                 enabled=allow_final_state_batch and source_goal is None,
             )
+            # Read a bounded lookahead so one exact same-timestamp market
+            # cohort can cross the adapter in one command.  The prefix below
+            # still stops at the first different timestamp, preserving every
+            # account/rule/funding/global ordering barrier.
             source_plan_limit = (
-                1 if final_state_profile is None else final_state_profile[0]
+                ORDERED_SOURCE_COHORT_PLAN_EVENTS
+                if final_state_profile is None
+                else final_state_profile[0]
             )
             if source_goal is not None:
                 remaining = source_goal.target_source_sequence - market_sequences[0]
@@ -8588,7 +8624,10 @@ class TrainingRunService:
                         "market track crossed the planned source-event boundary",
                         status_code=409,
                     )
-                source_plan_limit = max(1, min(32, remaining))
+                source_plan_limit = max(
+                    1,
+                    min(ORDERED_SOURCE_COHORT_PLAN_EVENTS, remaining),
+                )
             planned_event_times: dict[str, tuple[int, ...]] = {}
             planned_source_boundaries: dict[str, int] = {}
             for track, _snapshot in snapshots:

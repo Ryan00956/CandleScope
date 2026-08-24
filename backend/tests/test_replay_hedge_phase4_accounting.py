@@ -370,6 +370,26 @@ async def test_opposite_funding_fee_revision_retry_and_restart_are_exact(
         )
         child_run_id = str(forked["run"]["run_id"])
         child_portfolio = (await training.get_market_tracks(child_run_id))["portfolio"]
+        child_live_portfolio = (
+            await training.get_live_market_tracks(child_run_id)
+        )["portfolio"]
+        for field in (
+            "cash_balance",
+            "equity",
+            "available_equity",
+            "reserved_margin",
+            "margin_used",
+            "realized_pnl",
+            "unrealized_pnl",
+            "fees_paid",
+            "funding_cashflow",
+            "liquidation_fees_paid",
+            "risk_ratio",
+            "positions",
+            "orders",
+            "history",
+        ):
+            assert child_live_portfolio[field] == child_portfolio[field]
         child_accounting = {
             item["position_side"]: item
             for item in child_portfolio["hedge_state"]["leg_accounting"]

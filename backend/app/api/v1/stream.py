@@ -26,7 +26,10 @@ from app.api.v1.stream_full_order_book import stream_full_order_book
 from app.api.v1.stream_order_book import stream_order_book
 from app.api.v1.replay import replay_training_unavailable_payload
 from app.api.v1.stream_replay import stream_replay_session
-from app.api.v1.stream_replay_training import stream_replay_training_run
+from app.api.v1.stream_replay_training import (
+    MARKET_TRACK_STREAM_DELTA_MODE,
+    stream_replay_training_run,
+)
 from app.api.v1.stream_trade_flow import stream_trade_flow
 from app.api.v1.stream_utils import (
     normalize_exchange as _normalize_exchange,
@@ -147,6 +150,7 @@ async def replay_training_run_stream(
     websocket: WebSocket,
     run_id: str,
     protocol: str = Query(default=REPLAY_V2_PROTOCOL, min_length=1, max_length=32),
+    projection: str = Query(default="snapshot.v1", min_length=1, max_length=32),
 ) -> None:
     """Deliver coalesced authoritative multi-market account projections."""
 
@@ -162,6 +166,19 @@ async def replay_training_run_stream(
             ).to_payload(),
         )
         await websocket.close(code=1008, reason="unsupported replay protocol")
+        return
+    if projection not in {"snapshot.v1", MARKET_TRACK_STREAM_DELTA_MODE}:
+        await websocket.accept()
+        await _send_json_with_timeout(
+            websocket,
+            TrainingRunError(
+                "REPLAY_CONTROL_INVALID",
+                "unsupported replay training projection stream",
+                status_code=422,
+                details={"projection": projection},
+            ).to_payload(),
+        )
+        await websocket.close(code=1008, reason="unsupported replay projection")
         return
     service = getattr(websocket.app.state, "replay_service", None)
     training = getattr(service, "training", None)
@@ -188,6 +205,7 @@ async def replay_training_run_stream(
         websocket,
         training=training,
         run_id=normalized_run_id,
+        delta_enabled=projection == MARKET_TRACK_STREAM_DELTA_MODE,
     )
 
 

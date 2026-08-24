@@ -654,6 +654,7 @@ async def test_exact_plan_create_binding_ordering_funding_and_restart(
 
 async def test_exact_account_only_waves_batch_until_market_barrier(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = tmp_path / "account-wave-batching.db"
     archive = tmp_path / "account-wave-batching.sqlite3"
@@ -683,6 +684,19 @@ async def test_exact_account_only_waves_batch_until_market_barrier(
             command_id="account-wave-batching-acquire",
         )
         before = await service.get_session(session_id)
+        audit_calls = 0
+        real_audit_account = service.training.audit_account  # type: ignore[union-attr]
+
+        async def counted_audit_account(target_run_id: str) -> dict[str, object]:
+            nonlocal audit_calls
+            audit_calls += 1
+            return await real_audit_account(target_run_id)
+
+        monkeypatch.setattr(
+            service.training,
+            "audit_account",
+            counted_audit_account,
+        )
         stepped = await _send(
             service,
             run_id=run_id,
@@ -714,6 +728,7 @@ async def test_exact_account_only_waves_batch_until_market_barrier(
             for event in stable
         )
         assert sum(event["event_phase"] == 20 for event in stable) == 1
+        assert audit_calls == 1
         projection = await service.training.get_market_tracks(run_id)  # type: ignore[union-attr]
         assert (
             projection["portfolio"]["account_history"]["auditor"]["status"] == "PASS"
@@ -731,6 +746,25 @@ async def test_exact_account_only_waves_batch_until_market_barrier(
             ]
         assert "advance_by" not in command_types
         assert command_types.count("step") == 1
+
+        # Two distinct BAR timestamps require multiple internal waves, but the
+        # exhaustive history proof belongs to the command acknowledgement
+        # barrier and therefore runs only once more.
+        before_multi_wave = await service.get_session(session_id)
+        await _send(
+            service,
+            run_id=run_id,
+            session_id=session_id,
+            command_id="account-wave-batching-two-bars",
+            command_type=ReplayV2CommandType.STEP_BASE,
+            payload={"count": 2},
+        )
+        after_multi_wave = await service.get_session(session_id)
+        assert (
+            after_multi_wave["snapshot"]["cursor"]["virtual_time_ms"]
+            > before_multi_wave["snapshot"]["cursor"]["virtual_time_ms"]
+        )
+        assert audit_calls == 2
     finally:
         await service.shutdown(step_timeout=1.0)
 

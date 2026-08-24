@@ -146,8 +146,13 @@ async def _service(
     archive_root: Path,
     enabled: bool = True,
     symbols: tuple[str, ...] = ("BTCUSDT", "ETHUSDT"),
+    coalesce_trade_timestamps: bool = False,
 ) -> ReplayService:
-    repository, trade_archive = _multi_trade_sources(archive_root, symbols)
+    repository, trade_archive = _multi_trade_sources(
+        archive_root,
+        symbols,
+        coalesce_trade_timestamps=coalesce_trade_timestamps,
+    )
     settings = replace(
         replay_settings(path),
         replay_historical_book_enabled=enabled,
@@ -386,6 +391,184 @@ async def test_advance_updates_book_projection_without_queue_claim(
         assert book["last_update_id"] == 102
         assert book["bids"][0] == ["101", "10"]
         assert book["queue_exact"] is False
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_advance_coalesces_same_timestamp_market_cohort_before_book_commit(
+    tmp_path: Path,
+) -> None:
+    service = await _service(
+        tmp_path / "same-timestamp-cohort.db",
+        archive_root=tmp_path / "trade-same-timestamp-cohort",
+        coalesce_trade_timestamps=True,
+    )
+    try:
+        assert service.training is not None
+        service.settings = replace(
+            service.settings,
+            replay_fast_forward_optimization_enabled=False,
+        )
+        await service.training.historical_books.import_archive(
+            _book_archive(
+                tmp_path / "same-timestamp-cohort-btc-book.sqlite3",
+                symbol="BTCUSDT",
+            )
+        )
+        await service.training.historical_books.import_archive(
+            _book_archive(
+                tmp_path / "same-timestamp-cohort-eth-book.sqlite3",
+                symbol="ETHUSDT",
+            )
+        )
+        run_id, session_id = await _create_book_run(service)
+        session = await service.get_session(session_id)
+        await service.training.command(
+            run_id,
+            _command(
+                run_id,
+                "same-timestamp-cohort-add-eth",
+                ReplayV2CommandType.ADD_TRACK,
+                session,
+                {
+                    "exchange": "binance",
+                    "market_type": "futures",
+                    "symbol": "ETHUSDT",
+                    "settlement_asset": "USDT",
+                    "subscription_tier": "FULL",
+                },
+            ),
+        )
+        await _acquire(
+            service,
+            run_id=run_id,
+            selected_session_id=session_id,
+            command_id="same-timestamp-cohort-acquire",
+        )
+        session = await service.get_session(session_id)
+        target = TRADE_REPLAY_START_MS + 1_000
+        result = await service.training.command(
+            run_id,
+            _command(
+                run_id,
+                "same-timestamp-cohort-advance",
+                ReplayV2CommandType.ADVANCE_TO,
+                session,
+                {"virtual_time_ms": target},
+            ),
+        )
+
+        stable = result["data"]["stable_order"]
+        assert [event["source_sequence"] for event in stable] == [1, 2, 1, 2]
+        assert [event["market_track_stable_id"] for event in stable] == [
+            "track-1",
+            "track-1",
+            "track-2",
+            "track-2",
+        ]
+        assert {event["actual_event_time_ms"] for event in stable} == {target}
+        assert result["cursor"]["source_sequence"] == 2
+        with sqlite3.connect(service.store.path) as connection:
+            ready_counts = connection.execute(
+                """
+                SELECT track_id, COUNT(*) FROM replay_historical_book_event
+                WHERE run_id = ? AND event_type = 'READY'
+                  AND at_virtual_time_ms = ?
+                GROUP BY track_id ORDER BY track_id
+                """,
+                (run_id, target),
+            ).fetchall()
+            assert ready_counts == [("track-1", 1), ("track-2", 1)]
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_live_market_tracks_keep_audit_history_bounded_and_rest_full(
+    tmp_path: Path,
+) -> None:
+    service = await _service(
+        tmp_path / "live-portfolio.db",
+        archive_root=tmp_path / "trade-live-portfolio",
+    )
+    try:
+        assert service.training is not None
+        created = await service.training.create_run(await _trade_request(service))
+        run_id = str(created["run"]["run_id"])
+
+        def insert_history(connection: sqlite3.Connection) -> None:
+            rows = []
+            for sequence in range(1, 1_001):
+                rows.append(
+                    (
+                        run_id,
+                        f"live-risk-{sequence}",
+                        sequence,
+                        sequence,
+                        sequence,
+                        f"sha256:{sha256(f'public-{sequence}'.encode()).hexdigest()}",
+                        f"sha256:{sha256(f'risk-{sequence}'.encode()).hexdigest()}",
+                        sequence,
+                    )
+                )
+            connection.executemany(
+                """
+                INSERT INTO replay_training_risk_snapshot(
+                    run_id, snapshot_id, snapshot_sequence, virtual_time_ms,
+                    source_sequence, account_status, equity,
+                    available_balance, total_initial_margin,
+                    total_maintenance_margin, risk_ratio,
+                    active_rule_revision, public_input_hash,
+                    component_hash, created_at_ms
+                ) VALUES (?, ?, ?, ?, ?, 'ACTIVE', '10000', '10000',
+                          '0', '0', NULL, 1, ?, ?, ?)
+                """,
+                rows,
+            )
+
+        await service.store.run_extension_write(insert_history)
+        with sqlite3.connect(service.store.path) as connection:
+            assert connection.execute(
+                """
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'index'
+                  AND name = 'idx_replay_training_contract_order_active'
+                """
+            ).fetchone() == (1,)
+        full = await service.training.get_market_tracks(run_id)
+        live, queue = await service.training.subscribe_market_tracks(
+            run_id,
+            live=True,
+        )
+        service.training.unsubscribe_market_tracks(run_id, queue)
+
+        full_portfolio = full["portfolio"]
+        live_portfolio = live["portfolio"]
+        assert isinstance(full_portfolio, dict)
+        assert isinstance(live_portfolio, dict)
+        assert {
+            key: value
+            for key, value in full_portfolio.items()
+            if key != "hedge_state"
+        } == {
+            key: value
+            for key, value in live_portfolio.items()
+            if key != "hedge_state"
+        }
+        full_hedge = full_portfolio["hedge_state"]
+        live_hedge = live_portfolio["hedge_state"]
+        assert isinstance(full_hedge, dict)
+        assert isinstance(live_hedge, dict)
+        assert full_hedge["schema_version"] == "replay.hedge-relational-state.v1"
+        assert len(full_hedge["risk_snapshots"]) == 1_000
+        assert live_hedge["schema_version"] == "replay.hedge-relational-live.v1"
+        assert "risk_snapshots" not in live_hedge
+        history_heads = live_hedge["history_heads"]
+        assert isinstance(history_heads, dict)
+        assert "counts" not in history_heads
+        assert history_heads["latest_risk_snapshot"]["snapshot_sequence"] == 1_000
+        assert len(json.dumps(live, separators=(",", ":"))) * 10 < len(
+            json.dumps(full, separators=(",", ":"))
+        )
     finally:
         await service.shutdown(step_timeout=1.0)
 

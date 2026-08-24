@@ -1,12 +1,29 @@
 export interface ChartStrategyTesterFlagEnvironment {
   VITE_CHART_STRATEGY_TESTER_ENABLED?: unknown;
+  VITE_CHART_TRADE_EXPLANATION_ENABLED?: unknown;
+  VITE_CHART_RUN_COMPARE_ENABLED?: unknown;
+}
+
+function strictEnabled(value: unknown): boolean {
+  return value === true || value === 1 || value === "1";
 }
 
 export function resolveChartStrategyTesterEnabled(
   environment: ChartStrategyTesterFlagEnvironment = {},
 ): boolean {
-  const value = environment.VITE_CHART_STRATEGY_TESTER_ENABLED;
-  return value === true || value === 1 || value === "1";
+  return strictEnabled(environment.VITE_CHART_STRATEGY_TESTER_ENABLED);
+}
+
+export function resolveChartTradeExplanationEnabled(
+  environment: ChartStrategyTesterFlagEnvironment = {},
+): boolean {
+  return strictEnabled(environment.VITE_CHART_TRADE_EXPLANATION_ENABLED);
+}
+
+export function resolveChartRunCompareEnabled(
+  environment: ChartStrategyTesterFlagEnvironment = {},
+): boolean {
+  return strictEnabled(environment.VITE_CHART_RUN_COMPARE_ENABLED);
 }
 
 function viteEnvironment(): ChartStrategyTesterFlagEnvironment {
@@ -14,6 +31,10 @@ function viteEnvironment(): ChartStrategyTesterFlagEnvironment {
     return {
       VITE_CHART_STRATEGY_TESTER_ENABLED:
         import.meta.env?.VITE_CHART_STRATEGY_TESTER_ENABLED,
+      VITE_CHART_TRADE_EXPLANATION_ENABLED:
+        import.meta.env?.VITE_CHART_TRADE_EXPLANATION_ENABLED,
+      VITE_CHART_RUN_COMPARE_ENABLED:
+        import.meta.env?.VITE_CHART_RUN_COMPARE_ENABLED,
     };
   } catch {
     return {};
@@ -21,5 +42,13 @@ function viteEnvironment(): ChartStrategyTesterFlagEnvironment {
 }
 
 export const CHART_STRATEGY_TESTER_ENABLED = resolveChartStrategyTesterEnabled(
+  viteEnvironment(),
+);
+
+export const CHART_TRADE_EXPLANATION_ENABLED = resolveChartTradeExplanationEnabled(
+  viteEnvironment(),
+);
+
+export const CHART_RUN_COMPARE_ENABLED = resolveChartRunCompareEnabled(
   viteEnvironment(),
 );

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test, { mock } from "node:test";
 
 import { createBacktestApi } from "../backtestApi.js";
-import type { RunCompareV2, SignalTracePage } from "../backtestTypes.js";
+import type { RecentRunCompareV1, RunCompareV3, SignalTracePage } from "../backtestTypes.js";
 
 interface CapturedRequest {
   url: string;
@@ -21,18 +21,37 @@ function responseFor(url: string): Response {
     return Response.json(page);
   }
   if (url.includes("/compare/pair")) {
-    const comparison: RunCompareV2 = {
-      schema: "RUN_COMPARE_V2",
+    const comparison: RunCompareV3 = {
+      schema: "RUN_COMPARE_V3",
       directComparisonAllowed: true,
       incompatibleFields: [],
+      comparisonContext: { leftHash: "sha256:left", rightHash: "sha256:right" },
       precisionExplanation: null,
       parameterDiff: {},
       tradeDiff: {},
       costDiff: {},
+      fingerprintDiff: {
+        version: "TRADE_FINGERPRINT_V2",
+        available: true,
+        addedCount: 0,
+        removedCount: 0,
+        unchangedCount: 0,
+        added: [],
+        removed: [],
+      },
       left: { runId: "left/ one", hashes: {}, equity: [], equityDaily: [], drawdownDaily: [], metrics: {} },
       right: { runId: "right?two", hashes: {}, equity: [], equityDaily: [], drawdownDaily: [], metrics: {} },
     };
     return Response.json(comparison);
+  }
+  if (url.includes("/comparison")) {
+    const recent: RecentRunCompareV1 = {
+      schema: "RUN_COMPARE_RECENT_V1",
+      currentRunId: "run/ one",
+      baselineRunId: null,
+      comparison: null,
+    };
+    return Response.json(recent);
   }
   return Response.json({
     ok: true,
@@ -83,6 +102,7 @@ test("all existing backtest API methods keep their stable wire contract", async 
     await api.smokeStrategyRevision("revision/ one", { smoke: true }, signal);
     await api.getSignalTrace("run/ one", 7, 23, signal);
     await api.compareRuns("left/ one", "right?two", signal);
+    await api.compareRecentRun("run/ one", signal);
     await api.cloneRun("run/ one", "length", 24, "idem-clone", signal);
     await api.copyStrategyRevision("revision/ one", "copy", signal);
     await api.archiveStrategyRevision("revision/ one", signal);
@@ -98,7 +118,7 @@ test("all existing backtest API methods keep their stable wire contract", async 
     mock.restoreAll();
   }
 
-  assert.equal(calls.length, 33);
+  assert.equal(calls.length, 34);
   assert.deepEqual(calls.map((call) => [call.init?.method ?? "GET", call.url]), [
     ["GET", "/backtest-wire/capabilities"],
     ["GET", "/backtest-wire/datasets"],
@@ -122,6 +142,7 @@ test("all existing backtest API methods keep their stable wire contract", async 
     ["POST", "/backtest-wire/strategy-revisions/revision%2F%20one/smoke"],
     ["GET", "/backtest-wire/runs/run%2F%20one/signal-trace?after=7&limit=23"],
     ["GET", "/backtest-wire/runs/compare/pair?left_run_id=left%2F+one&right_run_id=right%3Ftwo"],
+    ["GET", "/backtest-wire/runs/run%2F%20one/comparison"],
     ["POST", "/backtest-wire/runs/run%2F%20one/clone"],
     ["POST", "/backtest-wire/strategy-revisions/revision%2F%20one/copy"],
     ["POST", "/backtest-wire/strategy-revisions/revision%2F%20one/archive"],
@@ -139,12 +160,12 @@ test("all existing backtest API methods keep their stable wire contract", async 
   assert.deepEqual(bodyOf(calls[4]!), { mode: "validate" });
   assert.deepEqual(bodyOf(calls[5]!), { mode: "create" });
   assert.equal(new Headers(calls[5]!.init?.headers).get("Idempotency-Key"), "idem-create");
-  assert.deepEqual(bodyOf(calls[22]!), { parameter: "length", value: 24 });
-  assert.equal(new Headers(calls[22]!.init?.headers).get("Idempotency-Key"), "idem-clone");
-  assert.deepEqual(bodyOf(calls[25]!), { start_time_ms: 11, end_time_ms: 22 });
-  assert.deepEqual(bodyOf(calls[28]!), { zip_base64: "zip-inspect" });
-  assert.deepEqual(bodyOf(calls[29]!), { zip_base64: "zip-create" });
-  assert.deepEqual(bodyOf(calls[31]!), { bundle_id: "bundle/ one" });
+  assert.deepEqual(bodyOf(calls[23]!), { parameter: "length", value: 24 });
+  assert.equal(new Headers(calls[23]!.init?.headers).get("Idempotency-Key"), "idem-clone");
+  assert.deepEqual(bodyOf(calls[26]!), { start_time_ms: 11, end_time_ms: 22 });
+  assert.deepEqual(bodyOf(calls[29]!), { zip_base64: "zip-inspect" });
+  assert.deepEqual(bodyOf(calls[30]!), { zip_base64: "zip-create" });
+  assert.deepEqual(bodyOf(calls[32]!), { bundle_id: "bundle/ one" });
 });
 
 test("wire errors keep backend code and message and fail closed", async () => {
@@ -213,10 +234,15 @@ test("signal trace pagination and Run compare compatibility stay typed", async (
     { schema: "SIGNAL_TRACE_V1", runId: "bt_1", items: [{ ordinal: 1, event_time_ms: 10, payload: { rsi: "29" }, row_hash: "sha256:1" }], nextAfter: 1, limit: 1 },
     { schema: "SIGNAL_TRACE_V1", runId: "bt_1", items: [{ ordinal: 2, event_time_ms: 20, payload: { rsi: "31" }, row_hash: "sha256:2" }], nextAfter: null, limit: 1 },
     {
-      schema: "RUN_COMPARE_V2", directComparisonAllowed: false,
+      schema: "RUN_COMPARE_V3", directComparisonAllowed: false,
       incompatibleFields: ["fidelity_mode"], precisionExplanation: null,
+      comparisonContext: { leftHash: "sha256:left", rightHash: "sha256:right" },
       parameterDiff: { length: { left: 2, right: 3 } },
       tradeDiff: { netPnl: { left: "1", right: "2", delta: "1" } }, costDiff: {},
+      fingerprintDiff: {
+        version: "TRADE_FINGERPRINT_V2", available: false, reason: "INCOMPATIBLE_CONTEXT",
+        addedCount: null, removedCount: null, unchangedCount: null, added: [], removed: [],
+      },
       left: { runId: "bt_1", hashes: {}, equity: [], equityDaily: [], drawdownDaily: [], metrics: {} },
       right: { runId: "bt_2", hashes: {}, equity: [], equityDaily: [], drawdownDaily: [], metrics: {} },
     },
@@ -232,7 +258,7 @@ test("signal trace pagination and Run compare compatibility stay typed", async (
     const comparison = await api.compareRuns("bt_1", "bt_2");
     assert.equal(first.items[0]?.row_hash, "sha256:1");
     assert.equal(second.nextAfter, null);
-    assert.equal(comparison.schema, "RUN_COMPARE_V2");
+    assert.equal(comparison.schema, "RUN_COMPARE_V3");
     assert.equal(comparison.directComparisonAllowed, false);
     assert.deepEqual(comparison.incompatibleFields, ["fidelity_mode"]);
     assert.equal(comparison.tradeDiff.netPnl?.delta, "1");

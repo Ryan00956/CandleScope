@@ -3,7 +3,11 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import test from "node:test";
 
-import { resolveChartStrategyTesterEnabled } from "../chartStrategyTesterFeature.js";
+import {
+  resolveChartRunCompareEnabled,
+  resolveChartStrategyTesterEnabled,
+  resolveChartTradeExplanationEnabled,
+} from "../chartStrategyTesterFeature.js";
 
 test("chart strategy tester flag is default off and strict", () => {
   assert.equal(resolveChartStrategyTesterEnabled(), false);
@@ -11,6 +15,14 @@ test("chart strategy tester flag is default off and strict", () => {
   assert.equal(resolveChartStrategyTesterEnabled({ VITE_CHART_STRATEGY_TESTER_ENABLED: "true" }), false);
   assert.equal(resolveChartStrategyTesterEnabled({ VITE_CHART_STRATEGY_TESTER_ENABLED: "1" }), true);
   assert.equal(resolveChartStrategyTesterEnabled({ VITE_CHART_STRATEGY_TESTER_ENABLED: true }), true);
+});
+
+test("trade explanation and recent Run comparison flags are default off and strict", () => {
+  assert.equal(resolveChartTradeExplanationEnabled(), false);
+  assert.equal(resolveChartTradeExplanationEnabled({ VITE_CHART_TRADE_EXPLANATION_ENABLED: "true" }), false);
+  assert.equal(resolveChartTradeExplanationEnabled({ VITE_CHART_TRADE_EXPLANATION_ENABLED: "1" }), true);
+  assert.equal(resolveChartRunCompareEnabled(), false);
+  assert.equal(resolveChartRunCompareEnabled({ VITE_CHART_RUN_COMPARE_ENABLED: 1 }), true);
 });
 
 test("phase 4 keeps runtime, draft storage, and Monaco behind lazy boundaries", () => {
@@ -32,6 +44,9 @@ test("phase 4 keeps runtime, draft storage, and Monaco behind lazy boundaries", 
   assert.match(cell, /data-chart-strategy-entry=\{cell\.id\}/);
   assert.match(cell, /globalThis\.setTimeout\(\(\) => \{[\s\S]*data-chart-strategy-entry/);
   assert.match(cell, /\(currentEntry \?\? strategyEntryRef\.current\)\?\.focus\(\)/);
+  assert.match(cell, /const openStrategyPanel = useCallback\(\(\) => \{/);
+  assert.match(cell, /onOpenPanel=\{openStrategyPanel\}/);
+  assert.doesNotMatch(cell, /onOpenPanel=\{\(\) => onStrategyPanelOpenChange\(true\)\}/);
   assert.match(app, /bottomPanel=\{CHART_STRATEGY_TESTER_ENABLED/);
   assert.doesNotMatch(panel, /from\s+["']@monaco-editor\/react/);
   assert.match(panel, /lazy\(\(\) => import\("\.\/StrategyScriptWorkspace\.js"\)\)/);
@@ -40,4 +55,6 @@ test("phase 4 keeps runtime, draft storage, and Monaco behind lazy boundaries", 
   assert.match(workspace, /run:\s*\(\)\s*=>\s*onRunRef\.current\(\)/);
   assert.doesNotMatch(workspace, /onKeyDownCapture/);
   assert.match(exampleEnvironment, /^VITE_CHART_STRATEGY_TESTER_ENABLED=0$/m);
+  assert.match(exampleEnvironment, /^VITE_CHART_TRADE_EXPLANATION_ENABLED=0$/m);
+  assert.match(exampleEnvironment, /^VITE_CHART_RUN_COMPARE_ENABLED=0$/m);
 });

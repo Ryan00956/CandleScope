@@ -7,6 +7,7 @@ import type { ChartSurfaceVisibleRange } from "../../../chart-adapter/useChartSu
 import { parseIntervalSeconds } from "../../../utils/intervals.js";
 import type { SeriesWindowStore } from "../../market-data/window/seriesWindowStore.js";
 import type { BacktestChartData } from "../backtestTypes.js";
+import type { TradeExplanationV1 } from "../backtestTypes.js";
 import {
   projectBacktestResultMarkers,
   type BacktestMarkerLabels,
@@ -101,12 +102,20 @@ export interface ChartStrategyResultMarkerSource
   };
 }
 
+export interface ChartStrategyMarkerEvidence {
+  markerId: string;
+  kind: "FILL" | "REJECTION";
+  explanation: TradeExplanationV1;
+}
+
 export function createChartStrategyResultMarkerSource({
   seriesStore,
   labels,
+  onActivate,
 }: {
   seriesStore: SeriesWindowStore;
   labels: BacktestMarkerLabels;
+  onActivate?: (evidence: ChartStrategyMarkerEvidence) => void;
 }): ChartStrategyResultMarkerSource {
   let chart: BacktestChartData | null = null;
   let visibleRange: { from: number; to: number } | null = null;
@@ -165,6 +174,23 @@ export function createChartStrategyResultMarkerSource({
       if (disposed) return () => undefined;
       listeners.add(listener);
       return () => listeners.delete(listener);
+    },
+    activate(markerId) {
+      if (!chart || !markerId.startsWith("backtest:")) return false;
+      const index = Number(markerId.slice(markerId.lastIndexOf(":") + 1));
+      if (!Number.isSafeInteger(index) || index < 0) return false;
+      const rejection = markerId.startsWith("backtest:rejected:");
+      const row = rejection
+        ? chart.rejected_orders?.[index]
+        : chart.fills[index];
+      const explanation = row?.explanation;
+      if (!explanation || typeof explanation !== "object") return false;
+      onActivate?.({
+        markerId,
+        kind: rejection ? "REJECTION" : "FILL",
+        explanation: explanation as TradeExplanationV1,
+      });
+      return true;
     },
     setResult(next) {
       if (disposed || chart?.chart_hash === next?.chart_hash) return;

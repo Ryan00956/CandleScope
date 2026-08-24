@@ -1,0 +1,39 @@
+{
+  "payload": {
+    "schema": "TRADE_EXPLANATION_V1",
+    "canonicalization": "JCS_SHA256_V1",
+    "runId": "bt_fixture",
+    "tradeId": "trade-1",
+    "orderId": "ord-1",
+    "fillId": "fill-ord-1-1",
+    "decisionId": "decision-fixture",
+    "decisionTraceOrdinal": 7,
+    "decisionTimeMs": 1724457600000,
+    "action": "ENTER",
+    "reasonCode": "sma_cross",
+    "reasonLabel": "fast > slow",
+    "source": {
+      "strategyRevisionId": "rev_fixture",
+      "line": 8,
+      "column": 4,
+      "conditionId": "condition-8-1"
+    },
+    "conditions": [
+      {"id": "condition-8-1", "label": "fast > slow", "result": true}
+    ],
+    "variables": {
+      "close": {"kind": "decimal", "value": "101.25"},
+      "ready": {"kind": "boolean", "value": true},
+      "tag": {"kind": "string", "value": "fixture"}
+    },
+    "execution": {"state": "FILLED", "reasonCode": "NEXT_BAR_OPEN"},
+    "completeness": "COMPLETE",
+    "omissions": {
+      "conditionsDropped": 0,
+      "variablesDropped": 0,
+      "valuesTruncated": 0
+    },
+    "evidenceHash": "1cfa99dc66b5481b35dd4adf29308a27b3425629f136e67504a9410806359e5a"
+  },
+  "canonicalWithoutHash": "{\"action\":\"ENTER\",\"canonicalization\":\"JCS_SHA256_V1\",\"completeness\":\"COMPLETE\",\"conditions\":[{\"id\":\"condition-8-1\",\"label\":\"fast > slow\",\"result\":true}],\"decisionId\":\"decision-fixture\",\"decisionTimeMs\":1724457600000,\"decisionTraceOrdinal\":7,\"execution\":{\"reasonCode\":\"NEXT_BAR_OPEN\",\"state\":\"FILLED\"},\"fillId\":\"fill-ord-1-1\",\"omissions\":{\"conditionsDropped\":0,\"valuesTruncated\":0,\"variablesDropped\":0},\"orderId\":\"ord-1\",\"reasonCode\":\"sma_cross\",\"reasonLabel\":\"fast > slow\",\"runId\":\"bt_fixture\",\"schema\":\"TRADE_EXPLANATION_V1\",\"source\":{\"column\":4,\"conditionId\":\"condition-8-1\",\"line\":8,\"strategyRevisionId\":\"rev_fixture\"},\"tradeId\":\"trade-1\",\"variables\":{\"close\":{\"kind\":\"decimal\",\"value\":\"101.25\"},\"ready\":{\"kind\":\"boolean\",\"value\":true},\"tag\":{\"kind\":\"string\",\"value\":\"fixture\"}}}"
+}

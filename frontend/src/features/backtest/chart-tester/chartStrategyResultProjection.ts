@@ -126,26 +126,26 @@ export interface FocusedTradeViewModel {
 }
 
 export function projectFocusedTrade(
-  trades: readonly Record<string, string>[],
+  trades: readonly Record<string, unknown>[],
   focusedTradeId: string | null,
 ): FocusedTradeViewModel | null {
   if (focusedTradeId === null) return null;
-  const trade = trades.find((item) => item.trade_id === focusedTradeId);
+  const trade = trades.find((item) => String(item.trade_id ?? "") === focusedTradeId);
   if (!trade) return null;
   const fillTimeMs = Number(trade.entry_time_ms);
   return {
-    tradeId: trade.trade_id ?? null,
-    entryPrice: trade.entry_price ?? "—",
-    exitPrice: trade.exit_price ?? "—",
-    mae: trade.mae || "—",
-    mfe: trade.mfe || "—",
-    entryReason: trade.entry_reason || "—",
-    exitReason: trade.exit_reason || "—",
+    tradeId: trade.trade_id == null ? null : String(trade.trade_id),
+    entryPrice: trade.entry_price == null ? "—" : String(trade.entry_price),
+    exitPrice: trade.exit_price == null ? "—" : String(trade.exit_price),
+    mae: trade.mae ? String(trade.mae) : "—",
+    mfe: trade.mfe ? String(trade.mfe) : "—",
+    entryReason: trade.entry_reason ? String(trade.entry_reason) : "—",
+    exitReason: trade.exit_reason ? String(trade.exit_reason) : "—",
     decisionTimeMs: Number(trade.decision_time_ms ?? trade.entry_time_ms),
     acceptedTimeMs: Number(trade.order_accepted_time_ms ?? trade.entry_time_ms),
     fillTimeMs,
     chartFocusTimeMs: fillTimeMs,
-    fees: trade.fees ?? "—",
-    funding: trade.funding ?? "—",
+    fees: trade.fees == null ? "—" : String(trade.fees),
+    funding: trade.funding == null ? "—" : String(trade.funding),
   };
 }

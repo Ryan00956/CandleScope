@@ -26,6 +26,7 @@ export interface ExternalMarkerSnapshot {
 export interface ExternalMarkerSource {
   getSnapshot(): ExternalMarkerSnapshot;
   subscribe(listener: () => void): () => void;
+  activate?(markerId: string): boolean;
 }
 
 export function combineExternalMarkerSources(
@@ -55,6 +56,12 @@ export function combineExternalMarkerSources(
       return () => {
         for (const unsubscribe of unsubscribers) unsubscribe();
       };
+    },
+    activate(markerId: string): boolean {
+      for (const source of sources) {
+        if (source.activate?.(markerId)) return true;
+      }
+      return false;
     },
   };
 }

@@ -17,6 +17,73 @@ export interface BacktestRunRecord {
   };
 }
 
+export type TradeExplanationVariable =
+  | { kind: "string"; value: string }
+  | { kind: "decimal"; value: string }
+  | { kind: "boolean"; value: boolean }
+  | { kind: "null"; value: null };
+
+export interface TradeExplanationV1 {
+  schema: "TRADE_EXPLANATION_V1";
+  canonicalization: "JCS_SHA256_V1";
+  runId: string;
+  tradeId: string | null;
+  orderId: string | null;
+  fillId: string | null;
+  decisionId: string;
+  decisionTraceOrdinal: number | null;
+  decisionTimeMs: number;
+  action: "ENTER" | "EXIT" | "REVERSE" | "REJECT";
+  reasonCode: string | null;
+  reasonLabel: string | null;
+  source: {
+    strategyRevisionId: string;
+    line: number | null;
+    column: number | null;
+    conditionId: string | null;
+  };
+  conditions: Array<{ id: string; label: string; result: boolean | null }>;
+  variables: Record<string, TradeExplanationVariable>;
+  execution: {
+    state: "ACCEPTED" | "FILLED" | "REJECTED" | "CANCELLED";
+    reasonCode: string | null;
+  };
+  completeness: "COMPLETE" | "PARTIAL" | "UNAVAILABLE";
+  omissions: {
+    conditionsDropped: number;
+    variablesDropped: number;
+    valuesTruncated: number;
+  };
+  evidenceHash: string;
+}
+
+export interface BacktestFillRecord extends Record<string, unknown> {
+  order_id?: string;
+  fill_id?: string;
+  sequence?: string | number;
+  event_time_ms?: string | number;
+  side?: string;
+  action?: string;
+  price?: string;
+  qty?: string;
+  fee?: string;
+  reason?: string;
+  explanation?: TradeExplanationV1;
+}
+
+export interface BacktestTradeRecord extends Record<string, unknown> {
+  trade_id?: string;
+  side?: string;
+  entry_time_ms?: string | number;
+  exit_time_ms?: string | number;
+  entry_price?: string;
+  exit_price?: string;
+  net_pnl?: string;
+  fees?: string;
+  entry_explanation?: TradeExplanationV1 | null;
+  exit_explanation?: TradeExplanationV1 | null;
+}
+
 export interface BacktestReport {
   schemaVersion: string;
   runId: string;
@@ -45,8 +112,8 @@ export interface BacktestReport {
   unmodeled: string[];
   suitable_for: string[];
   not_suitable_for: string[];
-  fills: Array<Record<string, string>>;
-  trades: Array<Record<string, string>>;
+  fills: BacktestFillRecord[];
+  trades: BacktestTradeRecord[];
   rejected_orders?: Array<Record<string, unknown>>;
   order_events?: Array<Record<string, unknown>>;
   execution_assumptions?: Record<string, unknown>;
@@ -172,7 +239,7 @@ export interface BacktestChartData {
   symbol: string;
   interval: string;
   bars: BacktestChartBar[];
-  fills: Array<Record<string, string>>;
+  fills: BacktestFillRecord[];
   rejected_orders?: Array<Record<string, unknown>>;
   equity_curve: Array<Record<string, string | number>>;
   truncated: boolean;
@@ -199,7 +266,7 @@ export interface RunCompareMetricDelta {
   delta: string | null;
 }
 
-export interface RunCompareSideV2 {
+export interface RunCompareSideV3 {
   runId: string;
   hashes: Record<string, string | null>;
   equity: Array<Record<string, string | number>>;
@@ -208,16 +275,34 @@ export interface RunCompareSideV2 {
   metrics: Record<string, unknown>;
 }
 
-export interface RunCompareV2 {
-  schema: "RUN_COMPARE_V2";
+export interface RunCompareV3 {
+  schema: "RUN_COMPARE_V3";
   directComparisonAllowed: boolean;
   incompatibleFields: string[];
+  comparisonContext: { leftHash: string | null; rightHash: string | null };
   precisionExplanation: string | null;
   parameterDiff: Record<string, { left: unknown; right: unknown }>;
   tradeDiff: Record<string, RunCompareMetricDelta>;
   costDiff: Record<string, RunCompareMetricDelta>;
-  left: RunCompareSideV2;
-  right: RunCompareSideV2;
+  fingerprintDiff: {
+    version: "TRADE_FINGERPRINT_V2";
+    available: boolean;
+    reason?: string;
+    addedCount: number | null;
+    removedCount: number | null;
+    unchangedCount: number | null;
+    added: Array<Record<string, unknown>>;
+    removed: Array<Record<string, unknown>>;
+  };
+  left: RunCompareSideV3;
+  right: RunCompareSideV3;
+}
+
+export interface RecentRunCompareV1 {
+  schema: "RUN_COMPARE_RECENT_V1";
+  currentRunId: string;
+  baselineRunId: string | null;
+  comparison: RunCompareV3 | null;
 }
 
 export interface BacktestTrialRecord {

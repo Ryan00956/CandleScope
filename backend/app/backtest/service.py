@@ -21,6 +21,11 @@ from app.backtest.metrics_v2 import (
     parse_metrics_identity,
 )
 from app.backtest.reports import build_report
+from app.backtest.trade_explanation import (
+    RUN_COMPARE_SCHEMA,
+    build_comparison_context,
+    fingerprint_multiset_diff,
+)
 from app.backtest.strategy.protocol import StrategyProviderError
 from app.backtest.strategy.python_bundle import (
     freeze_bundle,
@@ -190,6 +195,7 @@ class BacktestService:
                 "BACKTEST_ENABLED": self.settings.enabled,
                 "BACKTEST_BAR_ENABLED": self.settings.bar_enabled,
                 "BACKTEST_CHART_CONTEXT_ENABLED": self.settings.chart_context_enabled,
+                "BACKTEST_TRADE_EXPLANATION_ENABLED": self.settings.trade_explanation_enabled,
                 "BACKTEST_TRADE_TAPE_ENABLED": self.settings.trade_tape_enabled,
                 "BACKTEST_STUDY_ENABLED": self.settings.study_enabled,
                 "BACKTEST_REPLAY_REVIEW_BRIDGE_ENABLED": self.settings.replay_review_bridge_enabled,
@@ -259,7 +265,9 @@ class BacktestService:
             self.repository.insert_strategy_revision(record)
             persisted, inserted = record, True
         else:
-            persisted, inserted = self.repository.get_or_insert_strategy_revision(record)
+            persisted, inserted = self.repository.get_or_insert_strategy_revision(
+                record
+            )
         return {
             **self._revision_wire(persisted),
             "schema_version": persisted["schema_version"],
@@ -528,9 +536,11 @@ class BacktestService:
                 provider = (
                     ChartPyneStrategyProvider()
                     if row["base_revision_id"] == CHART_PYNE_REVISION
-                    else PineStrategyProvider()
-                    if row["base_revision_id"] == "pine-long-flat-v1"
-                    else build_builtin_provider(str(row["base_revision_id"]))
+                    else (
+                        PineStrategyProvider()
+                        if row["base_revision_id"] == "pine-long-flat-v1"
+                        else build_builtin_provider(str(row["base_revision_id"]))
+                    )
                 )
                 compiled = json.loads(str(row["compiled_json"]))
                 provider.prepare(
@@ -574,9 +584,9 @@ class BacktestService:
             "startTimeMs": start,
             "endTimeMs": end,
             "status": "PASSED",
-            "runtimeMode": runtime_mode
-            if row["base_revision_id"] == "python-source-v1"
-            else None,
+            "runtimeMode": (
+                runtime_mode if row["base_revision_id"] == "python-source-v1" else None
+            ),
         }
         receipt_hash = "sha256:" + sha256_hex(canonical_json(details))
         self.repository.insert_strategy_smoke(
@@ -626,24 +636,60 @@ class BacktestService:
             json.loads(str(left_run["config_json"])),
             json.loads(str(right_run["config_json"])),
         )
-        identity_fields = (
-            "dataset_id",
-            "data_epoch",
-            "snapshot_hash",
-            "account_model",
-            "contract_data_mode",
-            "metrics_version",
-        )
-        mismatches = [
-            name
-            for name in identity_fields
-            if (
-                left_run.get(name, left_config.get(name))
-                != right_run.get(name, right_config.get(name))
+
+        def context_for(
+            run: Mapping[str, object],
+            config: Mapping[str, object],
+            report: Mapping[str, object],
+        ) -> dict[str, object]:
+            stored = report.get("comparison_context")
+            if isinstance(stored, Mapping):
+                return dict(stored)
+            revision = self.repository.get_strategy_revision(
+                str(run["strategy_revision_id"])
             )
-        ]
+            return build_comparison_context(
+                run=run,
+                config=config,
+                provider_identity={},
+                revision=revision,
+            )
+
+        left_context = context_for(left_run, left_config, left_report)
+        right_context = context_for(right_run, right_config, right_report)
         compatible = (
-            not mismatches and left_run["fidelity_mode"] == right_run["fidelity_mode"]
+            left_context.get("complete") is True
+            and right_context.get("complete") is True
+            and bool(left_context.get("contextHash"))
+            and (left_context.get("contextHash") == right_context.get("contextHash"))
+        )
+        left_context_value = left_context.get("context")
+        right_context_value = right_context.get("context")
+        context_keys = sorted(
+            set(
+                (left_context_value or {}).keys()
+                if isinstance(left_context_value, Mapping)
+                else ()
+            )
+            | set(
+                (right_context_value or {}).keys()
+                if isinstance(right_context_value, Mapping)
+                else ()
+            )
+        )
+        mismatches = sorted(
+            set(
+                [
+                    name
+                    for name in context_keys
+                    if (
+                        (left_context_value or {}).get(name)  # type: ignore[union-attr]
+                        != (right_context_value or {}).get(name)  # type: ignore[union-attr]
+                    )
+                ]
+                + list(left_context.get("missingFields") or [])
+                + list(right_context.get("missingFields") or [])
+            )
         )
         hashes_left, hashes_right = (
             left_report.get("hashes", {}),
@@ -674,7 +720,7 @@ class BacktestService:
 
         def decimal_diff(left: object, right: object) -> dict[str, object]:
             result: dict[str, object] = {"left": left, "right": right, "delta": None}
-            if left is not None and right is not None:
+            if compatible and left is not None and right is not None:
                 try:
                     result["delta"] = str(Decimal(str(right)) - Decimal(str(left)))
                 except InvalidOperation:
@@ -694,6 +740,10 @@ class BacktestService:
                 metric_value(right_performance, "returns", "net_pnl")
                 or right_report.get("metrics", {}).get("realized_net_pnl"),
             ),
+            "maxDrawdown": decimal_diff(
+                metric_value(left_performance, "risk", "max_drawdown"),
+                metric_value(right_performance, "risk", "max_drawdown"),
+            ),
         }
         cost_diff = {
             key: decimal_diff(
@@ -702,19 +752,47 @@ class BacktestService:
             )
             for key in ("fees", "funding", "slippage")
         }
+        left_alignment = bool(
+            (left_report.get("trade_explanation") or {}).get("tradeAlignmentAvailable")
+        )
+        right_alignment = bool(
+            (right_report.get("trade_explanation") or {}).get("tradeAlignmentAvailable")
+        )
+        fingerprint_diff: dict[str, object]
+        if compatible and left_alignment and right_alignment:
+            fingerprint_diff = fingerprint_multiset_diff(
+                list(left_report.get("trades") or []),
+                list(right_report.get("trades") or []),
+            )
+            fingerprint_diff["available"] = True
+        else:
+            fingerprint_diff = {
+                "version": "TRADE_FINGERPRINT_V2",
+                "available": False,
+                "reason": (
+                    "COMPARISON_CONTEXT_MISMATCH"
+                    if not compatible
+                    else "TRADE_ALIGNMENT_UNAVAILABLE"
+                ),
+                "addedCount": None,
+                "removedCount": None,
+                "unchangedCount": None,
+                "added": [],
+                "removed": [],
+            }
         return {
-            "schema": "RUN_COMPARE_V2",
+            "schema": RUN_COMPARE_SCHEMA,
             "directComparisonAllowed": compatible,
-            "incompatibleFields": mismatches
-            + (
-                []
-                if left_run["fidelity_mode"] == right_run["fidelity_mode"]
-                else ["fidelity_mode"]
-            ),
+            "incompatibleFields": mismatches,
+            "comparisonContext": {
+                "leftHash": left_context.get("contextHash"),
+                "rightHash": right_context.get("contextHash"),
+            },
             "precisionExplanation": explanation,
             "parameterDiff": parameter_diff,
             "tradeDiff": trade_diff,
             "costDiff": cost_diff,
+            "fingerprintDiff": fingerprint_diff,
             "left": {
                 "runId": left_run_id,
                 "hashes": hashes_left,
@@ -731,6 +809,73 @@ class BacktestService:
                 "drawdownDaily": right_performance.get("drawdown_daily", []),
                 "metrics": right_report.get("metrics", {}),
             },
+        }
+
+    def compare_recent_compatible_run(self, run_id: str) -> dict[str, object]:
+        current = self.get_run(run_id)
+        current_report, _ = self.repository.get_reports_for_compare(run_id, run_id)
+        if current_report is None:
+            raise BacktestError(
+                "SCHEMA_UNKNOWN_FIELD", "Run must be completed before comparison"
+            )
+        current_config = json.loads(str(current["config_json"]))
+        current_context = current_report.get("comparison_context")
+        if not isinstance(current_context, Mapping):
+            current_context = build_comparison_context(
+                run=current,
+                config=current_config,
+                provider_identity={},
+                revision=self.repository.get_strategy_revision(
+                    str(current["strategy_revision_id"])
+                ),
+            )
+        current_hash = (
+            current_context.get("contextHash")
+            if current_context.get("complete") is True
+            else None
+        )
+        baseline_id: str | None = None
+        current_created = int(current.get("created_at_ms") or 0)
+        for candidate in self.repository.list_runs():
+            candidate_id = str(candidate.get("run_id") or "")
+            if (
+                not candidate_id
+                or candidate_id == run_id
+                or candidate.get("state") != RunState.COMPLETED.value
+                or int(candidate.get("created_at_ms") or 0) > current_created
+            ):
+                continue
+            candidate_report, _ = self.repository.get_reports_for_compare(
+                candidate_id, candidate_id
+            )
+            if candidate_report is None:
+                continue
+            candidate_context = candidate_report.get("comparison_context")
+            if not isinstance(candidate_context, Mapping):
+                candidate_context = build_comparison_context(
+                    run=candidate,
+                    config=json.loads(str(candidate["config_json"])),
+                    provider_identity={},
+                    revision=self.repository.get_strategy_revision(
+                        str(candidate["strategy_revision_id"])
+                    ),
+                )
+            if (
+                current_hash
+                and candidate_context.get("complete") is True
+                and candidate_context.get("contextHash") == current_hash
+            ):
+                baseline_id = candidate_id
+                break
+        return {
+            "schema": "RUN_COMPARE_RECENT_V1",
+            "currentRunId": run_id,
+            "baselineRunId": baseline_id,
+            "comparison": (
+                None
+                if baseline_id is None
+                else self.compare_run_pair(baseline_id, run_id)
+            ),
         }
 
     def clone_run_parameter(
@@ -2380,6 +2525,7 @@ class BacktestService:
                     "parameters": config.get("parameters") or {},
                     "seed": config.get("seed"),
                     "outputMode": config.get("output_mode") or "TARGET_POSITION",
+                    "tradeExplanationEnabled": self.settings.trade_explanation_effective,
                 }
             )
 
@@ -2699,6 +2845,7 @@ class BacktestService:
                     "outputMode": config.get("output_mode") or "TARGET_POSITION",
                     "signalClock": SIGNAL_CLOCK,
                     "executionClock": EXECUTION_CLOCK,
+                    "tradeExplanationEnabled": self.settings.trade_explanation_effective,
                 }
             )
             event_bytes = _event_wire_bytes(events)
@@ -2989,6 +3136,7 @@ class BacktestService:
                     "parameters": config.get("parameters") or {},
                     "seed": config.get("seed"),
                     "outputMode": config.get("output_mode") or "TARGET_POSITION",
+                    "tradeExplanationEnabled": self.settings.trade_explanation_effective,
                 }
             )
 
@@ -3706,7 +3854,8 @@ class BacktestService:
         fee_source = str(payload.get("fee_source") or "").strip()
         quick_fee_fields = ("taker_fee_bps", "maker_fee_bps", "slippage_bps")
         missing_quick_fee_fields = [
-            name for name in quick_fee_fields
+            name
+            for name in quick_fee_fields
             if name not in payload or not str(payload.get(name) or "").strip()
         ]
         if quick_preset_id and (
@@ -3790,9 +3939,11 @@ class BacktestService:
                         probe = (
                             ChartPyneStrategyProvider()
                             if base_revision == CHART_PYNE_REVISION
-                            else PineStrategyProvider()
-                            if base_revision == "pine-long-flat-v1"
-                            else build_builtin_provider(base_revision)
+                            else (
+                                PineStrategyProvider()
+                                if base_revision == "pine-long-flat-v1"
+                                else build_builtin_provider(base_revision)
+                            )
                         )
                         capabilities = probe.describe()
                     if (
@@ -3828,9 +3979,11 @@ class BacktestService:
                     probe.prepare(
                         {
                             "roles": [
-                                "BARS"
-                                if fidelity in {"BAR_APPROX", "AGG_TRADE_EXECUTION"}
-                                else "TRADES"
+                                (
+                                    "BARS"
+                                    if fidelity in {"BAR_APPROX", "AGG_TRADE_EXECUTION"}
+                                    else "TRADES"
+                                )
                             ],
                             "source": strategy_source,
                             "parameters": json.loads(parameters_json),
@@ -3909,6 +4062,9 @@ class BacktestService:
             "exchange": str(payload.get("exchange") or "binance"),
             "market_type": str(payload.get("market_type") or "usdm"),
         }
+        for chart_field in ("symbol", "interval", "chart_range_mode"):
+            if payload.get(chart_field) is not None:
+                execution_config[chart_field] = str(payload[chart_field])
         if quick_preset_id:
             execution_config.update(
                 {
@@ -4294,6 +4450,31 @@ class BacktestService:
             signal_trace_rows: list[dict[str, object]] = []
             strategy_metadata = result_payload.get("strategy_metadata")
             completing_config = json.loads(str(completing["config_json"]))
+            result_payload["trade_explanation_enabled"] = (
+                self.settings.trade_explanation_effective
+            )
+            if isinstance(strategy_metadata, dict):
+                raw_explanation_trace = strategy_metadata.pop(
+                    "tradeExplanationTrace", None
+                )
+                if self.settings.trade_explanation_effective and isinstance(
+                    raw_explanation_trace, list
+                ):
+                    result_payload["trade_explanation_trace"] = raw_explanation_trace
+            if self.settings.trade_explanation_effective:
+                revision = self.repository.get_strategy_revision(
+                    str(completing["strategy_revision_id"])
+                )
+                result_payload["comparison_context"] = build_comparison_context(
+                    run=completing,
+                    config=completing_config,
+                    provider_identity=(
+                        result_payload.get("provider_identity")
+                        if isinstance(result_payload.get("provider_identity"), Mapping)
+                        else {}
+                    ),
+                    revision=revision,
+                )
             if (
                 isinstance(strategy_metadata, dict)
                 and completing_config.get("signal_trace_mode") == "PAGED_V1"

@@ -121,6 +121,7 @@ function fakeApi(run: BacktestRunRecord, exported: Record<string, unknown>): Bac
       return { schema: "SIGNAL_TRACE_V1", runId: run.run_id, items: [], nextAfter: null, limit: 200 };
     },
     async compareRuns() { throw new Error("unused"); },
+    async compareRecentRun() { throw new Error("unused"); },
     async cloneRun() { throw new Error("unused"); },
     async copyStrategyRevision() { throw new Error("unused"); },
     async archiveStrategyRevision() { throw new Error("unused"); },

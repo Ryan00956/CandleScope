@@ -18,7 +18,10 @@ import {
   isBacktestEntryEnabled,
   isPythonStrategyEntryEnabled,
 } from "./backtestFlags.js";
-import { backtestRunIdFromSearch } from "./backtestDeepLink.js";
+import {
+  backtestCompareRunIdFromSearch,
+  backtestRunIdFromSearch,
+} from "./backtestDeepLink.js";
 import PythonStudioPanel from "./PythonStudioPanel.js";
 import {
   composePythonExport,
@@ -34,7 +37,7 @@ import type {
   BacktestReport,
   BacktestChartData,
   BacktestRunRecord,
-  RunCompareV2,
+  RunCompareV3,
   SignalTraceItem,
   BacktestStudyComparison,
   BacktestStudyRecord,
@@ -105,6 +108,9 @@ export default function BacktestApp() {
   const deepLinkedRunId = useMemo(() => backtestRunIdFromSearch(
     typeof window === "undefined" ? "" : window.location.search,
   ), []);
+  const deepLinkedCompareRunId = useMemo(() => backtestCompareRunIdFromSearch(
+    typeof window === "undefined" ? "" : window.location.search,
+  ), []);
   const [datasets, setDatasets] = useState<BacktestDataset[]>([]);
   const [capabilities, setCapabilities] = useState<BacktestCapabilities | null>(null);
   const [runs, setRuns] = useState<BacktestRunRecord[]>([]);
@@ -124,8 +130,8 @@ export default function BacktestApp() {
   const [revisionSource, setRevisionSource] = useState("");
   const [smokePassed, setSmokePassed] = useState(false);
   const [signalTrace, setSignalTrace] = useState<SignalTraceItem[]>([]);
-  const [compareRunId, setCompareRunId] = useState("");
-  const [runComparison, setRunComparison] = useState<RunCompareV2 | null>(null);
+  const [compareRunId, setCompareRunId] = useState(deepLinkedCompareRunId ?? "");
+  const [runComparison, setRunComparison] = useState<RunCompareV3 | null>(null);
   const [cloneParameter, setCloneParameter] = useState("length");
   const [cloneValue, setCloneValue] = useState("25");
   const [strategySource, setStrategySource] = useState("close - open");
@@ -272,6 +278,21 @@ export default function BacktestApp() {
     return () => controller.abort();
   }, [selectedRun?.state, selectedRunId]);
 
+  useEffect(() => {
+    if (!deepLinkedCompareRunId
+      || !selectedRunId
+      || selectedRun?.state !== "COMPLETED") return undefined;
+    const controller = new AbortController();
+    void defaultBacktestApi.compareRuns(
+      deepLinkedCompareRunId,
+      selectedRunId,
+      controller.signal,
+    ).then(setRunComparison).catch((reason: unknown) => {
+      if (!controller.signal.aborted) setError(errorMessage(reason));
+    });
+    return () => controller.abort();
+  }, [deepLinkedCompareRunId, selectedRun?.state, selectedRunId]);
+
   const handleCreateRevision = useCallback(async () => {
     setLoading(true); setError(null);
     try {
@@ -309,7 +330,7 @@ export default function BacktestApp() {
   const handleCompareRuns = useCallback(async () => {
     if (!selectedRunId || !compareRunId) return;
     setLoading(true); setError(null);
-    try { setRunComparison(await defaultBacktestApi.compareRuns(selectedRunId, compareRunId)); }
+    try { setRunComparison(await defaultBacktestApi.compareRuns(compareRunId, selectedRunId)); }
     catch (reason) { setError(errorMessage(reason)); } finally { setLoading(false); }
   }, [compareRunId, selectedRunId]);
 
@@ -1455,11 +1476,11 @@ export default function BacktestApp() {
                 <table>
                   <thead><tr><th>{t("backtest.trade")}</th><th>{t("backtest.side")}</th><th>{t("backtest.openTime")}</th><th>{t("backtest.closeTime")}</th><th>{t("backtest.openPx")}</th><th>{t("backtest.closePx")}</th><th>MAE</th><th>MFE</th><th>{t("backtest.reason")}</th><th>{t("backtest.netPnl")}</th></tr></thead>
                   <tbody>{boundedRows(report.performance ? filteredTrades : report.trades ?? []).map((trade) => (
-                    <tr key={trade.trade_id} className={trade.trade_id === focusedTradeId ? "selected" : ""} onClick={() => setFocusedTradeId(trade.trade_id ?? null)}>
-                      <td>{trade.trade_id}</td><td>{trade.side}</td>
+                    <tr key={String(trade.trade_id ?? "trade")} className={trade.trade_id === focusedTradeId ? "selected" : ""} onClick={() => setFocusedTradeId(trade.trade_id == null ? null : String(trade.trade_id))}>
+                      <td>{String(trade.trade_id ?? "")}</td><td>{String(trade.side ?? "")}</td>
                       <td>{timestampLabel(Number(trade.entry_time_ms))}</td><td>{timestampLabel(Number(trade.exit_time_ms))}</td>
-                      <td>{trade.entry_price}</td><td>{trade.exit_price}</td><td>{trade.mae || "—"}</td><td>{trade.mfe || "—"}</td>
-                      <td>{trade.entry_reason || "—"} → {trade.exit_reason || "—"}</td><td>{trade.net_pnl}</td>
+                      <td>{String(trade.entry_price ?? "")}</td><td>{String(trade.exit_price ?? "")}</td><td>{String(trade.mae || "—")}</td><td>{String(trade.mfe || "—")}</td>
+                      <td>{String(trade.entry_reason || "—")} → {String(trade.exit_reason || "—")}</td><td>{String(trade.net_pnl ?? "")}</td>
                     </tr>
                   ))}</tbody>
                 </table>

@@ -14,6 +14,11 @@ from app.backtest.metrics_v2 import (
     build_metrics_v2,
     enrich_trades_v2,
 )
+from app.backtest.trade_explanation import (
+    bind_trade_id,
+    enrich_execution_evidence,
+    trade_fingerprint,
+)
 
 REPORT_SCHEMA = "candlescope.backtest-report/1"
 
@@ -47,15 +52,40 @@ def build_report(
     fidelity = str(run.get("fidelity_mode") or "BAR_APPROX")
     source_kind = str(run.get("source_event_kind") or "BAR")
     payload = result or run.get("result") or {}
-    fills = list(payload.get("fills") or [])
-    trades = build_round_trip_trades(fills)
-    winning = sum(Decimal(str(item["net_pnl"])) > 0 for item in trades)
-    net_pnl = sum((Decimal(str(item["net_pnl"])) for item in trades), Decimal("0"))
-    label = LABELS.get(fidelity) or str(payload.get("report_label") or "")
     try:
         config = json.loads(str(run.get("config_json") or "{}"))
     except (TypeError, ValueError, json.JSONDecodeError):
         config = {}
+    fills = [copy.deepcopy(dict(item)) for item in payload.get("fills") or []]
+    orders = [copy.deepcopy(dict(item)) for item in payload.get("orders") or []]
+    rejected_orders = [
+        copy.deepcopy(dict(item)) for item in payload.get("rejected") or []
+    ]
+    explanation_enabled = bool(payload.get("trade_explanation_enabled"))
+    if explanation_enabled:
+        raw_trace = payload.get("trade_explanation_trace")
+        trace_rows = (
+            [dict(item) for item in raw_trace if isinstance(item, Mapping)]
+            if isinstance(raw_trace, list)
+            else []
+        )
+        fills, orders, rejected_orders = enrich_execution_evidence(
+            run=run,
+            config=config,
+            fills=fills,
+            orders=orders,
+            rejections=rejected_orders,
+            trace_rows=trace_rows,
+        )
+    trades = build_round_trip_trades(fills)
+    if explanation_enabled:
+        symbol = str(config.get("symbol") or run.get("dataset_id") or "")
+        for trade in trades:
+            if trade.get("entry_decision_id") and trade.get("exit_decision_id"):
+                trade["trade_fingerprint"] = trade_fingerprint(trade, symbol=symbol)
+    winning = sum(Decimal(str(item["net_pnl"])) > 0 for item in trades)
+    net_pnl = sum((Decimal(str(item["net_pnl"])) for item in trades), Decimal("0"))
+    label = LABELS.get(fidelity) or str(payload.get("report_label") or "")
     account_model = str(
         run.get("account_model")
         or config.get("account_model")
@@ -105,8 +135,8 @@ def build_report(
         "account": (payload.get("ledger") or {}).get("account") or {},
         "ledger": payload.get("ledger") or {},
         "equity_curve": list(payload.get("equity_curve") or []),
-        "orders": list(payload.get("orders") or []),
-        "rejected_orders": list(payload.get("rejected") or []),
+        "orders": orders,
+        "rejected_orders": rejected_orders,
         "unmodeled": list(UNMODELED if fidelity == "BAR_APPROX" else TRADE_UNMODELED),
         "suitable_for": (
             ["bar-close strategy comparison", "parameter smoke tests"]
@@ -127,6 +157,40 @@ def build_report(
         "trades": trades,
         "contract_coverage": payload.get("contract_coverage") or {},
     }
+    if explanation_enabled:
+        trace_meta = (
+            copy.deepcopy(
+                (payload.get("strategy_metadata") or {}).get(
+                    "tradeExplanationTraceMeta", {}
+                )
+            )
+            if isinstance(payload.get("strategy_metadata"), Mapping)
+            else {}
+        )
+        trace_available = bool(payload.get("trade_explanation_trace"))
+        report["trade_explanation"] = {
+            "schema": "TRADE_EXPLANATION_V1",
+            "canonicalization": "JCS_SHA256_V1",
+            "providerTraceAvailable": trace_available,
+            "completeness": (
+                "UNAVAILABLE"
+                if not trace_available
+                else "COMPLETE" if trace_meta.get("complete") is True else "PARTIAL"
+            ),
+            "tradeAlignmentAvailable": all(
+                isinstance(item.get("trade_fingerprint"), Mapping)
+                and item["trade_fingerprint"].get("version") == "TRADE_FINGERPRINT_V2"
+                and str(item["trade_fingerprint"].get("hash") or "").startswith(
+                    "sha256:"
+                )
+                for item in trades
+            ),
+            "trace": trace_meta,
+        }
+        if isinstance(payload.get("comparison_context"), Mapping):
+            report["comparison_context"] = copy.deepcopy(
+                dict(payload["comparison_context"])
+            )
     if account_model == "LINEAR_PERP_ONE_WAY_V2":
         report["identity"]["account_model"] = account_model
         report["unmodeled"] = [
@@ -338,11 +402,11 @@ def _fills_csv(fills: list[Mapping[str, Any]]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def build_round_trip_trades(fills: list[Mapping[str, Any]]) -> list[dict[str, str]]:
+def build_round_trip_trades(fills: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """FIFO-close fills into auditable round trips without inventing executions."""
 
     lots: list[dict[str, Any]] = []
-    trades: list[dict[str, str]] = []
+    trades: list[dict[str, Any]] = []
     ordered = sorted(
         fills,
         key=lambda item: (
@@ -373,31 +437,57 @@ def build_round_trip_trades(fills: list[Mapping[str, Any]]) -> list[dict[str, st
                 * Decimal(str(lot["sign"]))
             )
             total_fee = entry_fee + exit_fee
-            trades.append(
-                {
-                    "trade_id": f"trade-{len(trades) + 1}",
-                    "side": "LONG" if Decimal(str(lot["sign"])) > 0 else "SHORT",
-                    "qty": str(closed),
-                    "entry_order_id": str(lot["order_id"]),
-                    "exit_order_id": str(fill.get("order_id") or ""),
-                    "entry_sequence": str(lot["sequence"]),
-                    "exit_sequence": str(fill.get("sequence") or "0"),
-                    "entry_time_ms": str(lot["event_time_ms"]),
-                    "exit_time_ms": str(fill.get("event_time_ms") or "0"),
-                    "entry_price": str(lot["price"]),
-                    "exit_price": str(price),
-                    "gross_pnl": str(gross),
-                    "fees": str(total_fee),
-                    "net_pnl": str(gross - total_fee),
-                    "duration_ms": str(
-                        max(
-                            0,
-                            int(fill.get("event_time_ms") or 0)
-                            - int(lot["event_time_ms"]),
-                        )
-                    ),
-                }
-            )
+            trade_id = f"trade-{len(trades) + 1}"
+            trade: dict[str, Any] = {
+                "trade_id": trade_id,
+                "side": "LONG" if Decimal(str(lot["sign"])) > 0 else "SHORT",
+                "qty": str(closed),
+                "entry_order_id": str(lot["order_id"]),
+                "exit_order_id": str(fill.get("order_id") or ""),
+                "entry_sequence": str(lot["sequence"]),
+                "exit_sequence": str(fill.get("sequence") or "0"),
+                "entry_time_ms": str(lot["event_time_ms"]),
+                "exit_time_ms": str(fill.get("event_time_ms") or "0"),
+                "entry_price": str(lot["price"]),
+                "exit_price": str(price),
+                "gross_pnl": str(gross),
+                "fees": str(total_fee),
+                "net_pnl": str(gross - total_fee),
+                "duration_ms": str(
+                    max(
+                        0,
+                        int(fill.get("event_time_ms") or 0) - int(lot["event_time_ms"]),
+                    )
+                ),
+            }
+            if lot.get("decision_id") or fill.get("decision_id"):
+                trade.update(
+                    {
+                        "entry_fill_id": lot.get("fill_id"),
+                        "exit_fill_id": fill.get("fill_id"),
+                        "entry_decision_id": lot.get("decision_id"),
+                        "exit_decision_id": fill.get("decision_id"),
+                        "entry_decision_time_ms": lot.get("decision_time_ms"),
+                        "exit_decision_time_ms": fill.get("decision_time_ms"),
+                        "entry_decision_ordinal_at_time": lot.get(
+                            "decision_ordinal_at_time"
+                        ),
+                        "exit_decision_ordinal_at_time": fill.get(
+                            "decision_ordinal_at_time"
+                        ),
+                        "entry_action": lot.get("action"),
+                        "exit_action": fill.get("action"),
+                        "entry_action_ordinal": lot.get("decision_action_ordinal"),
+                        "exit_action_ordinal": fill.get("decision_action_ordinal"),
+                        "entry_explanation": bind_trade_id(
+                            lot.get("explanation"), trade_id
+                        ),
+                        "exit_explanation": bind_trade_id(
+                            fill.get("explanation"), trade_id
+                        ),
+                    }
+                )
+            trades.append(trade)
             qty -= closed
             lot["qty"] = lot_qty - closed
             lot["fee"] = Decimal(str(lot["fee"])) - entry_fee
@@ -414,6 +504,13 @@ def build_round_trip_trades(fills: list[Mapping[str, Any]]) -> list[dict[str, st
                     "order_id": str(fill.get("order_id") or ""),
                     "sequence": int(fill.get("sequence") or 0),
                     "event_time_ms": int(fill.get("event_time_ms") or 0),
+                    "fill_id": fill.get("fill_id"),
+                    "decision_id": fill.get("decision_id"),
+                    "decision_time_ms": fill.get("decision_time_ms"),
+                    "decision_ordinal_at_time": fill.get("decision_ordinal_at_time"),
+                    "decision_action_ordinal": fill.get("decision_action_ordinal"),
+                    "action": fill.get("action"),
+                    "explanation": fill.get("explanation"),
                 }
             )
     return trades

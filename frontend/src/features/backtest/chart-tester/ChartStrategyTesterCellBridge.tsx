@@ -37,6 +37,12 @@ import {
 } from "./chartStrategyResultMarkerSource.js";
 import { t } from "../../../i18n/index.js";
 import { useLocale } from "../../../i18n/useLocale.js";
+import type { RecentRunCompareV1 } from "../backtestTypes.js";
+import {
+  CHART_RUN_COMPARE_ENABLED,
+  CHART_TRADE_EXPLANATION_ENABLED,
+} from "./chartStrategyTesterFeature.js";
+import type { TradeExplanationSelection } from "./ChartStrategyResultViews.js";
 import "./chartStrategyTester.css";
 
 const runtimeFactory = new ChartStrategyTesterRuntimeFactory(true);
@@ -55,6 +61,7 @@ export interface ChartStrategyTesterCellBridgeProps {
   onLocateTrade(timeMs: number): void;
   onAttachmentChange(attachment: ChartStrategyAttachmentRecord | null): void;
   onEntryStateChange(state: ChartStrategyTesterEntryState): void;
+  onOpenPanel(): void;
   onClosePanel(): void;
 }
 
@@ -72,6 +79,7 @@ export default function ChartStrategyTesterCellBridge({
   onLocateTrade,
   onAttachmentChange,
   onEntryStateChange,
+  onOpenPanel,
   onClosePanel,
 }: ChartStrategyTesterCellBridgeProps) {
   const locale = useLocale();
@@ -85,6 +93,8 @@ export default function ChartStrategyTesterCellBridge({
   const [result, setResult] = useState<ChartStrategyResultBundle | null>(null);
   const [resultLoading, setResultLoading] = useState(false);
   const [resultError, setResultError] = useState<string | null>(null);
+  const [comparison, setComparison] = useState<RecentRunCompareV1 | null>(null);
+  const [selectedExplanation, setSelectedExplanation] = useState<TradeExplanationSelection | null>(null);
   const [pendingDataDraftRevision, setPendingDataDraftRevision] = useState<number | null>(null);
   const inFlightRef = useRef<Promise<void> | null>(null);
   const pendingDataRef = useRef<{
@@ -126,7 +136,23 @@ export default function ChartStrategyTesterCellBridge({
   const resultMarkerSource = useMemo(() => createChartStrategyResultMarkerSource({
     seriesStore: projectionSeriesStore,
     labels: resultMarkerLabels,
-  }), [projectionSeriesStore, resultMarkerLabels]);
+    onActivate(evidence) {
+      if (!CHART_TRADE_EXPLANATION_ENABLED) return;
+      setSelectedExplanation({
+        id: evidence.markerId,
+        title: evidence.kind === "REJECTION"
+          ? t("chartTester.explain.rejectionTitle")
+          : t("chartTester.explain.fillTitle"),
+        items: [{
+          label: evidence.kind === "REJECTION"
+            ? t("chartTester.explain.rejection")
+            : t("chartTester.explain.fill"),
+          explanation: evidence.explanation,
+        }],
+      });
+      onOpenPanel();
+    },
+  }), [onOpenPanel, projectionSeriesStore, resultMarkerLabels]);
 
   useLayoutEffect(() => {
     resultMarkerSource.setVisibleRange(getCurrentVisibleRange());
@@ -180,6 +206,8 @@ export default function ChartStrategyTesterCellBridge({
       if (cancelled) return;
       setResultLoading(true);
       setResultError(null);
+      setComparison(null);
+      setSelectedExplanation(null);
     });
     void chartStrategyResultCache.load(defaultBacktestApi, identity.runId, controller.signal)
       .then((bundle) => {
@@ -191,6 +219,15 @@ export default function ChartStrategyTesterCellBridge({
         runtime.setResultReference(bundle);
         if (current.projectionVisible) resultMarkerSource.setResult(bundle.chart);
         else resultMarkerSource.clear();
+        if (CHART_RUN_COMPARE_ENABLED) {
+          void defaultBacktestApi.compareRecentRun(identity.runId, controller.signal)
+            .then((value) => {
+              if (!cancelled) setComparison(value);
+            })
+            .catch(() => {
+              if (!cancelled && !controller.signal.aborted) setComparison(null);
+            });
+        }
       })
       .catch((reason: unknown) => {
         if (cancelled || controller.signal.aborted) return;
@@ -440,6 +477,12 @@ export default function ChartStrategyTesterCellBridge({
       result={result}
       resultLoading={resultLoading}
       resultError={resultError}
+      comparison={comparison}
+      selectedExplanation={selectedExplanation}
+      onSelectExplanation={(selection) => {
+        if (CHART_TRADE_EXPLANATION_ENABLED) setSelectedExplanation(selection);
+      }}
+      onCloseExplanation={() => setSelectedExplanation(null)}
       onLocateTrade={onLocateTrade}
       onPrepareData={handlePrepareData}
       onStopObserving={handleStopObserving}

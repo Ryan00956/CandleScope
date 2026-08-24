@@ -14,6 +14,7 @@ import {
 import type { ChartSession } from "../../chart-session/chartSessionTypes.js";
 import type { ChartStrategyAttachmentRecord } from "../../chart-workspace/chartWorkspaceTypes.js";
 import type { ChartContextResolution } from "../backtestApi.js";
+import type { RecentRunCompareV1 } from "../backtestTypes.js";
 import { t } from "../../../i18n/index.js";
 import { useLocale } from "../../../i18n/useLocale.js";
 import type {
@@ -42,6 +43,8 @@ import {
   ChartStrategyResultContextBar,
   ChartStrategyResultOverview,
   ChartStrategyTradeList,
+  TradeExplanationPopover,
+  type TradeExplanationSelection,
 } from "./ChartStrategyResultViews.js";
 import {
   CHART_STRATEGY_MAX_PANEL_HEIGHT,
@@ -141,6 +144,10 @@ export interface ChartStrategyTesterPanelProps {
   result?: ChartStrategyResultBundle | null;
   resultLoading?: boolean;
   resultError?: string | null;
+  comparison?: RecentRunCompareV1 | null;
+  selectedExplanation?: TradeExplanationSelection | null;
+  onSelectExplanation?(selection: TradeExplanationSelection): void;
+  onCloseExplanation?(): void;
   onLocateTrade?(timeMs: number): void;
   onPrepareData(): void;
   onStopObserving(): void;
@@ -164,6 +171,10 @@ export default function ChartStrategyTesterPanel({
   result = null,
   resultLoading = false,
   resultError = null,
+  comparison = null,
+  selectedExplanation = null,
+  onSelectExplanation = () => undefined,
+  onCloseExplanation = () => undefined,
   onLocateTrade = () => undefined,
   onPrepareData,
   onStopObserving,
@@ -746,6 +757,7 @@ export default function ChartStrategyTesterPanel({
             <ChartStrategyResultOverview
               result={result}
               stale={runState.status === "STALE" || !runState.projectionVisible}
+              comparison={comparison}
               onOpenTrades={() => setActiveTab("trades")}
             />
           ) : (
@@ -788,7 +800,12 @@ export default function ChartStrategyTesterPanel({
 
         {activeTab === "trades" && (
           result
-            ? <ChartStrategyTradeList result={result} locale={locale} onLocateTrade={onLocateTrade} />
+            ? <ChartStrategyTradeList
+              result={result}
+              locale={locale}
+              onLocateTrade={onLocateTrade}
+              onSelectExplanation={onSelectExplanation}
+            />
             : (
               <div className="chart-strategy-placeholder">
                 <strong>{t("chartTester.tab.trades")}</strong>
@@ -797,6 +814,12 @@ export default function ChartStrategyTesterPanel({
             )
         )}
       </div>
+      {selectedExplanation && (
+        <TradeExplanationPopover
+          selection={selectedExplanation}
+          onClose={onCloseExplanation}
+        />
+      )}
     </section>
   );
 }

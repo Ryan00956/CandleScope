@@ -54,7 +54,7 @@ export function chartStrategyMaxDrawdown(report: BacktestReport): string {
   );
 }
 
-export function chartStrategyTradeFocusTimeMs(trade: Record<string, string>): number | null {
+export function chartStrategyTradeFocusTimeMs(trade: Record<string, unknown>): number | null {
   const value = Number(trade.entry_time_ms ?? trade.exit_time_ms);
   return Number.isFinite(value) ? value : null;
 }

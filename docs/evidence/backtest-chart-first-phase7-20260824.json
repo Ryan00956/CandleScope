@@ -1,0 +1,118 @@
+{
+  "schemaVersion": "candlescope.backtest-chart-first.phase7/1",
+  "generatedAt": "2026-08-24T13:00:58+08:00",
+  "status": "COMPLETE_READY_FOR_COMMIT",
+  "identity": {
+    "baseGitHead": "becc36d217036e43474d259f8abef3c4f627c273",
+    "branch": "codex/backtest-chart-first-ux",
+    "worktree": "H:\\program\\CandleScope-backtest-chart-first"
+  },
+  "scope": {
+    "phase": 7,
+    "phase8OrLaterCode": false,
+    "defaultFlagEnabled": false,
+    "push": false,
+    "merge": false,
+    "deploy": false,
+    "productionDataChanged": false
+  },
+  "flags": {
+    "BACKTEST_TRADE_EXPLANATION_ENABLED": "default_off",
+    "VITE_CHART_TRADE_EXPLANATION_ENABLED": "default_off",
+    "VITE_CHART_RUN_COMPARE_ENABLED": "default_off"
+  },
+  "explanationContract": {
+    "schema": "TRADE_EXPLANATION_V1",
+    "canonicalization": "JCS_SHA256_V1",
+    "payloadBytes": 65536,
+    "conditionLimit": 64,
+    "variableLimit": 128,
+    "keyBytes": 128,
+    "stringBytes": 2048,
+    "traceRows": 10000,
+    "traceBytes": 1048576,
+    "states": ["COMPLETE", "PARTIAL", "UNAVAILABLE"],
+    "crossLanguageFixture": "PASS",
+    "invalidOrHashMismatchFailsClosed": true,
+    "checkpointDeterministic": true,
+    "providerUnavailableHonest": true
+  },
+  "comparisonContract": {
+    "schema": "RUN_COMPARE_V3",
+    "contextSchema": "COMPARISON_CONTEXT_V1",
+    "fingerprintSchema": "TRADE_FINGERPRINT_V2",
+    "completeContextRequiredForDirectionalDelta": true,
+    "multisetOccurrenceDiff": true,
+    "fuzzyMatching": false,
+    "recentBaselineServerSelected": true,
+    "advancedDeepLinkLoadsPair": true
+  },
+  "browser": {
+    "browser": "headed Chrome",
+    "driver": "repository-local Playwright CLI",
+    "viewport": { "width": 1440, "height": 900 },
+    "frontend": "temporary Vite on 127.0.0.1:15179",
+    "backend": "isolated LOCAL_OFFLINE backend on 127.0.0.1:18089",
+    "fixtureBars": 60,
+    "runApisIntercepted": false,
+    "marketHistoryRoute": "CONTROLLED_PLAYWRIGHT_BTCUSDT_1H_ONLY_FROM_REAL_RUN_CHART",
+    "consoleClaimedClean": false,
+    "expectedLocalOfflineFailuresPresent": true,
+    "tradePopover": "PASS",
+    "markerAndTradeRowActivation": "PASS",
+    "recentComparison": "PASS",
+    "advancedDeepLink": "PASS",
+    "combinedVisualComparison": "PASS",
+    "temporaryBaselineCreatedAtAdjusted": true,
+    "temporaryBaselineDatabaseOnly": true
+  },
+  "realRun": {
+    "runId": "bt_9848f731699249aeafbc5bac4461d2fb",
+    "baselineRunId": "bt_7c2ae00863644798a6cd01c3eb7089a2",
+    "configHash": "sha256:0004545259547b9ec2e6fc354a3e6ad0619f94a91cee0f0e339a6a02903f3f69",
+    "reportHash": "sha256:879a604a0ea71348d5b5cade60441154c0d33c2a54efc799361899adcfb6eea9",
+    "decisionHash": "sha256:93b998114f9225db3add66cd7a2fff10e675ec0f5fd5f5b841ed6f4db9814b3e",
+    "chartHash": "sha256:fcaec980917fdbca3e80f28d3c9e6fe5f18809633c1aee01735900d840b17afd",
+    "comparisonContextHash": "74a48bd4513a71b3a74fda5aa36771008876b6ddfe4a778492dad1414f993f4c",
+    "explanationStatus": "COMPLETE",
+    "traceCaptured": 3,
+    "traceComplete": true,
+    "fills": 3,
+    "trades": 1,
+    "entryExplanationHash": "07124898b18a46cd225ca91d0bb1200f49b2eb3cc4f31b7f1fd9e627ea30ccdf",
+    "exitExplanationHash": "bb6a3af1ced8d52286bdcf76aa232de73010380b4eb82e5f3db5b1114ef0bf86",
+    "tradeFingerprint": "sha256:5c8328b3d7adfc03dc250b81a04ae5ed1a0913187441e54d05efa4a1e7ea4cb0",
+    "directComparisonAllowed": true,
+    "netPnlDelta": "0E-7",
+    "tradeCountDelta": "0",
+    "addedTrades": 0,
+    "removedTrades": 0
+  },
+  "checks": {
+    "backendBacktestFull": { "result": "PASS", "tests": 234, "failures": 0, "existingDeprecationWarnings": 4 },
+    "frontendBacktest": { "result": "PASS", "tests": 88, "suites": 3, "failures": 0 },
+    "frontendFull": { "result": "PASS", "tests": 3365, "suites": 3, "failures": 0, "elapsedMs": 145581.9634 },
+    "frontendTypecheck": { "result": "PASS" },
+    "frontendLint": { "result": "PASS", "scope": "full frontend" },
+    "frontendArchitecture": { "result": "PASS", "allowlistEntries": 0 },
+    "frontendI18n": { "result": "PASS", "catalogKeys": 3747, "sourceFiles": 610 },
+    "backendBlack": { "result": "PASS", "files": 8 },
+    "backendRuff": { "result": "PASS", "issues": 0 },
+    "frontendBuildFlagOff": { "result": "PASS_WITH_EXISTING_CHUNK_WARNING", "modules": 649 },
+    "frontendBuildFlagOn": { "result": "PASS_WITH_EXISTING_CHUNK_WARNING", "modules": 649 },
+    "diffCheck": { "result": "PASS" },
+    "localOfflineSubprocessRerunWithRepositorySdkPath": { "result": "PASS", "tests": 2, "failures": 0 }
+  },
+  "screenshots": [
+    { "path": "docs/evidence/backtest-chart-first-phase7/comparison-1440x900.png", "sha256": "c4b2e03814fe27205b2f3c563589bcc14a683ea6b1fa47bbb9219761bff41c19" },
+    { "path": "docs/evidence/backtest-chart-first-phase7/trade-explanation-1440x900.png", "sha256": "237b078073345f326b52c5d15635d87eb98e0fec371e85ef5f4441c3b70a480f" },
+    { "path": "docs/evidence/backtest-chart-first-phase7/advanced-comparison-1440x900.png", "sha256": "df84285838a10e60b767b66b0ceafbee3ad4b1e0ca0228f6224a4e6f626b7756" },
+    { "path": "docs/evidence/backtest-chart-first-phase7/reference-vs-actual.png", "sha256": "27f7566e5d459382172c5d4a083c3d15411dec390b4d62d4e033b3175eee06b6" }
+  ],
+  "knownNonPassAttempts": [
+    { "step": "first real-browser strategy panel open", "result": "REACT_MAXIMUM_UPDATE_DEPTH", "resolution": "stable useCallback identity plus regression" },
+    { "step": "first real-browser Run validate", "result": "HTTP_422_SYMBOL_EXTRA_FORBIDDEN", "resolution": "bounded symbol request field plus Pydantic regression" },
+    { "step": "exploratory full-backend invocation", "result": "MISSING_PLUGIN_SDK_ON_CHILD_PYTHONPATH", "resolution": "rerun affected subprocess tests with repository SDK path, 2 of 2 passed" }
+  ],
+  "decision": "PHASE7_COMPLETE_PHASE8_NOT_STARTED"
+}

@@ -30,6 +30,7 @@ class RunCreateRequest(BaseModel):
     start_time_ms: int
     end_time_ms: int
     warmup_bars: int = 0
+    symbol: str | None = Field(default=None, max_length=80)
     interval: str | None = Field(default=None, max_length=16)
     signal_clock: str | None = Field(default=None, max_length=40)
     signal_interval: str | None = Field(default=None, max_length=16)
@@ -95,8 +96,12 @@ class RunCreateRequest(BaseModel):
         required_fee_fields = {"taker_fee_bps", "maker_fee_bps", "slippage_bps"}
         missing = sorted(required_fee_fields - self.model_fields_set)
         if not self.quick_preset_revision or not self.fee_source or missing:
-            suffix = f"; missing explicit fields: {', '.join(missing)}" if missing else ""
-            raise ValueError(f"quick backtests require a versioned, confirmed fee preset{suffix}")
+            suffix = (
+                f"; missing explicit fields: {', '.join(missing)}" if missing else ""
+            )
+            raise ValueError(
+                f"quick backtests require a versioned, confirmed fee preset{suffix}"
+            )
         return self
 
 
@@ -295,15 +300,11 @@ def capabilities(request: Request) -> dict[str, Any]:
 
 
 @router.post("/chart-context/resolve", response_model=None)
-def resolve_chart_context(
-    payload: ChartContextResolveRequest, request: Request
-) -> Any:
+def resolve_chart_context(payload: ChartContextResolveRequest, request: Request) -> Any:
     try:
         runtime = _runtime(request)
         if not runtime.settings.chart_context_effective:
-            raise BacktestError(
-                "FLAG_DISABLED", "BACKTEST_CHART_CONTEXT_ENABLED is 0"
-            )
+            raise BacktestError("FLAG_DISABLED", "BACKTEST_CHART_CONTEXT_ENABLED is 0")
         return runtime.chart_context.resolve(
             payload.model_dump(),
             host_data_manager=getattr(request.app.state, "data_manager", None),
@@ -325,9 +326,7 @@ async def materialize_chart_context(
     try:
         runtime = _runtime(request)
         if not runtime.settings.chart_context_effective:
-            raise BacktestError(
-                "FLAG_DISABLED", "BACKTEST_CHART_CONTEXT_ENABLED is 0"
-            )
+            raise BacktestError("FLAG_DISABLED", "BACKTEST_CHART_CONTEXT_ENABLED is 0")
         data_engine_runtime = getattr(request.app.state, "data_engine_runtime", None)
         return await runtime.chart_context.materialize(
             **payload.model_dump(),
@@ -610,6 +609,14 @@ def get_report(request: Request, run_id: str) -> dict[str, Any]:
 def get_chart(request: Request, run_id: str) -> dict[str, Any]:
     try:
         return _runtime(request).chart_data(run_id)
+    except BacktestError as exc:
+        return _error(exc)
+
+
+@router.get("/runs/{run_id}/comparison")
+def compare_recent_compatible_run(request: Request, run_id: str) -> dict[str, Any]:
+    try:
+        return _service(request).compare_recent_compatible_run(run_id)
     except BacktestError as exc:
         return _error(exc)
 

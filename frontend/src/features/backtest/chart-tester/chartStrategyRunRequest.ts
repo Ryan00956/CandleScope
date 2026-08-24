@@ -230,6 +230,7 @@ export function buildChartStrategyRunBody(input: {
     source_event_kind: input.resolution.fidelity.mode === "BAR_APPROX" ? "BAR" : "AGG_TRADE",
     start_time_ms: range.startTimeMs,
     end_time_ms: range.endTimeMs,
+    symbol: input.frozen.session.symbol,
     interval: input.frozen.session.interval,
     warmup_bars: 0,
     parameters: cloneFrozen(input.frozen.attachment.parameters),

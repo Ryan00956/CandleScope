@@ -237,6 +237,9 @@ function LiveChartCell({
       (currentEntry ?? strategyEntryRef.current)?.focus();
     }, 0);
   }, [cell.id, onStrategyPanelOpenChange]);
+  const openStrategyPanel = useCallback(() => {
+    onStrategyPanelOpenChange(true);
+  }, [onStrategyPanelOpenChange]);
   const handleStrategyAttachmentChange = useCallback((attachment: ChartStrategyAttachmentRecord | null) => {
     onStrategyAttachmentChange(cell.id, attachment);
   }, [cell.id, onStrategyAttachmentChange]);
@@ -820,6 +823,7 @@ function LiveChartCell({
               onLocateTrade={handleLocateStrategyTrade}
               onAttachmentChange={handleStrategyAttachmentChange}
               onEntryStateChange={handleStrategyEntryStateChange}
+              onOpenPanel={openStrategyPanel}
               onClosePanel={closeStrategyPanel}
             />
           </Suspense>

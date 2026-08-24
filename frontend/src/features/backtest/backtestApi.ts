@@ -2,7 +2,8 @@ import type {
   BacktestReport,
   BacktestChartData,
   BacktestRunRecord,
-  RunCompareV2,
+  RecentRunCompareV1,
+  RunCompareV3,
   SignalTracePage,
   BacktestStudyComparison,
   BacktestStudyRecord,
@@ -172,7 +173,8 @@ export interface BacktestApiClient {
   createStrategyRevision(body: Record<string, unknown>, signal?: AbortSignal): Promise<StrategyRevisionRecord>;
   smokeStrategyRevision(revisionId: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>>;
   getSignalTrace(runId: string, after?: number, limit?: number, signal?: AbortSignal): Promise<SignalTracePage>;
-  compareRuns(leftRunId: string, rightRunId: string, signal?: AbortSignal): Promise<RunCompareV2>;
+  compareRuns(leftRunId: string, rightRunId: string, signal?: AbortSignal): Promise<RunCompareV3>;
+  compareRecentRun(runId: string, signal?: AbortSignal): Promise<RecentRunCompareV1>;
   cloneRun(runId: string, parameter: string, value: unknown, idempotencyKey: string, signal?: AbortSignal): Promise<BacktestRunRecord>;
   copyStrategyRevision(revisionId: string, name: string, signal?: AbortSignal): Promise<StrategyRevisionRecord>;
   archiveStrategyRevision(revisionId: string, signal?: AbortSignal): Promise<StrategyRevisionRecord>;
@@ -447,6 +449,12 @@ export function createBacktestApi(base = "/api/v1/backtests"): BacktestApiClient
     async compareRuns(leftRunId, rightRunId, signal) {
       const query = new URLSearchParams({ left_run_id: leftRunId, right_run_id: rightRunId });
       return readJson(await fetch(`${base}/runs/compare/pair?${query}`, requestOptions({}, signal)));
+    },
+    async compareRecentRun(runId, signal) {
+      return readJson(await fetch(
+        `${base}/runs/${encodeURIComponent(runId)}/comparison`,
+        requestOptions({}, signal),
+      ));
     },
     async cloneRun(runId, parameter, value, idempotencyKey, signal) {
       return readJson(await fetch(`${base}/runs/${encodeURIComponent(runId)}/clone`, requestOptions({

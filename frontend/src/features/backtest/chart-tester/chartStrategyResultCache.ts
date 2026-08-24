@@ -4,6 +4,7 @@ import type {
   BacktestReport,
   BacktestRunRecord,
 } from "../backtestTypes.js";
+import { sanitizeBacktestEvidence } from "./tradeExplanationEvidence.js";
 
 export interface ChartStrategyCompletedRunConfig extends Record<string, unknown> {
   start_time_ms: number;
@@ -74,11 +75,11 @@ export function parseChartStrategyCompletedRunConfig(
   };
 }
 
-function buildBundle(
+async function buildBundle(
   run: BacktestRunRecord,
   report: BacktestReport,
   chart: BacktestChartData,
-): ChartStrategyResultBundle {
+): Promise<ChartStrategyResultBundle> {
   if (run.state !== "COMPLETED") {
     throw new ChartStrategyResultError("RESULT_NOT_COMPLETED", "Run is not completed");
   }
@@ -98,11 +99,12 @@ function buildBundle(
     "RESULT_CHART_HASH_MISSING",
     "chart hash",
   );
+  const sanitized = await sanitizeBacktestEvidence(report, chart);
   return Object.freeze({
     cacheKey: `${run.run_id}|${reportHash}|${chartHash}`,
     run: Object.freeze({ ...run }),
-    report,
-    chart,
+    report: sanitized.report,
+    chart: sanitized.chart,
     config: Object.freeze(parseChartStrategyCompletedRunConfig(run)),
     reportHash,
     chartHash,
@@ -129,7 +131,7 @@ export class ChartStrategyResultCache {
       api.getReport(runId, signal),
       api.getChart(runId, signal),
     ]);
-    const bundle = buildBundle(run, report, chart);
+    const bundle = await buildBundle(run, report, chart);
     this.entries.set(runId, bundle);
     return bundle;
   }

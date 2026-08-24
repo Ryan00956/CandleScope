@@ -147,11 +147,12 @@ def test_paged_trace_never_enters_main_report(tmp_path: Path) -> None:
         now_ms=6,
     )
     comparison = service.compare_run_pair(str(run["run_id"]), str(clone["run_id"]))
-    assert comparison["schema"] == "RUN_COMPARE_V2"
-    assert comparison["directComparisonAllowed"] is True
+    assert comparison["schema"] == "RUN_COMPARE_V3"
+    assert comparison["directComparisonAllowed"] is False
+    assert comparison["incompatibleFields"] == ["market.interval"]
     assert comparison["parameterDiff"] == {"length": {"left": 2, "right": 3}}
     assert "drawdownDaily" in comparison["left"]
-    assert set(comparison["tradeDiff"]) == {"tradeCount", "netPnl"}
+    assert set(comparison["tradeDiff"]) == {"tradeCount", "netPnl", "maxDrawdown"}
     assert set(comparison["costDiff"]) == {"fees", "funding", "slippage"}
     service.shutdown()
 

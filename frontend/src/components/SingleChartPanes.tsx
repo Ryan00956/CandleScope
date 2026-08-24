@@ -339,6 +339,7 @@ type AdapterPriceScale = ReturnType<AdapterChart["priceScale"]>;
 type PriceScaleOptions = ReturnType<AdapterPriceScale["options"]>;
 type PriceScaleOptionsPatch = Parameters<AdapterPriceScale["applyOptions"]>[0];
 type ChartCrosshairParam = Parameters<Parameters<AdapterChart["subscribeCrosshairMove"]>[0]>[0];
+type ChartClickParam = Parameters<Parameters<AdapterChart["subscribeClick"]>[0]>[0];
 
 type LinkedCrosshairRenderState = {
   axisKey: string | null;
@@ -1695,6 +1696,18 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       console.warn("SingleChartPanes: failed to attach external marker source:", error);
       return undefined;
     }
+  }, [datasetKey, drawingSeriesGeneration, externalMarkerSource, usesDerivedAxis]);
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart || !externalMarkerSource?.activate || usesDerivedAxis) return undefined;
+    const handleMarkerClick = (param: ChartClickParam) => {
+      if (typeof param.hoveredObjectId !== "string") return;
+      externalMarkerSource.activate?.(param.hoveredObjectId);
+    };
+    chart.subscribeClick(handleMarkerClick);
+    return () => {
+      try { chart.unsubscribeClick(handleMarkerClick); } catch { /* chart may already be disposing */ }
+    };
   }, [datasetKey, drawingSeriesGeneration, externalMarkerSource, usesDerivedAxis]);
   useEffect(() => {
     const series = mainSeriesRef.current;

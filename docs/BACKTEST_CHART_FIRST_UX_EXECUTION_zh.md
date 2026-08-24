@@ -1,6 +1,6 @@
 # CandleScope 图表脚本快测与高级策略研究 UX 逐步执行方案
 
-> 状态：`PHASE_4_COMPLETE`
+> 状态：`PHASE_9_COMPLETE`
 >
 > 2026-08-24 Phase 0 自动化、公开 API、浏览器、bundle、单/四图与 lease 基线已通过；
 > 四个同视口视觉合同稿已经用户人工产品评审批准。Phase 1 已提取 typed backtest client、Run
@@ -11,13 +11,22 @@
 > 三种开始方式、懒加载 Monaco、草稿自动保存与恢复、轻量诊断、四标签底部工作区及完整浏览器矩阵。
 > Phase 5 已接通安全 Pyne provider、revision 幂等复用、resolve/smoke/validate/re-resolve/create/poll
 > 流水线、显式 NEEDS_DATA 确认、停止/恢复观察，以及高级研究可见和导出。
+> Phase 6 已把不可变 Run 结果、ResultContextBar、交易标记、权益和交易列表投影回当前图表；Phase 7
+> 已完成决定时交易解释与严格 comparison context 自动比较；Phase 8 已完成 600 ms 自动运行、workspace
+> 两并发上限、手动抢占与容量失败关闭。Phase 9 已抽取 source-neutral 共享行情图表平台，生产
+> `LiveChartCell` 已经由 `LIVE_REFERENCE` adapter 使用同一 `MarketChartSurface`，冻结快照与 Run 结果
+> source 保持离线、不可变身份和显式 dispose。
 > 证据见
 > [Phase 0 结果](evidence/BACKTEST_CHART_FIRST_PHASE0_RESULT_20260824_zh.md) 与
 > [Phase 1 结果](evidence/BACKTEST_CHART_FIRST_PHASE1_RESULT_20260824_zh.md)、
 > [Phase 2 结果](evidence/BACKTEST_CHART_FIRST_PHASE2_RESULT_20260824_zh.md) 与
 > [Phase 3 结果](evidence/BACKTEST_CHART_FIRST_PHASE3_RESULT_20260824_zh.md) 与
 > [Phase 4 结果](evidence/BACKTEST_CHART_FIRST_PHASE4_RESULT_20260824_zh.md) 与
-> [Phase 5 结果](evidence/BACKTEST_CHART_FIRST_PHASE5_RESULT_20260824_zh.md)。
+> [Phase 5 结果](evidence/BACKTEST_CHART_FIRST_PHASE5_RESULT_20260824_zh.md)、
+> [Phase 6 结果](evidence/BACKTEST_CHART_FIRST_PHASE6_RESULT_20260824_zh.md)、
+> [Phase 7 结果](evidence/BACKTEST_CHART_FIRST_PHASE7_RESULT_20260824_zh.md)、
+> [Phase 8 结果](evidence/BACKTEST_CHART_FIRST_PHASE8_RESULT_20260824_zh.md) 与
+> [Phase 9 结果](evidence/BACKTEST_CHART_FIRST_PHASE9_RESULT_20260824_zh.md)。
 >
 > 文档类型：产品合同 + 仓库级执行计划
 >
@@ -1435,6 +1444,13 @@ Phase 6 结束即形成独立的“首次可用快测”里程碑：用户已经
 通过远程/本地配置关闭 auto-run，保留手动运行；必要时关闭整个 chart tester flag。
 
 ## Phase 9：抽取共享行情图表平台
+
+实施状态（2026-08-24）：`COMPLETE`。
+
+- 执行计划：[BACKTEST_CHART_FIRST_PHASE9_PLAN_20260824_zh.md](evidence/BACKTEST_CHART_FIRST_PHASE9_PLAN_20260824_zh.md)
+- 结果证据：[BACKTEST_CHART_FIRST_PHASE9_RESULT_20260824_zh.md](evidence/BACKTEST_CHART_FIRST_PHASE9_RESULT_20260824_zh.md)
+- 机器可读证据：[backtest-chart-first-phase9-20260824.json](evidence/backtest-chart-first-phase9-20260824.json)
+- 浏览器前后对照：[backtest-chart-first-phase9](evidence/backtest-chart-first-phase9/)
 
 ### 目标
 

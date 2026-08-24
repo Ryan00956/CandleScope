@@ -6,6 +6,8 @@ import type { PluginChartLayerSource } from "../features/plugins/pluginChartLaye
 import { useAdvancedMarketPanes } from "../features/advanced-market-data/useAdvancedMarketPanes.js";
 import { useTradeFlowPanes } from "../features/trade-flow/useTradeFlowPanes.js";
 import type { TradeFlowRuntime } from "../features/trade-flow/tradeFlowTypes.js";
+import MarketChartSurface from "../features/market-chart-platform/MarketChartSurface.js";
+import type { MarketChartSourceRuntime } from "../features/market-chart-platform/marketChartSourceRuntime.js";
 import { ChartErrorBoundary } from "./AppProviders.js";
 import { drawingToolWhenInteractionReady } from "./drawingInteractionReadiness.js";
 import type { ChartWorkspaceChartModel } from "./ChartWorkspace.js";
@@ -15,6 +17,7 @@ import { useLocale } from "../i18n/useLocale.js";
 
 export interface ChartCellCanvasProps {
   chart: ChartWorkspaceChartModel;
+  source?: MarketChartSourceRuntime;
   tradeFlow: TradeFlowRuntime;
   strategyMarkerSource?: ExternalMarkerSource | null;
   pluginMarkerSource?: ExternalMarkerSource | null;
@@ -27,6 +30,7 @@ export interface ChartCellCanvasProps {
 
 function ChartCellCanvas({
   chart,
+  source,
   tradeFlow,
   strategyMarkerSource = null,
   pluginMarkerSource = null,
@@ -54,29 +58,26 @@ function ChartCellCanvas({
     onDrawingInteractionReadyChange?.(ready);
     upstreamDrawingInteractionReadyChange?.(ready);
   }, [onDrawingInteractionReadyChange, upstreamDrawingInteractionReadyChange]);
-  const chartProps = React.useMemo(() => ({
+  const sourceNeutralChartProps = React.useMemo(() => ({
     ...chart.chartProps,
     drawingTool: drawingToolWhenInteractionReady(
       chart.chartProps.drawingTool,
       drawingInteractionReady,
     ),
     onDrawingInteractionReadyChange: handleDrawingInteractionReadyChange,
-    externalMarkerSource: markerSource,
-    pluginChartLayerSource,
-    subPanes: [
-      ...tradeFlowPanes,
-      ...advancedPanes,
-      ...(chart.chartProps.subPanes || []),
-    ],
   }), [
-    advancedPanes,
     chart.chartProps,
     drawingInteractionReady,
     handleDrawingInteractionReadyChange,
-    markerSource,
-    pluginChartLayerSource,
-    tradeFlowPanes,
   ]);
+  const supplementalPanes = React.useMemo(
+    () => [...tradeFlowPanes, ...advancedPanes],
+    [advancedPanes, tradeFlowPanes],
+  );
+  const markerSources = React.useMemo(
+    () => [tradeFlow.view.markerSource, pluginMarkerSource, strategyMarkerSource],
+    [pluginMarkerSource, strategyMarkerSource, tradeFlow.view.markerSource],
+  );
 
   if (chart.error) {
     return (
@@ -100,9 +101,32 @@ function ChartCellCanvas({
     );
   }
 
+  if (source) {
+    return (
+      <MarketChartSurface
+        source={source}
+        chartProps={sourceNeutralChartProps}
+        markerSources={markerSources}
+        chartLayerSource={pluginChartLayerSource}
+        supplementalPanes={supplementalPanes}
+        errorBoundary={Boundary}
+        paused={paused}
+      />
+    );
+  }
+
   return (
     <Boundary>
-      <SingleChartPanes {...chartProps} suspended={paused} />
+      <SingleChartPanes
+        {...sourceNeutralChartProps}
+        externalMarkerSource={markerSource}
+        pluginChartLayerSource={pluginChartLayerSource}
+        subPanes={[
+          ...supplementalPanes,
+          ...(sourceNeutralChartProps.subPanes || []),
+        ]}
+        suspended={paused}
+      />
     </Boundary>
   );
 }

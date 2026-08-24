@@ -509,3 +509,39 @@ test("replay entry graph rejects live and private imports hidden behind a helper
     ],
   );
 });
+
+test("market chart platform rejects backtest, replay, app, and workspace imports", (t) => {
+  const result = runArchitectureFixture(t, {
+    "src/features/market-chart-platform/MarketChartSurface.tsx": `
+      import type { BacktestRun } from "../backtest/backtestTypes.js";
+      import { ReplayApp } from "../replay/ReplayApp.js";
+      import { LiveChartCell } from "../../app/LiveChartCell.js";
+      import { workspaceStore } from "../chart-workspace/chartWorkspaceStore.js";
+      export const forbidden = [ReplayApp, LiveChartCell, workspaceStore] as unknown as BacktestRun[];
+    `,
+  });
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(
+    result.violations.map(({ rule }) => rule),
+    [
+      "market-chart-platform-no-product-ui-import",
+      "market-chart-platform-no-product-ui-import",
+      "market-chart-platform-no-product-ui-import",
+      "market-chart-platform-no-product-ui-import",
+    ],
+  );
+});
+
+test("market chart platform permits source-neutral chart and market-data contracts", (t) => {
+  const result = runArchitectureFixture(t, {
+    "src/features/market-chart-platform/MarketChartSurface.tsx": `
+      import type { MarketDataRuntimeContract } from "../market-data/marketDataRuntimeContract.js";
+      import type { ExternalMarkerSource } from "../../chart-adapter/externalMarkerSource.js";
+      import { SingleChartPanes } from "../../components/SingleChartPanes.js";
+      export const allowed = SingleChartPanes as unknown as MarketDataRuntimeContract & ExternalMarkerSource;
+    `,
+  });
+
+  assert.deepEqual(result, { ok: true, violations: [] });
+});

@@ -1,0 +1,116 @@
+{
+  "schemaVersion": "candlescope.backtest-chart-first.phase9/1",
+  "generatedAt": "2026-08-24T14:31:18+08:00",
+  "status": "COMPLETE_READY_FOR_COMMIT",
+  "identity": {
+    "baseGitHead": "a0865104fa1ab6c0555b4d87b139cf0cec4e5421",
+    "branch": "codex/backtest-chart-first-ux",
+    "worktree": "H:\\program\\CandleScope-backtest-chart-first"
+  },
+  "scope": {
+    "phase": 9,
+    "phase10OrLaterCode": false,
+    "newProductFlag": false,
+    "defaultFlagEnabled": false,
+    "push": false,
+    "merge": false,
+    "deploy": false,
+    "productionDataChanged": false
+  },
+  "sources": {
+    "modes": ["LIVE_REFERENCE", "FROZEN_SNAPSHOT", "RUN_RESULT"],
+    "lifecycle": ["ACTIVE", "PAUSED", "DISPOSED"],
+    "liveExecutionIdentity": null,
+    "liveExecutionRejected": true,
+    "frozenOffline": true,
+    "runResultIsolatedFromLive": true,
+    "switchDisposesPrevious": true,
+    "strictModeReplaySafe": true
+  },
+  "architecture": {
+    "productionPath": ["LiveChartCell", "createLiveReferenceSource", "MarketChartSurface"],
+    "opensNetworkInPlatform": false,
+    "forbiddenImports": [
+      "features/backtest",
+      "features/replay",
+      "features/chart-workspace",
+      "app"
+    ],
+    "migrationAllowlistEntries": 0
+  },
+  "browser": {
+    "browser": "headed Chrome",
+    "driver": "repository-local Playwright CLI",
+    "viewport": { "width": 1440, "height": 900 },
+    "frontend": "temporary Vite preview on 127.0.0.1:15180",
+    "backend": "isolated LOCAL_OFFLINE backend on 127.0.0.1:18090",
+    "marketHistoryRoute": "CONTROLLED_LOCAL_BARS_ONLY",
+    "runApisIntercepted": false,
+    "consoleClaimedClean": false,
+    "expectedLocalOfflineFailuresPresent": true,
+    "capacityDebugEndpoint": "HTTP_403_LOCAL_OFFLINE",
+    "before": {
+      "cells": 1,
+      "charts": 1,
+      "canvases": 9,
+      "chartAreas": 1,
+      "historyRequestsAt2200Ms": 1,
+      "latestRequestsAt2200Ms": 2,
+      "webSocketEndpoints": 3,
+      "sourceAttributes": 0,
+      "usedJsHeapBytes": 28331402
+    },
+    "after": {
+      "cells": 1,
+      "charts": 1,
+      "canvases": 9,
+      "chartAreas": 1,
+      "historyRequestsAt2200Ms": 1,
+      "latestRequestsAt2200Ms": 2,
+      "webSocketEndpoints": 3,
+      "sourceAttributes": [{ "mode": "LIVE_REFERENCE", "state": "ACTIVE" }],
+      "usedJsHeapBytes": 27073847
+    },
+    "webSocketEndpointSetEqual": true,
+    "requestTopologyEqual": true,
+    "combinedVisualComparison": "PASS_WITH_EXPECTED_LOCAL_OFFLINE_TRANSIENT_COPY"
+  },
+  "bundle": {
+    "beforeFlagOffLiveChunkKb": 541.74,
+    "afterFlagOffLiveChunkKb": 542.09,
+    "deltaKb": 0.35,
+    "afterModules": 655,
+    "existingLargeChunkWarning": true
+  },
+  "checks": {
+    "marketChartSourceRuntime": { "result": "PASS", "tests": 6, "failures": 0 },
+    "frontendFull": { "result": "PASS", "tests": 3381, "failures": 0 },
+    "frontendTypecheck": { "result": "PASS", "configs": ["browser", "node"] },
+    "frontendLint": { "result": "PASS", "scope": "full frontend with Phase 8 isolated ESLint tooling" },
+    "frontendArchitecture": { "result": "PASS", "fixtureTests": 22, "allowlistEntries": 0 },
+    "frontendI18n": { "result": "PASS", "catalogKeys": 3761, "sourceFiles": 618 },
+    "frontendBuildFlagOff": { "result": "PASS_WITH_EXISTING_CHUNK_WARNING", "modules": 655 },
+    "frontendBuildFlagOn": { "result": "PASS_WITH_EXISTING_CHUNK_WARNING", "modules": 655 },
+    "headedChromeBeforeAfter": { "result": "PASS" }
+  },
+  "screenshots": [
+    {
+      "path": "docs/evidence/backtest-chart-first-phase9/before-1440x900.png",
+      "sha256": "5c7aee0d97e9f356aa5025aac1e1e8ce240d2d1afe6a84e0c0bad3bc84d515bb"
+    },
+    {
+      "path": "docs/evidence/backtest-chart-first-phase9/after-1440x900.png",
+      "sha256": "22419646495aaea447c1f66b110a10b0ae87608e1f54e3abd231115a5b262392"
+    },
+    {
+      "path": "docs/evidence/backtest-chart-first-phase9/before-after-1440x900.png",
+      "sha256": "3bc72c04fbc5ad5acf7d92542068acea7b5e531e2cfcbfdcd4ebad3e93cdfb20"
+    }
+  ],
+  "knownLimits": [
+    "LOCAL_OFFLINE blocks the backend capacity debug endpoint with HTTP 403",
+    "single used-JS-heap samples are diagnostic and are not a long-soak leak claim",
+    "formal 16-cell and long-stability lease qualification remains Phase 12"
+  ],
+  "decision": "PHASE9_COMPLETE_PHASE10_NOT_STARTED"
+}

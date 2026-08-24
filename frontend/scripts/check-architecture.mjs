@@ -32,6 +32,7 @@ const RULES = {
   liveAppNoReplayBars: "live-app-no-replay-bars",
   replayAppNoLiveRuntimeImport: "replay-app-no-live-runtime-import",
   replayAppNoPrivateTradingImport: "replay-app-no-private-trading-import",
+  marketChartPlatformNoProductUiImport: "market-chart-platform-no-product-ui-import",
 };
 
 const allowlist = [];
@@ -328,6 +329,17 @@ function isForbiddenPrivateTradingTarget(target) {
     || /(?:^|\/)(?:api-?keys?|credentials|private-trading|signing)(?:\/|$)/.test(normalized);
 }
 
+function isMarketChartPlatformPath(filePath) {
+  return filePath.startsWith("src/features/market-chart-platform/");
+}
+
+function isForbiddenMarketChartPlatformTarget(target) {
+  return target.startsWith("src/features/backtest/")
+    || target.startsWith("src/features/replay/")
+    || target.startsWith("src/features/chart-workspace/")
+    || target.startsWith("src/app/");
+}
+
 function checkImports(absPath, filePath, content, projectDirectory) {
   for (const { specifier, line, typeOnly } of importSpecifiers(content)) {
     const target = resolveImportSpecifier(absPath, specifier, projectDirectory);
@@ -385,6 +397,17 @@ function checkImports(absPath, filePath, content, projectDirectory) {
         line,
         target: normalizedTarget,
         message: `replay entry graph value-imports private trading dependency ${specifier}`,
+      });
+    }
+
+    if (isMarketChartPlatformPath(filePath)
+      && isForbiddenMarketChartPlatformTarget(normalizedTarget)) {
+      addViolation({
+        rule: RULES.marketChartPlatformNoProductUiImport,
+        filePath,
+        line,
+        target: normalizedTarget,
+        message: `market chart platform imports product composition ${specifier}; pass product UI and workspace state as explicit inputs`,
       });
     }
 

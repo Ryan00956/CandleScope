@@ -45,6 +45,7 @@ import {
   type WorkspaceCellDensity,
 } from "../features/chart-workspace/chartWorkspaceGeometry.js";
 import { useMarketDataRuntime } from "../features/market-data/useMarketDataRuntime.js";
+import { useLiveReferenceMarketChartSource } from "../features/market-chart-platform/useLiveReferenceMarketChartSource.js";
 import {
   initialViewportCountBackCapForCellCount,
   shouldEnableWorkspaceIntervalPrefetch,
@@ -332,6 +333,25 @@ function LiveChartCell({
       ? {}
       : { initialViewportCountBackCap }),
   });
+  const liveSourceSession = useMemo<ChartSession>(() => ({
+    exchange: chartSession.view.exchange,
+    marketType: chartSession.view.marketType,
+    symbol: chartSession.view.symbol,
+    interval: chartSession.view.interval,
+  }), [
+    chartSession.view.exchange,
+    chartSession.view.interval,
+    chartSession.view.marketType,
+    chartSession.view.symbol,
+  ]);
+  const liveReferenceSource = useLiveReferenceMarketChartSource({
+    sourceId: `live:${workspaceId}:${windowId}:${cell.id}`,
+    session: liveSourceSession,
+    datasetKey: chartSession.view.datasetKey,
+    marketData,
+    paused: obscured,
+  });
+  const sourceMarketData = liveReferenceSource.marketData;
 
   const workTier = obscured ? "hidden" : active ? "focused" : "visible-secondary";
   const workScheduler = marketWorkspaceResources?.workScheduler;
@@ -344,8 +364,8 @@ function LiveChartCell({
   }, [cell.id, workScheduler, workTier]);
   const advancedMarketData = useAdvancedMarketDataRuntime({
     session: chartSession,
-    dataMeta: marketData.view.meta,
-    seriesStore: marketData.view.seriesStore,
+    dataMeta: sourceMarketData.view.meta,
+    seriesStore: sourceMarketData.view.seriesStore,
   });
   const drawingScopeBase = linkedDrawingScopeBase;
   const drawings = useDrawingRuntime({
@@ -420,7 +440,7 @@ function LiveChartCell({
     // scenarios such as S3), not a signal to inject the legacy VOL default.
     autoAddVolume: false,
     session: chartSession,
-    marketData,
+    marketData: sourceMarketData,
     candleUpColor: combinedSettings.upColor,
     candleDownColor: combinedSettings.downColor,
     getCurrentVisibleRange: chartSurface.actions.getVisibleRange,
@@ -460,7 +480,7 @@ function LiveChartCell({
       symbol: chartSession.view.symbol,
     },
     interval: chartSession.view.interval,
-    seriesStore: marketData.view.seriesStore,
+    seriesStore: sourceMarketData.view.seriesStore,
     buyColor: combinedSettings.upColor,
     sellColor: combinedSettings.downColor,
     tradeFlowOpen,
@@ -534,7 +554,7 @@ function LiveChartCell({
       actions: chartSession.actions,
       status: chartSession.status,
     },
-    marketData,
+    marketData: sourceMarketData,
     advancedMarketData,
     drawings,
     indicators: indicatorRuntime,
@@ -557,7 +577,7 @@ function LiveChartCell({
     drawings,
     exportFlow,
     indicatorRuntime,
-    marketData,
+    sourceMarketData,
     marketRail,
     onOpenReplayLauncher,
     orderBook,
@@ -672,8 +692,8 @@ function LiveChartCell({
         customIntervalRecords: chartSession.view.customIntervalRecords,
       },
       marketDataReady: chartSession.status.marketDataReady,
-      cacheDiagnostics: marketData.status.cacheDiagnostics,
-      trimCacheEntries: marketData.status.trimCacheEntries,
+      cacheDiagnostics: sourceMarketData.status.cacheDiagnostics,
+      trimCacheEntries: sourceMarketData.status.trimCacheEntries,
     });
   }, [
     active,
@@ -682,8 +702,8 @@ function LiveChartCell({
     chartSession.status.marketDataReady,
     chartSession.view.customIntervalRecords,
     chartSession.view.exchangeCatalog,
-    marketData.status.cacheDiagnostics,
-    marketData.status.trimCacheEntries,
+    sourceMarketData.status.cacheDiagnostics,
+    sourceMarketData.status.trimCacheEntries,
     onActiveEnvironmentChange,
   ]);
 
@@ -700,13 +720,15 @@ function LiveChartCell({
         className={`multi-chart-cell${active ? " active" : ""}${maximized ? " maximized" : ""}`}
         data-chart-cell-id={cell.id}
         data-runtime-mount-token={mountToken}
+        data-market-chart-source-mode={liveReferenceSource.mode}
+        data-market-chart-source-state={obscured ? "PAUSED" : liveReferenceSource.lifecycle}
         data-density={density}
         data-rendering-paused={obscured ? "true" : "false"}
-        data-market-data-ready={marketData.status.barCount > 0 ? "true" : "false"}
-        data-market-data-settled={marketData.status.barCount > 0
-          && !marketData.view.loading
-          && !marketData.status.initialHistoryPending
-          && !marketData.status.loadingMoreLeft
+        data-market-data-ready={sourceMarketData.status.barCount > 0 ? "true" : "false"}
+        data-market-data-settled={sourceMarketData.status.barCount > 0
+          && !sourceMarketData.view.loading
+          && !sourceMarketData.status.initialHistoryPending
+          && !sourceMarketData.status.loadingMoreLeft
           ? "true"
           : "false"}
         data-work-tier={workScheduler?.tier(cell.id) || "fallback"}
@@ -720,7 +742,7 @@ function LiveChartCell({
         onPointerDown={activate}
       >
         <header className="multi-chart-cell-header" onDoubleClick={toggleMaximize}>
-          <span className={`multi-chart-cell-status ${marketData.view.wsStatus}`} aria-hidden="true" />
+          <span className={`multi-chart-cell-status ${sourceMarketData.view.wsStatus}`} aria-hidden="true" />
           <button
             type="button"
             className="multi-chart-cell-drag-handle"
@@ -790,6 +812,7 @@ function LiveChartCell({
         <div className="multi-chart-cell-canvas">
           <ChartCellCanvas
             chart={chartModel}
+            source={liveReferenceSource}
             tradeFlow={tradeFlow}
             strategyMarkerSource={strategyMarkerSource}
             pluginMarkerSource={plugins.view.markerSource}
@@ -817,7 +840,7 @@ function LiveChartCell({
               active={active}
               panelOpen={strategyPanelOpen}
               bottomPanelHost={portalHosts.bottomPanel}
-              seriesStore={marketData.view.seriesStore}
+              seriesStore={sourceMarketData.view.seriesStore}
               getCurrentVisibleRange={chartSurface.actions.getVisibleRange}
               onMarkerSourceChange={handleStrategyMarkerSourceChange}
               onLocateTrade={handleLocateStrategyTrade}

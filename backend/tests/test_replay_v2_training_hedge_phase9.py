@@ -559,6 +559,36 @@ async def test_manual_hedge_bar_step_keeps_exhaustive_audit_off_hot_path(
         assert len(advance_kwargs) == 1
         assert liquidation_detection_count == 1
 
+        risk_time_ms = int(advanced["cursor"]["virtual_time_ms"])
+        await service.training.store.finalize_hedge_inputs(
+            run_id,
+            risk_virtual_time_ms=risk_time_ms,
+        )
+        assert liquidation_detection_count == 1
+
+        def tamper_current_equity(connection: sqlite3.Connection) -> None:
+            connection.execute(
+                """
+                UPDATE replay_training_run SET current_equity = '999'
+                WHERE run_id = ?
+                """,
+                (run_id,),
+            )
+
+        await service.store.run_extension_write(tamper_current_equity)
+        await service.training.store.finalize_hedge_inputs(
+            run_id,
+            risk_virtual_time_ms=risk_time_ms,
+        )
+        assert liquidation_detection_count == 2
+        restored_equity = await service.store.run_extension_read(
+            lambda connection: connection.execute(
+                "SELECT current_equity FROM replay_training_run WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()[0]
+        )
+        assert restored_equity == "10000"
+
         # The independent proof remains exact and callable outside the command
         # hot path; moving it does not weaken tamper detection or accounting.
         monkeypatch.setattr(
@@ -1271,6 +1301,7 @@ async def _multitrack_run(
 
 async def test_real_add_track_uses_track_specific_mark_funding_and_audit(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = tmp_path / "phase9-multitrack.db"
     service = await _risk_service(
@@ -1283,6 +1314,24 @@ async def test_real_add_track_uses_track_specific_mark_funding_and_audit(
             tmp_path,
             prefix="phase9-multitrack",
         )
+        assert service.training is not None
+        original_totals = service.training.store._hedge_accounting_totals_by_leg
+        funding_wave_aggregations = 0
+
+        def observed_totals(
+            connection: sqlite3.Connection,
+            *,
+            run_id: str,
+        ) -> dict[tuple[str, str], tuple[Decimal, Decimal, Decimal]]:
+            nonlocal funding_wave_aggregations
+            funding_wave_aggregations += 1
+            return original_totals(connection, run_id=run_id)
+
+        monkeypatch.setattr(
+            service.training.store,
+            "_hedge_accounting_totals_by_leg",
+            observed_totals,
+        )
         await _send(
             service,
             run_id=run_id,
@@ -1291,7 +1340,7 @@ async def test_real_add_track_uses_track_specific_mark_funding_and_audit(
             command_type=ReplayV2CommandType.STEP_BASE,
             payload={"count": 2},
         )
-        assert service.training is not None
+        assert funding_wave_aggregations == 1
         projection = await service.training.get_market_tracks(run_id)
         tracks = {str(track["symbol"]): track for track in projection["tracks"]}
         assert tracks["BTCUSDT"]["public_price"] == "101"

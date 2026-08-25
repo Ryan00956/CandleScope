@@ -72,12 +72,12 @@
     {
       "kind": "STRATEGY_RESEARCH_UNIFICATION_PHASE_12_RESULT_20260825_zh.md",
       "path": "docs/evidence/STRATEGY_RESEARCH_UNIFICATION_PHASE_12_RESULT_20260825_zh.md",
-      "sha256": "5e441285e3d1873d926d21b0119774304a8cb16a331186adfb074806880c3c58"
+      "sha256": "5cfe18a88d6defb02f4295fdeef8a983fd5a9508a0c5a73474c2be794caa35e4"
     },
     {
       "kind": "STRATEGY_RESEARCH_UNIFICATION_PHASE_12_DOD_20260825_zh.md",
       "path": "docs/evidence/STRATEGY_RESEARCH_UNIFICATION_PHASE_12_DOD_20260825_zh.md",
-      "sha256": "9b2dd8a83ad421696dbffd48adc249941eb465eeab75d42c522b2d9f211e37e3"
+      "sha256": "476bdb64e6fa091dde95331515f7a848dcb76f2a12f85fa9abc032471460252f"
     },
     {
       "kind": "STRATEGY_RESEARCH_UNIFICATION_PHASE_12_LEGACY_AUDIT_20260825_zh.md",
@@ -108,6 +108,21 @@
       "kind": "strategy-research-smoke.mjs",
       "path": "frontend/scripts/strategy-research-smoke.mjs",
       "sha256": "b7d02c3515ea01dda898ec846589c00be5b8c2ae2a51f82fdd345e7d17373e41"
+    },
+    {
+      "kind": "STRATEGY_RESEARCH_UNIFICATION_PHASE_12_ADDENDUM_20260825_zh.md",
+      "path": "docs/evidence/STRATEGY_RESEARCH_UNIFICATION_PHASE_12_ADDENDUM_20260825_zh.md",
+      "sha256": "088b9296ca3dca4066f92c47fcb25b7f14f176566646ba0113bc2cb72cc6e63c"
+    },
+    {
+      "kind": "STRATEGY_RESEARCH_UNIFICATION_PHASE_12_PYTEST_VS_MAIN_20260825.md",
+      "path": "docs/evidence/STRATEGY_RESEARCH_UNIFICATION_PHASE_12_PYTEST_VS_MAIN_20260825.md",
+      "sha256": "fd63a638393f2d94fd6c523900ca55e30bf59ad1723f622cdadb507f0a727da6"
+    },
+    {
+      "kind": "strategy-research-unification-phase-12-mixed-env-20260825.json",
+      "path": "docs/evidence/strategy-research-unification-phase-12-mixed-env-20260825.json",
+      "sha256": "61499442c239a5aa144aacfd47502fb6a214f00f5af787d1ed5bd1ba3b7d854d"
     }
   ]
 }

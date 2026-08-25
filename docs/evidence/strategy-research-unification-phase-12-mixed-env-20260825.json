@@ -1,0 +1,12 @@
+{
+  "healthMode": "LOCAL_OFFLINE",
+  "dataManager": "not_initialized",
+  "backtestEnabled": true,
+  "barEnabled": true,
+  "klines": 403,
+  "stream": 403,
+  "replay": 403,
+  "remoteOrigin": 403,
+  "liveChartPossible": false,
+  "reason": "process is LOCAL_OFFLINE; data_manager not_initialized; no browser MCP"
+}

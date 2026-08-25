@@ -13,7 +13,9 @@ export function StrategyResearchShell({
   source,
   libraryEnabled,
   libraryOpen,
+  currentChartEnabled,
   onOpenLibrary,
+  onSelectCurrentChart,
   pageExportRef,
   controls,
   runtimeMode,
@@ -31,7 +33,9 @@ export function StrategyResearchShell({
   source: ResearchSourceRefV1 | null;
   libraryEnabled: boolean;
   libraryOpen: boolean;
+  currentChartEnabled: boolean;
   onOpenLibrary(): void;
+  onSelectCurrentChart(): void;
   pageExportRef: Ref<HTMLDivElement>;
   controls: ReactNode;
   runtimeMode: "LIVE" | "LOCAL_OFFLINE";
@@ -62,7 +66,9 @@ export function StrategyResearchShell({
               <ResearchDataSourceBar
                 source={source}
                 libraryEnabled={libraryEnabled}
+                currentChartEnabled={currentChartEnabled}
                 onOpenLibrary={onOpenLibrary}
+                onSelectCurrentChart={onSelectCurrentChart}
               />
             )}
             controls={controls}

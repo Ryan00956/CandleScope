@@ -25,6 +25,8 @@ export const zhCN = {
   "strategy.advanced": "高级研究",
   "strategy.advancedNeedDraft": "请先选择一个策略模板，再打开高级研究。",
   "strategy.advancedNeedSource": "请先选择数据，再打开高级研究。",
+  "strategy.useCurrentChart": "使用当前图表",
+  "strategy.firstOpenLead": "选择模板、使用当前图表，或导入自己的数据。",
   "strategy.compat.local": "此地址是策略中本地资料库的兼容入口。",
   "strategy.compat.backtest": "此地址是策略 / 高级研究的兼容入口。",
   "strategy.compat.canonical": "打开策略",

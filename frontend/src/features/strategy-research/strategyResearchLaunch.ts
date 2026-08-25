@@ -3,6 +3,8 @@ import {
   parseBacktestResearchEntry,
   type BacktestResearchEntry,
 } from "../backtest/backtestDeepLink.js";
+import type { ResearchSourceRefV1 } from "../research-data/researchDataTypes.js";
+import { currentChartSource } from "./StrategyResearchCurrentChart.js";
 
 export type StrategyResearchPage = "strategy" | "local" | "backtest";
 
@@ -10,6 +12,7 @@ export type StrategyResearchVisualState = "first" | "import" | "chart" | "edit" 
 
 export type StrategyResearchLaunchIntent =
   | { kind: "restore"; page: "strategy" }
+  | { kind: "chart"; page: "strategy" }
   | { kind: "imported"; page: "local" | "strategy" }
   | { kind: "import"; page: "strategy" | "local" }
   | { kind: "advanced"; page: "backtest" | "strategy" }
@@ -50,6 +53,7 @@ export function parseStrategyResearchLaunch(location: {
   const action = params.get("action")?.trim() ?? "";
   const source = params.get("source")?.trim() ?? "";
   if (action === "import") return { kind: "import", page: page === "backtest" ? "strategy" : page };
+  if (source === "current") return { kind: "chart", page: "strategy" };
   if (source === "imported") return { kind: "imported", page: page === "backtest" ? "local" : page };
   if (page === "local") return { kind: "imported", page: "local" };
   if (page === "backtest") return { kind: "advanced", page: "backtest" };
@@ -80,8 +84,12 @@ export function strategyResearchLaunchActions(
   intent: StrategyResearchLaunchIntent,
 ): Array<
   | { type: "source/libraryOpen"; open: true }
+  | { type: "source/select"; source: ResearchSourceRefV1 }
   | { type: "result/setRun"; runId: string }
 > {
+  if (intent.kind === "chart") {
+    return [{ type: "source/select", source: currentChartSource() }];
+  }
   if (intent.kind === "imported" || intent.kind === "import") {
     return [{ type: "source/libraryOpen", open: true }];
   }

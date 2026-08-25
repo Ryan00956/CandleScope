@@ -1,6 +1,6 @@
 {
   "schemaVersion": "candlescope.strategy-research-unification-soak/1",
-  "status": "PASS",
+  "status": "ENV_STOP",
   "requestedDurationMs": 3600000,
   "elapsedMs": 3600131,
   "cycles": 711,
@@ -15,5 +15,7 @@
     "remoteOriginDeny": true,
     "liveChartBrowser": false,
     "liveImportedChartBrowser": false
-  }
+  },
+  "mixedSoak": "ENV_STOP",
+  "reason": "LOCAL_OFFLINE API cycles completed; LIVE current-chart and imported-chart browser paths were not exercised"
 }

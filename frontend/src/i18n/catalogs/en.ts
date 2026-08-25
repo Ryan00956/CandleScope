@@ -27,6 +27,8 @@ export const en = {
   "strategy.advanced": "Advanced research",
   "strategy.advancedNeedDraft": "Choose a strategy template before opening advanced research.",
   "strategy.advancedNeedSource": "Select data before opening advanced research.",
+  "strategy.useCurrentChart": "Use current chart",
+  "strategy.firstOpenLead": "Choose a template, use the current chart, or import your own data.",
   "strategy.compat.local": "This address is a compatibility entry for the local library inside Strategy.",
   "strategy.compat.backtest": "This address is a compatibility entry for Strategy / Advanced research.",
   "strategy.compat.canonical": "Open Strategy",

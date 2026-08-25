@@ -2,10 +2,24 @@
   min-height: 100%;
 }
 
-.strategy-research-shell[data-visual-state="first"] .strategy-research-script,
-.strategy-research-shell[data-visual-state="import"] .strategy-research-script {
-  max-height: 0;
-  overflow: hidden;
+.strategy-research-first-open,
+.strategy-research-current-chart {
+  padding: 24px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.strategy-research-templates {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.strategy-research-first-open-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .strategy-research-chart-slot,

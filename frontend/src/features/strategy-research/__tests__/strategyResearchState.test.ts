@@ -137,9 +137,12 @@ test("flag rollback hides the import entry", () => {
       source: null,
       libraryEnabled: false,
       onOpenLibrary() {},
+      onSelectCurrentChart() {},
     }),
   );
-  assert.equal(hidden, "");
+  assert.match(hidden, /research-data-source-bar/);
+  assert.match(hidden, /research-source-use-current-chart/);
+  assert.doesNotMatch(hidden, /research.source.openLibrary|Open local library|打开本地资料库/);
   const chartOnly = renderToStaticMarkup(
     React.createElement(ResearchDataDrawer, {
       open: true,

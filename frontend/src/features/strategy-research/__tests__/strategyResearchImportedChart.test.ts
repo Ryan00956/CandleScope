@@ -108,7 +108,7 @@ test("unified app owns one library store and drawer does not create another", ()
   assert.match(chartSource, /realtimeMode="historical-only"/);
 });
 
-test("CURRENT_CHART keeps the chart slot placeholder while imported data uses the empty CSV surface", () => {
+test("first open shows three templates and import without hiding the script slot", () => {
   const first = renderToStaticMarkup(
     React.createElement(StrategyResearchApp, {
       intent: parseStrategyResearchLaunch({ pathname: "/strategy.html", search: "" }),
@@ -116,6 +116,27 @@ test("CURRENT_CHART keeps the chart slot placeholder while imported data uses th
     }),
   );
   assert.match(first, /data-visual-state="first"/);
-  assert.match(first, /strategy-research-empty-chart/);
+  assert.match(first, /strategy-research-first-open/);
+  assert.match(first, /strategy-research-templates/);
+  assert.match(first, /strategy-research-template-SMA_CROSS/);
+  assert.match(first, /strategy-research-template-RSI_REVERSAL/);
+  assert.match(first, /strategy-research-template-DONCHIAN_BREAKOUT/);
+  assert.match(first, /strategy-research-import-own-data/);
+  assert.match(first, /research-data-source-bar/);
   assert.doesNotMatch(first, /monaco/i);
+  const css = readFileSync(path.resolve(here, "../strategyResearch.css"), "utf8");
+  assert.doesNotMatch(css, /data-visual-state="first"[^}]*max-height:\s*0/);
+});
+
+test("source=current fills the current-chart surface with a driven session", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(StrategyResearchApp, {
+      intent: parseStrategyResearchLaunch({ pathname: "/strategy.html", search: "?source=current" }),
+      libraryEnabled: false,
+    }),
+  );
+  assert.match(html, /strategy-research-current-chart/);
+  assert.match(html, /data-symbol="BTCUSDT"/);
+  assert.match(html, /data-interval="1m"/);
+  assert.doesNotMatch(html, /strategy-research-import-own-data/);
 });

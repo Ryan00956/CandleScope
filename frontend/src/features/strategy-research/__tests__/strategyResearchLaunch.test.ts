@@ -20,6 +20,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 
 test("three HTML entries parse into the documented default intents", () => {
   assert.equal(parseStrategyResearchLaunch({ pathname: "/strategy.html", search: "" }).kind, "restore");
+  assert.equal(parseStrategyResearchLaunch({ pathname: "/strategy.html", search: "?source=current" }).kind, "chart");
   assert.equal(parseStrategyResearchLaunch({ pathname: "/local.html", search: "" }).kind, "imported");
   assert.equal(parseStrategyResearchLaunch({ pathname: "/backtest.html", search: "" }).kind, "advanced");
   assert.equal(parseStrategyResearchLaunch({ pathname: "/strategy.html", search: "?action=import" }).kind, "import");
@@ -61,6 +62,9 @@ test("flag-on uses one unified app; flag-off keeps local and backtest legacy", (
 test("local import and backtest advanced launch actions do not create a Run", () => {
   const imported = parseStrategyResearchLaunch({ pathname: "/local.html", search: "" });
   assert.deepEqual(strategyResearchLaunchActions(imported), [{ type: "source/libraryOpen", open: true }]);
+  const chart = parseStrategyResearchLaunch({ pathname: "/strategy.html", search: "?source=current" });
+  const chartActions = strategyResearchLaunchActions(chart);
+  assert.equal(chartActions[0]?.type, "source/select");
   const advanced = parseStrategyResearchLaunch({ pathname: "/backtest.html", search: "" });
   assert.deepEqual(strategyResearchLaunchActions(advanced), []);
   const runtime = new StrategyResearchRuntime({ restoreWorkspace: false, libraryEnabled: true });

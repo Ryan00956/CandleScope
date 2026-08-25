@@ -33,11 +33,12 @@ import { useLocalIntervalSelection } from "../local-data/useLocalIntervalSelecti
 import SettingsModal from "../settings/SettingsModal.js";
 import { useChartSettingsRuntime } from "../settings/chartAppearanceSettings.js";
 import {
-  EmptyImportedChart,
   ImportedAnalysisPanel,
   ImportedDatasetIntervalStrip,
   StrategyResearchImportedWorkspace,
 } from "./StrategyResearchChart.js";
+import { StrategyResearchCurrentChart, currentChartSource } from "./StrategyResearchCurrentChart.js";
+import { StrategyResearchFirstOpen } from "./StrategyResearchFirstOpen.js";
 import { importedDatasetSourceFromManifest } from "./importedDatasetSource.js";
 import { StrategyResearchRuntime } from "./StrategyResearchRuntime.js";
 import { StrategyResearchResultPanel } from "./StrategyResearchResultPanel.js";
@@ -80,19 +81,6 @@ class StrategyResearchDrawerBoundary extends Component<
   render(): ReactNode {
     return this.state.failed ? this.props.fallback : this.props.children;
   }
-}
-
-function currentChartSource() {
-  return {
-    schemaVersion: "candlescope.research-source/1" as const,
-    kind: "CURRENT_CHART" as const,
-    workspaceId: "current",
-    cellId: "current",
-    exchange: "binance",
-    marketType: "spot",
-    symbol: "BTCUSDT",
-    interval: "1m",
-  };
 }
 
 function dispatchImportedSource(
@@ -179,17 +167,21 @@ export default function StrategyResearchApp({
     return () => controller.abort();
   }, [runtime]);
 
+  const selectCurrentChart = useCallback(() => {
+    if (runtime.runtimeMode === "LOCAL_OFFLINE") return;
+    dispatch({ type: "source/select", source: currentChartSource() });
+  }, [dispatch, runtime]);
+
   const onSelectKind = useCallback((kind: ResearchSourceKind) => {
     if (kind === "CURRENT_CHART") {
-      if (runtime.runtimeMode === "LOCAL_OFFLINE") return;
-      dispatch({ type: "source/select", source: currentChartSource() });
+      selectCurrentChart();
       return;
     }
     dispatch({ type: "source/libraryOpen", open: true });
     if (kind === "IMPORTED_DATASET" && library.selected !== null) {
       dispatchImportedSource(dispatch, runtime.state.source.source, library.selected);
     }
-  }, [dispatch, library.selected, runtime]);
+  }, [dispatch, library.selected, runtime, selectCurrentChart]);
 
   const onSelectDataset = useCallback((datasetId: string) => {
     const dataset = library.datasets.find((entry) => entry.dataset_id === datasetId);
@@ -396,7 +388,9 @@ export default function StrategyResearchApp({
     source,
     libraryEnabled: runtime.libraryEnabled,
     libraryOpen: state.source.libraryOpen,
+    currentChartEnabled: runtime.runtimeMode !== "LOCAL_OFFLINE",
     onOpenLibrary: () => dispatch({ type: "source/libraryOpen", open: true }),
+    onSelectCurrentChart: selectCurrentChart,
     pageExportRef,
     controls,
     runtimeMode: runtime.runtimeMode,
@@ -510,7 +504,18 @@ export default function StrategyResearchApp({
       intervalSelector={null}
       toolbar={null}
       exportOverlay={null}
-      chart={source?.kind === "CURRENT_CHART" ? <p>{t("strategy.chartSlot")}</p> : <EmptyImportedChart />}
+      chart={
+        source?.kind === "CURRENT_CHART" && researchRun.session !== null
+          ? <StrategyResearchCurrentChart session={researchRun.session} />
+          : (
+            <StrategyResearchFirstOpen
+              libraryEnabled={runtime.libraryEnabled}
+              currentChartEnabled={runtime.runtimeMode !== "LOCAL_OFFLINE"}
+              onSelectCurrentChart={selectCurrentChart}
+              onOpenLibrary={() => dispatch({ type: "source/libraryOpen", open: true })}
+            />
+          )
+      }
       analysis={null}
     />
   );

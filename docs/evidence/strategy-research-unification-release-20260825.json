@@ -30,7 +30,7 @@
     "architecture": { "result": "PASS" },
     "strategyResearchSmoke": { "result": "PASS" },
     "build": { "result": "PASS" },
-    "localOfflineSoak60m": { "result": "PASS", "cycles": 711, "elapsedMs": 3600131 },
+    "localOfflineSoak60m": { "result": "ENV_STOP", "cycles": 711, "elapsedMs": 3600131, "note": "API cycles only; live chart browser false" },
     "securityMatrix": { "result": "PASS" },
     "dualFlagRollback": { "result": "PASS" },
     "fullBackendPytest": { "result": "FAIL", "note": "failure cluster near 58-65 percent then hang" },
@@ -87,7 +87,7 @@
     {
       "kind": "strategy-research-unification-phase-12-soak-20260825.json",
       "path": "docs/evidence/strategy-research-unification-phase-12-soak-20260825.json",
-      "sha256": "ca7b38efee2a775de5cde4555da331d69f8ea39d5bf083c9fc9f34faf734204e"
+      "sha256": "8bdf83f5939b60adfdbedcfed195496abf2cba5db1dbc9bc3441639366dbe33c"
     },
     {
       "kind": "strategy-research-unification-release.schema.json",

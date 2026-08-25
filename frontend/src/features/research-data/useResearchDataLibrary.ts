@@ -61,7 +61,6 @@ export function useResearchDataLibrary() {
 
   useEffect(() => {
     const controller = new AbortController();
-    setLoadingLibrary(true);
     Promise.all([
       listLocalDatasets(controller.signal),
       fetchLocalIndicatorPresets(controller.signal),
@@ -82,7 +81,7 @@ export function useResearchDataLibrary() {
     [datasets, selectedId],
   );
 
-  const handleImport = useCallback(async (input: ResearchImportSubmitInput) => {
+  const handleImport = useCallback(async (input: ResearchImportSubmitInput): Promise<LocalDatasetManifest | null> => {
     setImporting(true);
     setImportJob(null);
     setUploadProgress(0);
@@ -105,15 +104,18 @@ export function useResearchDataLibrary() {
       });
       if (job.status === "completed" && job.dataset !== null) {
         await refresh(job.dataset.dataset_id);
-      } else if (job.status !== "cancelled") {
+        return job.dataset;
+      }
+      if (job.status !== "cancelled") {
         throw new LocalDataApiError(
           job.error?.message ?? t("local.importFailed"),
           422,
           job.error?.code ?? "import_failed",
         );
       }
+      return null;
     } catch (reason) {
-      if (reason instanceof DOMException && reason.name === "AbortError") return;
+      if (reason instanceof DOMException && reason.name === "AbortError") return null;
       setError(researchLibraryErrorMessage(reason));
       throw reason;
     } finally {

@@ -37,9 +37,13 @@ import {
   ImportedDatasetIntervalStrip,
   StrategyResearchImportedWorkspace,
 } from "./StrategyResearchChart.js";
-import { StrategyResearchCurrentChart, currentChartSource } from "./StrategyResearchCurrentChart.js";
+import { StrategyResearchCurrentChart } from "./StrategyResearchCurrentChart.js";
 import { StrategyResearchFirstOpen } from "./StrategyResearchFirstOpen.js";
-import { importedDatasetSourceFromManifest } from "./importedDatasetSource.js";
+import {
+  importedDatasetSourceFromManifest,
+  importedManifestForSource,
+  preferredLibrarySelectedId,
+} from "./importedDatasetSource.js";
 import { StrategyResearchRuntime } from "./StrategyResearchRuntime.js";
 import { StrategyResearchResultPanel } from "./StrategyResearchResultPanel.js";
 import { StrategyResearchScriptPanel } from "./StrategyResearchScriptPanel.js";
@@ -53,7 +57,6 @@ import { MarketDataWorkspaceProvider } from "../market-data/MarketDataWorkspaceP
 
 const BacktestResearchApp = lazy(() => import("../backtest/research/BacktestResearchApp.js"));
 import {
-  parseStrategyResearchLaunch,
   strategyResearchDeepLinkSearch,
   strategyResearchLaunchActions,
   strategyResearchVisualState,
@@ -114,43 +117,54 @@ export default function StrategyResearchApp({
   const pageExportRef = useRef<HTMLDivElement | null>(null);
   const { settings, setSettings, resolvedTheme } = useChartSettingsRuntime();
   const library = useResearchDataLibrary();
-  const runtimeRef = useRef<StrategyResearchRuntime | null>(null);
-  if (runtimeRef.current === null) {
-    runtimeRef.current = new StrategyResearchRuntime({
+  const [runtime] = useState(() => {
+    const created = new StrategyResearchRuntime({
       libraryEnabled,
       restoreWorkspace: intent.kind === "restore",
     });
     for (const action of strategyResearchLaunchActions(intent)) {
-      runtimeRef.current.dispatch(action);
+      created.dispatch(action);
     }
-  }
-  const runtime = runtimeRef.current;
+    return created;
+  });
   const [, bump] = useReducer((value: number) => value + 1, 0);
   const state: StrategyResearchState = runtime.state;
   const visualState = strategyResearchVisualState(intent, state);
   const dispatch = useCallback((action: Parameters<StrategyResearchRuntime["dispatch"]>[0]) => {
+    const previous = runtime.state;
     runtime.dispatch(action);
-    bump();
+    if (runtime.state !== previous) bump();
   }, [runtime]);
 
   const launchImported = intent.kind === "imported" || intent.kind === "import";
   const source = state.source.source;
+  const launchImportedBoundRef = useRef(source?.kind === "IMPORTED_DATASET");
+  const {
+    datasets: libraryDatasets,
+    loadingLibrary: libraryLoading,
+    selectedId: librarySelectedId,
+    setSelectedId: setLibrarySelectedId,
+  } = library;
 
   useEffect(() => {
-    if (library.loadingLibrary) return;
-    if (source?.kind !== "IMPORTED_DATASET") return;
-    if (library.selectedId === source.datasetId) return;
-    if (library.datasets.some((dataset) => dataset.dataset_id === source.datasetId)) {
-      library.setSelectedId(source.datasetId);
+    if (libraryLoading) return;
+    const preferred = preferredLibrarySelectedId(source, libraryDatasets);
+    if (preferred !== null && preferred !== librarySelectedId) {
+      setLibrarySelectedId(preferred);
     }
-  }, [library.datasets, library.loadingLibrary, library.selectedId, library.setSelectedId, source]);
+  }, [libraryDatasets, libraryLoading, librarySelectedId, setLibrarySelectedId, source]);
 
   useEffect(() => {
-    const selected = library.selected;
-    if (selected === null) return;
-    if (source?.kind !== "IMPORTED_DATASET" && !launchImported) return;
-    dispatchImportedSource(dispatch, source, selected);
-  }, [dispatch, launchImported, library.selected, source]);
+    if (library.loadingLibrary || launchImportedBoundRef.current) return;
+    if (!launchImported) return;
+    if (source !== null) {
+      launchImportedBoundRef.current = true;
+      return;
+    }
+    if (library.selected === null) return;
+    launchImportedBoundRef.current = true;
+    dispatchImportedSource(dispatch, source, library.selected);
+  }, [dispatch, launchImported, library.loadingLibrary, library.selected, source]);
 
   const [networkDiagnostics, setNetworkDiagnostics] = useState<StrategyResearchNetworkDiagnostics | null>(null);
 
@@ -168,20 +182,18 @@ export default function StrategyResearchApp({
   }, [runtime]);
 
   const selectCurrentChart = useCallback(() => {
-    if (runtime.runtimeMode === "LOCAL_OFFLINE") return;
-    dispatch({ type: "source/select", source: currentChartSource() });
-  }, [dispatch, runtime]);
+    return;
+  }, []);
 
   const onSelectKind = useCallback((kind: ResearchSourceKind) => {
     if (kind === "CURRENT_CHART") {
-      selectCurrentChart();
       return;
     }
     dispatch({ type: "source/libraryOpen", open: true });
     if (kind === "IMPORTED_DATASET" && library.selected !== null) {
       dispatchImportedSource(dispatch, runtime.state.source.source, library.selected);
     }
-  }, [dispatch, library.selected, runtime, selectCurrentChart]);
+  }, [dispatch, library.selected, runtime]);
 
   const onSelectDataset = useCallback((datasetId: string) => {
     const dataset = library.datasets.find((entry) => entry.dataset_id === datasetId);
@@ -189,11 +201,7 @@ export default function StrategyResearchApp({
     dispatchImportedSource(dispatch, runtime.state.source.source, dataset);
   }, [dispatch, library.datasets, runtime]);
 
-  const importedManifest = source?.kind === "IMPORTED_DATASET"
-    && library.selected !== null
-    && library.selected.dataset_id === source.datasetId
-    ? library.selected
-    : null;
+  const importedManifest = importedManifestForSource(source, library.selected);
 
   const { intervalScope, selectedInterval, handleIntervalSelect } = useLocalIntervalSelection(
     importedManifest,
@@ -216,30 +224,47 @@ export default function StrategyResearchApp({
     () => EMPTY_LOCAL_ANALYSIS_SNAPSHOT,
   );
 
-  const [indicatorPanelOpen, setIndicatorPanelOpen] = useState(false);
-  const [activeIndicatorCount, setActiveIndicatorCount] = useState(0);
+  const chartUiScope = importedManifest === null
+    ? ""
+    : `${importedManifest.dataset_id}:${importedManifest.data_epoch}:${selectedInterval ?? ""}`;
+  const [indicatorPanel, setIndicatorPanel] = useState({ scope: "", open: false });
+  const [indicatorCount, setIndicatorCount] = useState({ scope: "", count: 0 });
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [lastCrosshair, setLastCrosshair] = useState<MainSeriesCrosshairValue | null>(null);
-  const [focusRequest, setFocusRequest] = useState<LocalAnalysisFocusRequest | null>(null);
-
-  useEffect(() => {
-    setLastCrosshair(null);
-    setFocusRequest(null);
-    setIndicatorPanelOpen(false);
-    setActiveIndicatorCount(0);
-  }, [importedManifest?.data_epoch, importedManifest?.dataset_id]);
-
-  useEffect(() => {
-    setLastCrosshair(null);
-    setFocusRequest(null);
-  }, [selectedInterval]);
+  const [crosshair, setCrosshair] = useState<{
+    scope: string;
+    value: MainSeriesCrosshairValue | null;
+  }>({ scope: "", value: null });
+  const [focusedAnalysis, setFocusedAnalysis] = useState<{
+    scope: string;
+    value: LocalAnalysisFocusRequest | null;
+  }>({ scope: "", value: null });
+  const indicatorPanelOpen = indicatorPanel.scope === chartUiScope && indicatorPanel.open;
+  const activeIndicatorCount = indicatorCount.scope === chartUiScope ? indicatorCount.count : 0;
+  const lastCrosshair = crosshair.scope === chartUiScope ? crosshair.value : null;
+  const focusRequest = focusedAnalysis.scope === chartUiScope ? focusedAnalysis.value : null;
 
   const focusAnalysisEvent = useCallback((event: LocalAnalysisEvent) => {
-    setFocusRequest((current) => ({
-      requestId: (current?.requestId ?? 0) + 1,
-      time: event.time,
+    setFocusedAnalysis((current) => ({
+      scope: chartUiScope,
+      value: {
+        requestId: (current.scope === chartUiScope ? current.value?.requestId ?? 0 : 0) + 1,
+        time: event.time,
+      },
     }));
-  }, []);
+  }, [chartUiScope]);
+  const closeIndicatorPanel = useCallback(() => {
+    setIndicatorPanel({ scope: chartUiScope, open: false });
+  }, [chartUiScope]);
+  const handleCrosshairMove = useCallback((value: MainSeriesCrosshairValue | null) => {
+    if (value !== null) setCrosshair({ scope: chartUiScope, value });
+  }, [chartUiScope]);
+  const handleActiveIndicatorCountChange = useCallback((count: number) => {
+    setIndicatorCount((current) => (
+      current.scope === chartUiScope && current.count === count
+        ? current
+        : { scope: chartUiScope, count }
+    ));
+  }, [chartUiScope]);
 
   const capabilities = useMemo(
     () => (source ? runtime.capabilitiesFor(source.kind) : runtime.capabilitiesFor("IMPORTED_DATASET")),
@@ -248,12 +273,23 @@ export default function StrategyResearchApp({
 
   const scriptDraft = state.script.draftId;
   const analysisEvents = importedManifest === null ? [] : analysisSnapshot.events;
+  const handleRunId = useCallback((runId: string | null) => {
+    dispatch({ type: "result/setRun", runId });
+  }, [dispatch]);
+  const handleDraftId = useCallback((draftId: string | null) => {
+    dispatch({ type: "script/setDraft", draftId });
+  }, [dispatch]);
+  const handleDraftRevision = useCallback((revision: number) => {
+    dispatch({ type: "script/setContentRevision", revision });
+  }, [dispatch]);
   const researchRun = useStrategyResearchRun({
     source,
     imported: importedManifest,
     interval: selectedInterval,
     runtimeMode: runtime.runtimeMode,
-    onRunId: (runId) => dispatch({ type: "result/setRun", runId }),
+    draftId: state.script.draftId,
+    draftContentRevision: state.script.contentRevision,
+    onRunId: handleRunId,
   });
   const [advancedError, setAdvancedError] = useState<string | null>(null);
   const openAdvanced = useCallback(() => {
@@ -292,6 +328,10 @@ export default function StrategyResearchApp({
         events={analysisEvents}
         onSelectKind={onSelectKind}
         onSelectDataset={onSelectDataset}
+        onImport={async (input) => {
+          const dataset = await library.handleImport(input);
+          if (dataset) dispatchImportedSource(dispatch, runtime.state.source.source, dataset);
+        }}
         onClose={() => dispatch({ type: "source/libraryOpen", open: false })}
       />
     </StrategyResearchDrawerBoundary>
@@ -306,7 +346,8 @@ export default function StrategyResearchApp({
         barOnly={researchRun.barOnly}
         runStatus={researchRun.runStatus}
         needsData={researchRun.needsData}
-        onDraftId={(draftId) => dispatch({ type: "script/setDraft", draftId })}
+        onDraftId={handleDraftId}
+        onDraftRevision={handleDraftRevision}
         onRun={researchRun.onRun}
         onConfirmNeedsData={researchRun.onConfirmNeedsData}
         onOpenAdvanced={openAdvanced}
@@ -341,7 +382,7 @@ export default function StrategyResearchApp({
         type="button"
         className={`indicator-toggle-btn ${indicatorPanelOpen ? "active" : ""}`}
         disabled={importedManifest === null}
-        onClick={() => setIndicatorPanelOpen((open) => !open)}
+        onClick={() => setIndicatorPanel({ scope: chartUiScope, open: !indicatorPanelOpen })}
         title={t("shell.indicators")}
       >
         📊
@@ -388,7 +429,7 @@ export default function StrategyResearchApp({
     source,
     libraryEnabled: runtime.libraryEnabled,
     libraryOpen: state.source.libraryOpen,
-    currentChartEnabled: runtime.runtimeMode !== "LOCAL_OFFLINE",
+    currentChartEnabled: false,
     onOpenLibrary: () => dispatch({ type: "source/libraryOpen", open: true }),
     onSelectCurrentChart: selectCurrentChart,
     pageExportRef,
@@ -461,11 +502,9 @@ export default function StrategyResearchApp({
         eventStore={analysisStore}
         focusRequest={focusRequest}
         indicatorPanelOpen={indicatorPanelOpen}
-        onCloseIndicatorPanel={() => setIndicatorPanelOpen(false)}
-        onCrosshairMove={(value) => {
-          if (value !== null) setLastCrosshair(value);
-        }}
-        onActiveIndicatorCountChange={setActiveIndicatorCount}
+        onCloseIndicatorPanel={closeIndicatorPanel}
+        onCrosshairMove={handleCrosshairMove}
+        onActiveIndicatorCountChange={handleActiveIndicatorCountChange}
         pageExportRef={pageExportRef}
         settings={settings}
         onSettingsChange={setSettings}
@@ -505,13 +544,12 @@ export default function StrategyResearchApp({
       toolbar={null}
       exportOverlay={null}
       chart={
-        source?.kind === "CURRENT_CHART" && researchRun.session !== null
-          ? <StrategyResearchCurrentChart session={researchRun.session} />
+        source?.kind === "CURRENT_CHART"
+          ? <StrategyResearchCurrentChart />
           : (
             <StrategyResearchFirstOpen
               libraryEnabled={runtime.libraryEnabled}
-              currentChartEnabled={runtime.runtimeMode !== "LOCAL_OFFLINE"}
-              onSelectCurrentChart={selectCurrentChart}
+              runtimeMode={runtime.runtimeMode}
               onOpenLibrary={() => dispatch({ type: "source/libraryOpen", open: true })}
             />
           )
@@ -520,5 +558,3 @@ export default function StrategyResearchApp({
     />
   );
 }
-
-export { parseStrategyResearchLaunch };

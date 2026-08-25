@@ -73,6 +73,7 @@ def _service(tmp_path, builder: SignedMarketplaceBuilder):
         installer=installer,
         roots=(builder.root,),
         enabled=True,
+        now_provider=lambda: NOW,
     )
     installer.publisher_identity_resolver = lambda bundle: (
         service.bundle_trust(
@@ -355,6 +356,7 @@ def test_revocation_is_append_only_and_disables_without_deleting_installation(
         installer=installer,
         roots=(builder.root,),
         enabled=True,
+        now_provider=lambda: NOW,
     )
     first = service.import_index(
         builder.index_bytes(),
@@ -402,13 +404,13 @@ def test_expired_cache_cannot_authorize_offline_verified_activation(tmp_path) ->
     _installer, service = _service(tmp_path, builder)
     service.import_index(
         builder.index_bytes(
-            generated_at=datetime.now(UTC) - timedelta(days=1),
-            expires_at=datetime.now(UTC) + timedelta(seconds=1),
+            generated_at=NOW - timedelta(days=1),
+            expires_at=NOW + timedelta(seconds=1),
         ),
         marketplace_id=MARKETPLACE_ID,
     )
     current = service._indexes[MARKETPLACE_ID]
-    expired_at = datetime.now(UTC) - timedelta(seconds=1)
+    expired_at = NOW - timedelta(seconds=1)
     service._indexes[MARKETPLACE_ID] = replace(
         current,
         expires_at=expired_at.isoformat().replace("+00:00", "Z"),

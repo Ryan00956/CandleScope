@@ -616,6 +616,7 @@ class PluginMarketplaceService:
         architecture: str | None = None,
         rollout_stage: str | None = None,
         telemetry_enabled: bool | None = None,
+        now_provider: Callable[[], datetime] | None = None,
     ) -> None:
         self.root = Path(root).expanduser().resolve(strict=False)
         self.installer = installer
@@ -630,6 +631,7 @@ class PluginMarketplaceService:
         detected_os, detected_arch = host_platform()
         self.operating_system = operating_system or detected_os
         self.architecture = architecture or detected_arch
+        self._now = now_provider or (lambda: datetime.now(UTC))
         if self.operating_system not in {"windows", "linux", "macos"} or (
             self.architecture not in {"x86_64", "arm64"}
         ):
@@ -713,6 +715,7 @@ class PluginMarketplaceService:
                         data,
                         root=root,
                         allow_expired=True,
+                        now=self._now(),
                     )
                     if (
                         known.sequence != item["sequence"]
@@ -726,6 +729,7 @@ class PluginMarketplaceService:
                     indexes[marketplace_id] = verify_marketplace_index(
                         data,
                         root=root,
+                        now=self._now(),
                     )
                 except MarketplaceError as exc:
                     cache_errors[marketplace_id] = exc.code
@@ -763,7 +767,7 @@ class PluginMarketplaceService:
         *,
         now: datetime | None = None,
     ) -> dict[str, VerifiedMarketplaceIndex]:
-        current = now or datetime.now(UTC)
+        current = now or self._now()
         return {
             marketplace_id: index
             for marketplace_id, index in self._indexes.items()
@@ -1161,7 +1165,7 @@ class PluginMarketplaceService:
                 )
             release = valid_index.release_by_digest()[bundle.sha256]
             publisher = valid_index.publisher_by_id()[release.publisher_id]
-            if valid_index.is_revoked(release):
+            if valid_index.is_revoked(release, now=self._now()):
                 raise MarketplaceError(
                     "PLUGIN_MARKETPLACE_RELEASE_REVOKED",
                     "verified publisher release is revoked",
@@ -1350,7 +1354,7 @@ class PluginMarketplaceService:
                 "marketplace root is not build-pinned",
                 status_code=404,
             )
-        verified = verify_marketplace_index(data, root=root)
+        verified = verify_marketplace_index(data, root=root, now=self._now())
         with security_lock(self.lock_path):
             self.reload_cache()
             current = self._known_indexes.get(marketplace_id)
@@ -1431,7 +1435,7 @@ class PluginMarketplaceService:
             for release in index.releases
             if release.plugin_id == plugin_id
             and (version is None or release.version == version)
-            and not index.is_revoked(release)
+            and not index.is_revoked(release, now=self._now())
             and self._release_available_on_host(release)
         ]
         if not matches:
@@ -1972,12 +1976,12 @@ class PluginMarketplaceService:
                     continue
                 index, release = known
                 valid = current_indexes.get(index.marketplace_id)
-                blocked = valid is None or valid.is_revoked(release)
+                blocked = valid is None or valid.is_revoked(release, now=self._now())
                 if blocked:
                     result = self.installer.disable(record.plugin_id)
                     if result.changed:
                         changed.append(record.plugin_id)
-                    if valid is not None and valid.is_revoked(release):
+                    if valid is not None and valid.is_revoked(release, now=self._now()):
                         artifact = next(
                             item
                             for item in release.artifacts
@@ -1999,7 +2003,7 @@ class PluginMarketplaceService:
                     continue
                 index, release = known
                 valid = current_indexes.get(index.marketplace_id)
-                if valid is None or not valid.is_revoked(release):
+                if valid is None or not valid.is_revoked(release, now=self._now()):
                     continue
                 artifact = next(
                     item
@@ -2071,7 +2075,7 @@ class PluginMarketplaceService:
             if release.plugin_id == record.plugin_id
             and release.publisher_id == current_release.publisher_id
             and index.marketplace_id == current_index.marketplace_id
-            and not index.is_revoked(release)
+            and not index.is_revoked(release, now=self._now())
             and self._release_available_on_host(release)
             and _major(release.version) == _major(record.version)
             and _version_key(release.version) > _version_key(record.version)
@@ -2195,7 +2199,7 @@ class PluginMarketplaceService:
                 (
                     (index, release)
                     for index, release in releases
-                    if not index.is_revoked(release)
+                    if not index.is_revoked(release, now=self._now())
                     and self._release_available_on_host(release)
                 ),
                 None,
@@ -2214,7 +2218,7 @@ class PluginMarketplaceService:
                 "pluginId": plugin_id,
                 "publisher": publisher_wire,
                 "latest": latest.to_public_wire(
-                    revoked=latest_index.is_revoked(latest)
+                    revoked=latest_index.is_revoked(latest, now=self._now())
                 ),
                 "releaseCount": len(releases),
                 "installedVersion": (

@@ -18,7 +18,7 @@ export function ResearchDataImportForm({
   uploadProgress: number | null;
   selected: LocalDatasetManifest | null;
   onCancel(): void;
-  onImport(input: ResearchImportSubmitInput): Promise<void>;
+  onImport(input: ResearchImportSubmitInput): Promise<unknown>;
 }) {
   const [file, setFile] = useState<File | null>(null);
   const [name, setName] = useState("");

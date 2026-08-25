@@ -1,14 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import monarchCompile from "monaco-editor/editor/standalone/common/monarch/monarchCompile.js";
+import { compile } from "monaco-editor/editor/standalone/common/monarch/monarchCompile.js";
 
 import {
   configurePineHostCapabilities,
   registerPineLanguageSupport,
 } from "../src/editor/pineLanguage.ts";
-
-const { compile } = monarchCompile;
 
 test("Pine language registration compiles its Monarch tokenizer", () => {
   const registeredLanguages = [];

@@ -24,7 +24,7 @@ export function ResearchDatasetRail({
   importJob: LocalImportJob | null;
   uploadProgress: number | null;
   onSelect(datasetId: string): void;
-  onImport(input: ResearchImportSubmitInput): Promise<void>;
+  onImport(input: ResearchImportSubmitInput): Promise<unknown>;
   onCancelImport(): void;
   management: ReactNode;
   analysis: ReactNode;

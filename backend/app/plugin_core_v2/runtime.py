@@ -11,6 +11,7 @@ import sys
 import time
 import uuid
 from collections.abc import Callable, Iterable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -167,6 +168,7 @@ class CorePluginPlatform:
         marketplace_enabled: bool = False,
         marketplace_roots: Iterable[MarketplaceRoot] = (),
         marketplace_fetcher: MarketplaceFetcher | None = None,
+        marketplace_now_provider: Callable[[], datetime] | None = None,
         network_resolver: Any | None = None,
         network_transport: Any | None = None,
         multi_runtime_enabled: bool | None = None,
@@ -336,6 +338,7 @@ class CorePluginPlatform:
             enabled=marketplace_enabled,
             fetcher=marketplace_fetcher,
             managed_runtime_registry=managed_runtime_registry,
+            now_provider=marketplace_now_provider,
         )
         self.authority = CapabilityHandleAuthority(
             self.audit_log,

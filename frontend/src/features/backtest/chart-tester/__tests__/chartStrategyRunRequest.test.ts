@@ -424,6 +424,28 @@ test("imported data epoch change after preview fails before create", async () =>
   assert.equal(calls.includes("create"), false);
 });
 
+test("gapped imported windows are not READY and never create a Run", async () => {
+  const calls: string[] = [];
+  const outcome = await runResearchBacktest({
+    api: importedApi(calls),
+    request,
+    source: {
+      ...importedSource,
+      quality: qualitySummaryFromImportedManifest({
+        rows: 96,
+        excludedRangeCount: 2,
+        volumeAvailable: true,
+      }),
+    },
+    pollIntervalMs: 0,
+  });
+  assert.equal(outcome.kind, "UNSUPPORTED");
+  assert.equal(outcome.resolution.status, "UNAVAILABLE");
+  assert.equal(outcome.resolution.coverage.complete, false);
+  assert.equal(outcome.resolution.coverage.missing_ranges.length, 1);
+  assert.equal(calls.includes("create"), false);
+});
+
 test("imported precise fidelity is rejected as BAR_ONLY", async () => {
   await assert.rejects(
     () => runResearchBacktest({

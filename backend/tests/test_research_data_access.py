@@ -57,6 +57,18 @@ def test_access_matrix_loopback_and_forwards() -> None:
         forwarded_for="127.0.0.1",
     )
     assert spoofed.allowed is False
+    dns_label = evaluate_local_research_access(
+        client_host="127.0.0.1",
+        host_header="127.0.0.1:18080",
+        origin="http://127.attacker.example:15173",
+    )
+    assert dns_label.allowed is False
+    loopback_octet = evaluate_local_research_access(
+        client_host="127.0.0.2",
+        host_header="127.0.0.2:18080",
+        origin="http://127.0.0.2:15173",
+    )
+    assert loopback_octet.allowed is True
 
 
 def _app(tmp_path: Path) -> FastAPI:
@@ -188,3 +200,21 @@ def test_loopback_cli_without_origin_succeeds(tmp_path: Path) -> None:
     client = TestClient(PeerASGIApp(_app(tmp_path), "127.0.0.1"))
     response = client.get("/api/v1/local/datasets", headers={"host": "127.0.0.1:18080"})
     assert response.status_code == 200, response.text
+
+
+def test_capabilities_report_process_runtime_not_a_hardcoded_offline_profile(
+    tmp_path: Path,
+) -> None:
+    app = _app(tmp_path)
+    app.state.runtime_mode = "LIVE"
+    client = TestClient(PeerASGIApp(app, "127.0.0.1"))
+    live = client.get("/api/v1/local/capabilities", headers={"host": "127.0.0.1:18080"})
+    assert live.status_code == 200, live.text
+    assert live.json()["runtime_mode"] == "LIVE"
+    assert live.json()["network_policy"] == "trusted_local_origin"
+    app.state.runtime_mode = "LOCAL_OFFLINE"
+    app.state.local_offline_runtime = object()
+    offline = client.get("/api/v1/local/capabilities", headers={"host": "127.0.0.1:18080"})
+    assert offline.status_code == 200, offline.text
+    assert offline.json()["runtime_mode"] == "LOCAL_OFFLINE"
+    assert offline.json()["network_policy"] == "loopback_only"

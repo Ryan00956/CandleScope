@@ -18,6 +18,7 @@ export type StrategyResearchSourceSlice = {
 
 export type StrategyResearchScriptSlice = {
   draftId: string | null;
+  contentRevision: number;
 };
 
 export type StrategyResearchResultSlice = {
@@ -39,12 +40,13 @@ export type StrategyResearchAction =
   | { type: "source/libraryOpen"; open: boolean }
   | { type: "source/frozenPreview"; frozen: boolean }
   | { type: "script/setDraft"; draftId: string | null }
+  | { type: "script/setContentRevision"; revision: number }
   | { type: "result/setRun"; runId: string | null }
   | { type: "result/clear" };
 
 export const EMPTY_STRATEGY_RESEARCH_STATE: StrategyResearchState = {
   source: { source: null, previewFrozen: false, libraryOpen: false },
-  script: { draftId: null },
+  script: { draftId: null, contentRevision: 0 },
   result: { runId: null, stale: false, staleReason: null },
 };
 
@@ -81,9 +83,19 @@ export function strategyResearchReducer(
     case "source/frozenPreview":
       return { ...state, source: { ...state.source, previewFrozen: action.frozen } };
     case "script/setDraft":
+      if (state.script.draftId === action.draftId) return state;
       return {
         ...state,
-        script: { draftId: action.draftId },
+        script: { ...state.script, draftId: action.draftId, contentRevision: 0 },
+        result: state.result.runId
+          ? { ...state.result, stale: true, staleReason: "SCRIPT_CHANGED" }
+          : state.result,
+      };
+    case "script/setContentRevision":
+      if (state.script.contentRevision === action.revision) return state;
+      return {
+        ...state,
+        script: { ...state.script, contentRevision: action.revision },
         result: state.result.runId
           ? { ...state.result, stale: true, staleReason: "SCRIPT_CHANGED" }
           : state.result,
@@ -136,7 +148,7 @@ export function loadStrategyResearchWorkspace(): StrategyResearchState {
         previewFrozen: false,
         libraryOpen: record.libraryOpen === true,
       },
-      script: { draftId: typeof record.draftId === "string" ? record.draftId : null },
+      script: { draftId: typeof record.draftId === "string" ? record.draftId : null, contentRevision: 0 },
       result: {
         runId: typeof record.runId === "string" ? record.runId : null,
         stale: false,

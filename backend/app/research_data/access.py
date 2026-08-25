@@ -5,6 +5,7 @@ CORS is not authentication. X-Forwarded-For is never used to grant access.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -42,7 +43,10 @@ def _is_loopback_host(value: str | None) -> bool:
         host = host.split("%", 1)[0]
     if host in _LOOPBACK_HOSTS:
         return True
-    return host.startswith("127.")
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def _hostname(value: str | None) -> str:

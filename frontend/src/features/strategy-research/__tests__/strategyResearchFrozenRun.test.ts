@@ -61,6 +61,23 @@ test("imported session is local/spot and never requires the user to type dataset
   assert.equal(session?.exchange, "local");
   assert.equal(session?.marketType, "spot");
   assert.equal(session?.interval, "30m");
+  assert.equal(sessionFromResearchSource({
+    schemaVersion: "candlescope.research-source/1",
+    kind: "CURRENT_CHART",
+    workspaceId: "current",
+    cellId: "current",
+    exchange: "binance",
+    marketType: "spot",
+    symbol: "BTCUSDT",
+    interval: "1m",
+  }, null, "1m"), null);
+  assert.equal(sessionFromResearchSource({
+    schemaVersion: "candlescope.research-source/1",
+    kind: "IMPORTED_DATASET",
+    datasetId: "local-0123456789abcdef0123456789abcdef",
+    dataEpoch: `sha256:${"a".repeat(64)}`,
+    interval: "15m",
+  }, null, "15m"), null);
   const html = renderToStaticMarkup(
     React.createElement(StrategyResearchScriptPanel, {
       cellScope: "strategy-research",
@@ -70,6 +87,7 @@ test("imported session is local/spot and never requires the user to type dataset
       runStatus: "READY",
       needsData: false,
       onDraftId() {},
+      onDraftRevision() {},
       onRun() {},
       onConfirmNeedsData() {},
       onOpenAdvanced() {},

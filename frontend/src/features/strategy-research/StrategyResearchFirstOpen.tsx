@@ -3,15 +3,14 @@ import { CHART_STRATEGY_TEMPLATES } from "../backtest/chart-tester/chartStrategy
 
 export function StrategyResearchFirstOpen({
   libraryEnabled,
-  currentChartEnabled,
-  onSelectCurrentChart,
+  runtimeMode,
   onOpenLibrary,
 }: {
   libraryEnabled: boolean;
-  currentChartEnabled: boolean;
-  onSelectCurrentChart(): void;
+  runtimeMode: "LIVE" | "LOCAL_OFFLINE";
   onOpenLibrary(): void;
 }) {
+  const templateAction = libraryEnabled ? onOpenLibrary : undefined;
   return (
     <div className="strategy-research-first-open" data-testid="strategy-research-first-open">
       <p className="chart-strategy-eyebrow">{t("chartTester.startEyebrow")}</p>
@@ -23,20 +22,26 @@ export function StrategyResearchFirstOpen({
             key={template.id}
             type="button"
             data-testid={`strategy-research-template-${template.id}`}
-            onClick={onSelectCurrentChart}
+            disabled={templateAction === undefined}
+            onClick={templateAction ? () => templateAction() : undefined}
           >
             {t(template.nameKey)}
           </button>
         ))}
       </div>
       <div className="strategy-research-first-open-actions">
-        {currentChartEnabled ? (
-          <button type="button" data-testid="strategy-research-use-current-chart" onClick={onSelectCurrentChart}>
-            {t("strategy.useCurrentChart")}
-          </button>
-        ) : (
-          <p data-testid="strategy-research-current-chart-unavailable">{t("research.source.offlineLiveUnavailable")}</p>
-        )}
+        <div data-testid="strategy-research-current-chart-unavailable">
+          <p>
+            {runtimeMode === "LOCAL_OFFLINE"
+              ? t("research.source.offlineLiveUnavailable")
+              : t("strategy.currentChartUnbound")}
+          </p>
+          {runtimeMode === "LIVE" ? (
+            <a href="/" data-testid="strategy-research-open-market-tester">
+              {t("strategy.openMarketTester")}
+            </a>
+          ) : null}
+        </div>
         {libraryEnabled ? (
           <button type="button" data-testid="strategy-research-import-own-data" onClick={onOpenLibrary}>
             {t("research.source.openLibrary")}

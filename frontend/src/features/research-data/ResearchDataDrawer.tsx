@@ -6,7 +6,7 @@ import type { ResearchCapabilitySummaryV1, ResearchRuntimeMode, ResearchSourceKi
 import { RESEARCH_DATA_LIBRARY_ENABLED } from "./researchDataFlags.js";
 import { ResearchDatasetRail } from "./ResearchDatasetRail.js";
 import { ResearchDatasetManagement } from "./ResearchDatasetManagement.js";
-import type { ResearchDataLibraryController } from "./useResearchDataLibrary.js";
+import type { ResearchDataLibraryController, ResearchImportSubmitInput } from "./useResearchDataLibrary.js";
 import type { ChartSettings } from "../settings/chartAppearanceSettings.js";
 import type { LocalAnalysisEvent } from "../local-data/localAnalysisTypes.js";
 
@@ -15,12 +15,14 @@ export function ResearchDataDrawer(props: {
   runtimeMode: ResearchRuntimeMode;
   capabilities: ResearchCapabilitySummaryV1 | null;
   libraryEnabled?: boolean;
+  currentChartEnabled?: boolean;
   library?: ResearchDataLibraryController;
   settings: ChartSettings;
   events: readonly LocalAnalysisEvent[];
   analysis?: ReactNode;
   onSelectKind(kind: ResearchSourceKind): void;
   onSelectDataset?(datasetId: string): void;
+  onImport?(input: ResearchImportSubmitInput): Promise<unknown>;
   onClose(): void;
 }) {
   if (!props.open) return null;
@@ -31,24 +33,28 @@ function ResearchDataDrawerBody({
   runtimeMode,
   capabilities,
   libraryEnabled = RESEARCH_DATA_LIBRARY_ENABLED,
+  currentChartEnabled = false,
   library,
   settings,
   events,
   analysis = null,
   onSelectKind,
   onSelectDataset,
+  onImport,
   onClose,
 }: {
   open: boolean;
   runtimeMode: ResearchRuntimeMode;
   capabilities: ResearchCapabilitySummaryV1 | null;
   libraryEnabled?: boolean;
+  currentChartEnabled?: boolean;
   library?: ResearchDataLibraryController;
   settings: ChartSettings;
   events: readonly LocalAnalysisEvent[];
   analysis?: ReactNode;
   onSelectKind(kind: ResearchSourceKind): void;
   onSelectDataset?(datasetId: string): void;
+  onImport?(input: ResearchImportSubmitInput): Promise<unknown>;
   onClose(): void;
 }) {
   const kinds: ResearchSourceKind[] = ["CURRENT_CHART", "IMPORTED_DATASET", "COMPLETED_RUN"];
@@ -62,9 +68,11 @@ function ResearchDataDrawerBody({
         {kinds.map((kind) => {
           const hideImport = kind === "IMPORTED_DATASET" && !libraryEnabled;
           if (hideImport) return null;
-          const runnable = kind !== "CURRENT_CHART" || runtimeMode !== "LOCAL_OFFLINE";
-          const reason = !runnable
-            ? t("research.source.offlineLiveUnavailable")
+          const runnable = kind !== "CURRENT_CHART" || currentChartEnabled;
+          const reason = kind === "CURRENT_CHART" && !runnable
+            ? runtimeMode === "LOCAL_OFFLINE"
+              ? t("research.source.offlineLiveUnavailable")
+              : t("strategy.currentChartUnbound")
             : capabilities && !isCapabilityAvailable(capabilities, "barApprox") && kind === capabilities.sourceKind
               ? t("research.source.liveOffline")
               : null;
@@ -93,7 +101,7 @@ function ResearchDataDrawerBody({
             library.setSelectedId(datasetId);
             onSelectDataset?.(datasetId);
           }}
-          onImport={library.handleImport}
+          onImport={onImport ?? library.handleImport}
           onCancelImport={library.cancelImport}
           management={(
             <ResearchDatasetManagement

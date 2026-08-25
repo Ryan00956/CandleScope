@@ -24,17 +24,6 @@ const imported: ResearchSourceRefV1 = {
   interval: "15m",
 };
 
-const chart: ResearchSourceRefV1 = {
-  schemaVersion: "candlescope.research-source/1",
-  kind: "CURRENT_CHART",
-  workspaceId: "ws",
-  cellId: "cell-1",
-  exchange: "binance",
-  marketType: "spot",
-  symbol: "BTCUSDT",
-  interval: "1h",
-};
-
 const settings = {
   upColor: "#0f0",
   downColor: "#f00",
@@ -49,6 +38,19 @@ test("source, script, and result stay independent slices", () => {
   state = strategyResearchReducer(state, { type: "script/setDraft", draftId: "draft-1" });
   assert.equal(state.source.source?.kind, "IMPORTED_DATASET");
   assert.equal(state.result.runId, null);
+});
+
+test("editor content revision stales a completed run without rewriting the draft id", () => {
+  let state = EMPTY_STRATEGY_RESEARCH_STATE;
+  state = strategyResearchReducer(state, { type: "script/setDraft", draftId: "draft-1" });
+  state = strategyResearchReducer(state, { type: "result/setRun", runId: "bt_1" });
+  const sameDraft = strategyResearchReducer(state, { type: "script/setDraft", draftId: "draft-1" });
+  assert.equal(sameDraft.result.stale, false);
+  const edited = strategyResearchReducer(state, { type: "script/setContentRevision", revision: 42 });
+  assert.equal(edited.script.draftId, "draft-1");
+  assert.equal(edited.script.contentRevision, 42);
+  assert.equal(edited.result.stale, true);
+  assert.equal(edited.result.staleReason, "SCRIPT_CHANGED");
 });
 
 test("viewing data does not create a run", () => {
@@ -104,7 +106,13 @@ test("malformed localStorage fails closed without clearing the key", () => {
   }
 });
 
-test("LOCAL_OFFLINE hides runnable current chart with a reason", () => {
+test("this workspace never treats current chart as runnable", () => {
+  const live = new StrategyResearchRuntime({
+    restoreWorkspace: false,
+    runtimeMode: "LIVE",
+    libraryEnabled: true,
+  });
+  assert.equal(live.currentChartRunnable(), false);
   const runtime = new StrategyResearchRuntime({
     restoreWorkspace: false,
     runtimeMode: "LOCAL_OFFLINE",
@@ -125,6 +133,19 @@ test("LOCAL_OFFLINE hides runnable current chart with a reason", () => {
   );
   assert.match(html, /research-source-card-CURRENT_CHART/);
   assert.match(html, /disabled/);
+  const liveDrawer = renderToStaticMarkup(
+    React.createElement(ResearchDataDrawer, {
+      open: true,
+      runtimeMode: "LIVE",
+      capabilities: live.capabilitiesFor("CURRENT_CHART"),
+      libraryEnabled: true,
+      settings,
+      events: [],
+      onSelectKind() {},
+      onClose() {},
+    }),
+  );
+  assert.match(liveDrawer, /disabled/);
   assert.doesNotMatch(html.toLowerCase(), /dataset id|data epoch|snapshot hash/);
 });
 

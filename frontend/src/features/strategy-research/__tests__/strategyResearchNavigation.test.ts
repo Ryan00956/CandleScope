@@ -111,6 +111,7 @@ test("ordinary script panel exposes advanced research without internal identity 
       runStatus: "READY",
       needsData: false,
       onDraftId() {},
+      onDraftRevision() {},
       onRun() {},
       onConfirmNeedsData() {},
       onOpenAdvanced() {},

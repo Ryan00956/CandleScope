@@ -14,7 +14,7 @@ from starlette.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from app.api.v1.indicators import _spec_to_preset
-from app.core.config import LOCAL_DATA_MAX_UPLOAD_BYTES
+from app.core.config import LOCAL_DATA_MAX_UPLOAD_BYTES, RUNTIME_MODE
 from app.research_data.access import require_local_research_access
 from app.indicator import registry
 from app.local_data import (
@@ -140,12 +140,25 @@ async def _receive_upload(
     return size
 
 
+def _runtime_mode(request: Request) -> str:
+    raw = str(getattr(request.app.state, "runtime_mode", RUNTIME_MODE) or RUNTIME_MODE)
+    return raw if raw in {"LIVE", "LOCAL_OFFLINE"} else RUNTIME_MODE
+
+
+def _network_policy(request: Request) -> str:
+    if getattr(request.app.state, "local_offline_runtime", None) is not None:
+        return "loopback_only"
+    if _runtime_mode(request) == "LOCAL_OFFLINE":
+        return "loopback_only"
+    return "trusted_local_origin"
+
+
 @router.get("/capabilities")
 async def capabilities(request: Request) -> dict[str, Any]:
     service = _service(request)
     return {
-        "runtime_mode": "LOCAL_OFFLINE",
-        "network_policy": "loopback_only",
+        "runtime_mode": _runtime_mode(request),
+        "network_policy": _network_policy(request),
         "import_formats": ["csv", "contract-history-v1"],
         "ohlc_only": True,
         "missing_volume_semantics": "unavailable_never_zero",

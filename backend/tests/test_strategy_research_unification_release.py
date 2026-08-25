@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 import os
+import runpy
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 BACKEND = ROOT / "backend"
@@ -69,3 +72,86 @@ def test_verifier_script_exists_and_requires_default_off_flags() -> None:
     assert "libraryFlagsDefaultOff" in verifier
     assert schema["properties"]["effectiveFlags"]["properties"]["CANDLESCOPE_RESEARCH_DATA_LIBRARY_ENABLED"]["const"] == "0"
     assert schema["properties"]["scope"]["properties"]["oldWorktreeDeleted"]["const"] is False
+
+
+def test_verifier_accepts_only_evidence_after_a_clean_candidate(tmp_path: Path) -> None:
+    verifier_path = BACKEND / "scripts" / "verify_strategy_research_unification.py"
+    verify = runpy.run_path(str(verifier_path))["verify"]
+    repository = tmp_path / "repository"
+    metadata = tmp_path / "metadata"
+    repository.mkdir()
+    metadata.mkdir()
+
+    def git(*args: str) -> str:
+        completed = subprocess.run(
+            ["git", *args],
+            cwd=repository,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return completed.stdout.strip()
+
+    git("init")
+    git("config", "user.name", "CandleScope Tests")
+    git("config", "user.email", "tests@candlescope.invalid")
+    config = repository / "backend" / "app" / "core" / "config.py"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        'RESEARCH_DATA_LIBRARY_ENABLED = _parse_strict_flag(\n'
+        '    "CANDLESCOPE_RESEARCH_DATA_LIBRARY_ENABLED",\n'
+        '    "0",\n'
+        ')\n',
+        encoding="utf-8",
+    )
+    flags = repository / "frontend" / "src" / "features" / "research-data" / "researchDataFlags.ts"
+    flags.parent.mkdir(parents=True)
+    flags.write_text('return raw === true || raw === 1 || raw === "1";\n', encoding="utf-8")
+    git("add", ".")
+    git("commit", "-m", "candidate")
+    candidate = git("rev-parse", "HEAD")
+
+    manifest = {
+        "candidateSha": candidate,
+        "effectiveFlags": {name: "0" for name in (
+            "CANDLESCOPE_RESEARCH_DATA_LIBRARY_ENABLED",
+            "VITE_RESEARCH_DATA_LIBRARY_ENABLED",
+        )},
+        "legacyWorktree": {"deleted": False},
+        "scope": {
+            "oldWorktreeDeleted": False,
+            "push": False,
+            "merge": False,
+            "deploy": False,
+            "productionFlagsChanged": False,
+        },
+        "phaseCommits": {
+            f"phase{index}": {"sha": candidate, "subject": "candidate"}
+            for index in range(13)
+        },
+        "artifactPaths": [],
+    }
+    manifest_path = metadata / "manifest.json"
+    schema_path = metadata / "schema.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    schema_path.write_text("{}", encoding="utf-8")
+
+    evidence = repository / "docs" / "evidence" / "result.md"
+    evidence.parent.mkdir(parents=True)
+    evidence.write_text("qualified\n", encoding="utf-8")
+    git("add", ".")
+    git("commit", "-m", "evidence")
+    assert verify(manifest_path, schema_path, repository)["status"] == "PASS"
+
+    code = repository / "frontend" / "src" / "app.ts"
+    code.parent.mkdir(parents=True, exist_ok=True)
+    code.write_text("export {};\n", encoding="utf-8")
+    git("add", ".")
+    git("commit", "-m", "late code")
+    with pytest.raises(RuntimeError, match="code changed after the release candidate"):
+        verify(manifest_path, schema_path, repository)
+
+    dirty = repository / "dirty.txt"
+    dirty.write_text("dirty\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="clean worktree"):
+        verify(manifest_path, schema_path, repository)

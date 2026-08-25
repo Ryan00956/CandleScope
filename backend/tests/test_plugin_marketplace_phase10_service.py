@@ -20,6 +20,8 @@ from tests.plugin_marketplace_phase10_testkit import SignedMarketplaceV2Builder
 from tests.plugin_marketplace_testkit import MARKETPLACE_ID, build_marketplace_bundle
 from tests.plugin_platform_bundle_testkit import build_scheduled_notification_bundle
 
+NOW = datetime(2026, 8, 3, 1, 0, tzinfo=UTC)
+
 
 def _service(
     tmp_path,
@@ -38,6 +40,7 @@ def _service(
         architecture="x86_64",
         rollout_stage=rollout_stage,
         telemetry_enabled=telemetry_enabled,
+        now_provider=lambda: NOW,
     )
 
 

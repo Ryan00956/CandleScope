@@ -1,12 +1,14 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import process from 'node:process'
+import { realpathSync } from 'node:fs'
 import { Agent as HttpAgent } from 'node:http'
 import { Agent as HttpsAgent } from 'node:https'
 import { resolve } from 'node:path'
 
 const apiProxyTarget = process.env.VITE_API_PROXY_TARGET || 'http://127.0.0.1:18080'
 const devServerPort = Number(process.env.VITE_DEV_PORT || 15173)
+const dependencyRoot = realpathSync(resolve(import.meta.dirname, 'node_modules'))
 const replaySoakProjectionEnabled = process.env.VITE_REPLAY_SOAK_PROJECTION_ENABLED === '1'
 // The upstream owns its keep-alive deadline (Uvicorn defaults to five seconds),
 // while Vite has no authoritative view of that deadline. Reusing a socket at
@@ -73,6 +75,12 @@ export default defineConfig({
     host: '127.0.0.1',
     port: devServerPort,
     strictPort: true,
+    // Git worktrees may share node_modules through a junction. Vite resolves
+    // font assets to that junction's real path, so explicitly allow only the
+    // frontend root and the resolved dependency root.
+    fs: {
+      allow: [import.meta.dirname, dependencyRoot],
+    },
     proxy: buildApiProxy(),
   },
   preview: {

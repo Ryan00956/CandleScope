@@ -103,4 +103,7 @@ test("offline live materialize is rejected before a network resolve", () => {
   assert.match(runSource, /LOCAL_OFFLINE/);
   assert.match(runSource, /OFFLINE_LIVE_SOURCE_UNAVAILABLE/);
   assert.match(runSource, /materialize/);
+  assert.match(runSource, /CURRENT_CHART_UNBOUND/);
+  assert.match(runSource, /trackAbortController/);
+  assert.match(runSource, /draftContentRevision/);
 });

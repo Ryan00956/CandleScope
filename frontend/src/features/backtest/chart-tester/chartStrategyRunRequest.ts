@@ -437,9 +437,10 @@ function resolutionFromImportedPreview(input: {
   const capabilities = (input.preview.fidelity_capabilities ?? []).includes("BAR_APPROX")
     ? ["BAR_APPROX"]
     : ["BAR_APPROX"];
+  const gapped = input.source.quality.status === "gap";
   return {
     schema_version: "candlescope.backtest-chart-context/1",
-    status: "READY",
+    status: gapped ? "UNAVAILABLE" : "READY",
     resolution_token: `imported-${input.source.datasetId}`.padEnd(16, "0"),
     chart_context_hash: input.preview.snapshot_hash,
     expires_at_ms: Date.now() + 3_600_000,
@@ -462,8 +463,15 @@ function resolutionFromImportedPreview(input: {
       available_start_ms: input.preview.coverage_start_ms,
       available_end_ms: input.preview.coverage_end_ms,
       row_count: input.preview.row_count,
-      missing_ranges: [],
-      complete: true,
+      missing_ranges: gapped
+        ? [{
+          start_ms: input.source.startTimeMs,
+          end_ms: input.source.endTimeMs,
+          reason: "DATA_GAP",
+          missing_bars: input.source.quality.excludedRangeCount,
+        }]
+        : [],
+      complete: !gapped,
     },
     fidelity: {
       preference: "FAST",
@@ -575,12 +583,15 @@ export async function runResearchBacktest(options: {
     options.onStage?.("RESOLVING");
     const preview = await previewImportedSnapshot(options.api, options.source, options.signal);
     resolution = resolutionFromImportedPreview({ source: options.source, frozen, preview });
+    options.onResolution?.(resolution);
+    if (resolution.status !== "READY" || !resolution.coverage.complete) {
+      return { kind: "UNSUPPORTED", frozen, revision, resolution, frozenContext: null };
+    }
     frozenContext = await assembleFrozenContextFromResolution(
       "IMPORTED_DATASET",
       resolution,
       options.source.quality,
     );
-    options.onResolution?.(resolution);
   } else {
     const contextRequest = chartContextRequestForFrozen(frozen);
     if (options.source.materializeResolution) {

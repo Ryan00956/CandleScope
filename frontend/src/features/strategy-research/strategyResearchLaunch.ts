@@ -4,7 +4,6 @@ import {
   type BacktestResearchEntry,
 } from "../backtest/backtestDeepLink.js";
 import type { ResearchSourceRefV1 } from "../research-data/researchDataTypes.js";
-import { currentChartSource } from "./StrategyResearchCurrentChart.js";
 
 export type StrategyResearchPage = "strategy" | "local" | "backtest";
 
@@ -88,7 +87,7 @@ export function strategyResearchLaunchActions(
   | { type: "result/setRun"; runId: string }
 > {
   if (intent.kind === "chart") {
-    return [{ type: "source/select", source: currentChartSource() }];
+    return [];
   }
   if (intent.kind === "imported" || intent.kind === "import") {
     return [{ type: "source/libraryOpen", open: true }];

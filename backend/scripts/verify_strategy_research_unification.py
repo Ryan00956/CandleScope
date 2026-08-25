@@ -12,6 +12,7 @@ REQUIRED_FLAGS = (
     "VITE_RESEARCH_DATA_LIBRARY_ENABLED",
 )
 PHASE_KEYS = tuple(f"phase{index}" for index in range(13))
+RELEASE_EVIDENCE_PREFIX = "docs/evidence/"
 
 
 def _sha256(path: Path) -> str:
@@ -24,6 +25,24 @@ def _sha256(path: Path) -> str:
 
 def _git(*args: str, cwd: Path) -> str:
     return subprocess.check_output(["git", *args], cwd=cwd, text=True, encoding="utf-8").strip()
+
+
+def _is_release_evidence_path(value: str) -> bool:
+    return value.replace("\\", "/").startswith(RELEASE_EVIDENCE_PREFIX)
+
+
+def _require_clean_worktree(repository: Path) -> None:
+    status = _git("status", "--porcelain", "--untracked-files=all", cwd=repository)
+    if status:
+        raise RuntimeError("release verification requires a clean worktree")
+
+
+def _require_candidate_code_unchanged(candidate: str, head: str, repository: Path) -> None:
+    changed = _git("diff", "--name-only", f"{candidate}..{head}", cwd=repository).splitlines()
+    non_evidence = [path for path in changed if not _is_release_evidence_path(path)]
+    if non_evidence:
+        joined = ", ".join(non_evidence[:8])
+        raise RuntimeError(f"code changed after the release candidate: {joined}")
 
 
 def _validate_schema(manifest: dict[str, Any], schema: dict[str, Any]) -> None:
@@ -46,9 +65,13 @@ def verify(manifest_path: Path, schema_path: Path, repository: Path) -> dict[str
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
     _validate_schema(manifest, schema)
+    _require_clean_worktree(repository)
 
     candidate = str(manifest["candidateSha"])
     head = _git("rev-parse", "HEAD", cwd=repository)
+    missing_phases = [key for key in PHASE_KEYS if key not in manifest["phaseCommits"]]
+    if missing_phases:
+        raise RuntimeError(f"phase commits missing: {missing_phases}")
     ancestor = subprocess.run(
         ["git", "merge-base", "--is-ancestor", candidate, head],
         cwd=repository,
@@ -56,6 +79,9 @@ def verify(manifest_path: Path, schema_path: Path, repository: Path) -> dict[str
     )
     if ancestor.returncode != 0:
         raise RuntimeError("manifest candidate SHA is not an ancestor of current HEAD")
+    if str(manifest["phaseCommits"]["phase12"]["sha"]) != candidate:
+        raise RuntimeError("phase12 commit must be the release candidate SHA")
+    _require_candidate_code_unchanged(candidate, head, repository)
 
     flags = manifest["effectiveFlags"]
     for name in REQUIRED_FLAGS:
@@ -81,9 +107,15 @@ def verify(manifest_path: Path, schema_path: Path, repository: Path) -> dict[str
     if manifest["scope"]["productionFlagsChanged"]:
         raise RuntimeError("production flag defaults must stay 0")
 
-    missing_phases = [key for key in PHASE_KEYS if key not in manifest["phaseCommits"]]
-    if missing_phases:
-        raise RuntimeError(f"phase commits missing: {missing_phases}")
+    for key in PHASE_KEYS:
+        phase_sha = str(manifest["phaseCommits"][key]["sha"])
+        phase_ancestor = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", phase_sha, candidate],
+            cwd=repository,
+            check=False,
+        )
+        if phase_ancestor.returncode != 0:
+            raise RuntimeError(f"{key} commit is not an ancestor of the release candidate")
 
     artifacts = []
     for artifact in manifest["artifactPaths"]:

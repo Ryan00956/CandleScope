@@ -47,7 +47,6 @@ export class StrategyResearchRuntime {
   }
 
   currentChartRunnable(): boolean {
-    if (this.runtimeMode === "LOCAL_OFFLINE") return false;
-    return this.capabilitiesFor("CURRENT_CHART").capabilities.barApprox?.available === true;
+    return false;
   }
 }

@@ -15,6 +15,8 @@ import {
   importedChartDatasetKey,
   importedDatasetSourceFromManifest,
   importedDrawingKeyBase,
+  importedManifestForSource,
+  preferredLibrarySelectedId,
 } from "../importedDatasetSource.js";
 import { parseStrategyResearchLaunch } from "../strategyResearchLaunch.js";
 
@@ -45,6 +47,22 @@ function manifest(overrides: Partial<LocalDatasetManifest> = {}): LocalDatasetMa
     ...overrides,
   };
 }
+
+test("library selection follows the restored source instead of the first dataset", () => {
+  const first = manifest();
+  const restored = manifest({
+    dataset_id: "local-ffffffffffffffffffffffffffffffff",
+    data_epoch: `sha256:${"c".repeat(64)}`,
+  });
+  const source = importedDatasetSourceFromManifest(restored);
+  assert.equal(preferredLibrarySelectedId(source, [first, restored]), restored.dataset_id);
+  assert.equal(importedManifestForSource(source, first), null);
+  assert.equal(importedManifestForSource(source, restored), restored);
+  assert.equal(importedManifestForSource(source, manifest({
+    dataset_id: restored.dataset_id,
+    data_epoch: `sha256:${"d".repeat(64)}`,
+  })), null);
+});
 
 test("imported source identity is dataset_id + data_epoch and never invents a snapshot hash", () => {
   const source = importedDatasetSourceFromManifest(manifest(), "1h");
@@ -128,15 +146,14 @@ test("first open shows three templates and import without hiding the script slot
   assert.doesNotMatch(css, /data-visual-state="first"[^}]*max-height:\s*0/);
 });
 
-test("source=current fills the current-chart surface with a driven session", () => {
+test("source=current does not invent a live chart session", () => {
   const html = renderToStaticMarkup(
     React.createElement(StrategyResearchApp, {
       intent: parseStrategyResearchLaunch({ pathname: "/strategy.html", search: "?source=current" }),
       libraryEnabled: false,
     }),
   );
-  assert.match(html, /strategy-research-current-chart/);
-  assert.match(html, /data-symbol="BTCUSDT"/);
-  assert.match(html, /data-interval="1m"/);
+  assert.match(html, /strategy-research-current-chart-unavailable|strategy-research-open-market-tester/);
+  assert.doesNotMatch(html, /data-symbol="BTCUSDT"/);
   assert.doesNotMatch(html, /strategy-research-import-own-data/);
 });

@@ -26,6 +26,7 @@ export function StrategyResearchScriptPanel({
   runStatus,
   needsData,
   onDraftId,
+  onDraftRevision,
   onRun,
   onConfirmNeedsData,
   onOpenAdvanced,
@@ -37,6 +38,7 @@ export function StrategyResearchScriptPanel({
   runStatus: string;
   needsData: boolean;
   onDraftId(draftId: string | null): void;
+  onDraftRevision(revision: number): void;
   onRun(request: ChartStrategyRunRequest): void;
   onConfirmNeedsData(): void;
   onOpenAdvanced(): void;
@@ -49,6 +51,10 @@ export function StrategyResearchScriptPanel({
   useEffect(() => {
     onDraftId(draft?.id ?? null);
   }, [draft?.id, onDraftId]);
+
+  useEffect(() => {
+    onDraftRevision(draft === null ? 0 : strategyDraftContentRevision(source));
+  }, [draft, onDraftRevision, source]);
 
   const startDraft = useCallback(async (templateId: string) => {
     const template = CHART_STRATEGY_TEMPLATES.find((item) => item.id === templateId);

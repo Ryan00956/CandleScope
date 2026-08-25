@@ -64,7 +64,7 @@ test("local import and backtest advanced launch actions do not create a Run", ()
   assert.deepEqual(strategyResearchLaunchActions(imported), [{ type: "source/libraryOpen", open: true }]);
   const chart = parseStrategyResearchLaunch({ pathname: "/strategy.html", search: "?source=current" });
   const chartActions = strategyResearchLaunchActions(chart);
-  assert.equal(chartActions[0]?.type, "source/select");
+  assert.deepEqual(chartActions, []);
   const advanced = parseStrategyResearchLaunch({ pathname: "/backtest.html", search: "" });
   assert.deepEqual(strategyResearchLaunchActions(advanced), []);
   const runtime = new StrategyResearchRuntime({ restoreWorkspace: false, libraryEnabled: true });

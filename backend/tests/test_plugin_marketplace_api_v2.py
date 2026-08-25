@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -25,6 +26,8 @@ pytestmark = [
     ),
 ]
 
+NOW = datetime(2026, 7, 23, 2, 0, tzinfo=UTC)
+
 
 async def test_signed_marketplace_api_requires_manual_staging_and_runs_untrusted(
     tmp_path: Path,
@@ -38,6 +41,7 @@ async def test_signed_marketplace_api_requires_manual_staging_and_runs_untrusted
         host_version="0.4.0",
         marketplace_enabled=True,
         marketplace_roots=(builder.root,),
+        marketplace_now_provider=lambda: NOW,
     )
     await platform.start()
     guard = LocalManagementGuard(

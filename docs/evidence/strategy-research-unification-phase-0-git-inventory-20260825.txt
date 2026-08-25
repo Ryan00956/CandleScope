@@ -1,0 +1,101 @@
+=== original git status ===
+## main...origin/main [ahead 31]
+?? docs/LOCAL_DATA_STRATEGY_RESEARCH_UNIFICATION_EXECUTION_zh.md
+
+=== original HEAD ===
+144e748cc881220565cd5aa07fc494cba9a4133c
+=== origin/main ===
+26298d38a41c80f9f91a5a43e861a543da74ca49
+=== worktree list porcelain ===
+worktree H:/program/CandleScope
+HEAD 144e748cc881220565cd5aa07fc494cba9a4133c
+branch refs/heads/main
+
+worktree H:/program/CandleScope-local-offline
+HEAD d3c2fe37d1deacba8951b5725353ca967eca2d79
+branch refs/heads/codex/local-offline-mode
+
+worktree H:/program/CandleScope-pine-interpreter
+HEAD d848d560db2242811d31f0086408b490afe9d62c
+branch refs/heads/codex/pine-interpreter
+
+worktree H:/program/CandleScope-pyne-pack
+HEAD 84ee3f3c7dadeb2404ff7ac9d01f0e8cd450089f
+branch refs/heads/codex/pyne-input-compat
+
+worktree H:/program/CandleScope-strategy-research
+HEAD 144e748cc881220565cd5aa07fc494cba9a4133c
+branch refs/heads/codex/strategy-research-unification
+
+
+=== new worktree HEAD/branch ===
+144e748cc881220565cd5aa07fc494cba9a4133c
+codex/strategy-research-unification
+=== new worktree status ===
+## codex/strategy-research-unification
+?? docs/LOCAL_DATA_STRATEGY_RESEARCH_UNIFICATION_EXECUTION_zh.md
+
+=== merge-base main...codex/local-offline-mode ===
+e642125f9132eb3774101f11bae38a263865eb69
+=== rev-list left-right count main...codex/local-offline-mode ===
+284	9
+=== local-offline HEAD ===
+d3c2fe37d1deacba8951b5725353ca967eca2d79
+=== local-offline unique commits ===
+d3c2fe37 feat(local): add offline data management P0
+6107bcd5 Reuse shared chart experience in local mode
+d8ca67bc Reuse shared analysis panels in local mode
+e13696f4 Add static indicators to local analysis
+b34ef7f3 Add mapped event CSV imports
+e403ac79 Add local chart analysis markers
+b5c580fc Support OHLC-only local datasets
+a22740af Support TradingView CSV alignment
+761ddf12 Add isolated local offline mode
+
+=== local-offline dirty porcelain ===
+ M README.md
+ M README_zh.md
+ M backend/app/api/v1/local_data.py
+ M backend/app/local_data/__init__.py
+ M backend/app/local_data/service.py
+ M backend/app/official-plugin-releases.json
+ M backend/scripts/plugin_platform_multi_runtime_phase10.py
+ M backend/tests/test_first_party_plugin_bootstrap.py
+ M backend/tests/test_local_data_api.py
+ M backend/tests/test_local_data_service.py
+ M docs/local-offline-mode.md
+ M frontend/src/features/local-data/LocalApp.tsx
+ M frontend/src/features/local-data/localAnalysisMarkerSource.test.ts
+ M frontend/src/features/local-data/localAnalysisMarkerSource.ts
+ M frontend/src/features/local-data/localAppShell.test.ts
+ M frontend/src/features/local-data/localDataApi.test.ts
+ M frontend/src/features/local-data/localDataApi.ts
+ M frontend/src/features/local-data/localDataTypes.ts
+ M frontend/src/features/local-data/useLocalChartRuntime.ts
+ M frontend/src/features/local-data/useLocalIndicatorRuntime.ts
+ M frontend/src/index.css
+ M packages/candlescope-plugin-pine-compat/README.md
+ M packages/candlescope-plugin-pine-compat/README_zh.md
+ M packages/candlescope-plugin-pine-compat/pyproject.toml
+ M packages/candlescope-plugin-pine-compat/release/release-lock.json
+ M packages/candlescope-plugin-pine-compat/tests/test_package_architecture.py
+ M packages/candlescope-plugin-pyne/README.md
+ M packages/candlescope-plugin-pyne/README_zh.md
+ M packages/candlescope-plugin-pyne/pyproject.toml
+ M packages/candlescope-plugin-pyne/release/release-lock.json
+ M packages/candlescope-plugin-pyne/tests/test_package_architecture.py
+ M packages/candlescope-plugin-sdk-typescript/LICENSE
+ M packages/candlescope-plugin-sdk/pyproject.toml
+?? backend/app/local_data/resampling.py
+?? frontend/src/features/local-data/LocalIntervalSelector.tsx
+?? frontend/src/features/local-data/localIntervalPolicy.test.ts
+?? frontend/src/features/local-data/localIntervalPolicy.ts
+
+=== original dirtyPathsBefore ===
+?? docs/LOCAL_DATA_STRATEGY_RESEARCH_UNIFICATION_EXECUTION_zh.md
+
+=== document baseline vs current HEAD ===
+document baseline: 144e748cc881220565cd5aa07fc494cba9a4133c
+current HEAD:     144e748cc881220565cd5aa07fc494cba9a4133c
+match: True
+

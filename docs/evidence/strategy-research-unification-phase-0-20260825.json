@@ -1,0 +1,144 @@
+{
+  "schemaVersion": "candlescope.strategy-research-unification.phase0/1",
+  "generatedAt": "2026-08-25T15:10:00+08:00",
+  "status": "PHASE0_ENGINEERING_COMPLETE",
+  "baselineSha": "144e748cc881220565cd5aa07fc494cba9a4133c",
+  "candidateSha": "9d598b17b428a6b0afc90d2aae18e7888ec0e467",
+  "dirtyPathsBefore": [
+    "?? docs/LOCAL_DATA_STRATEGY_RESEARCH_UNIFICATION_EXECUTION_zh.md"
+  ],
+  "dirtyPathsAfterOriginalTree": [
+    "?? docs/LOCAL_DATA_STRATEGY_RESEARCH_UNIFICATION_EXECUTION_zh.md"
+  ],
+  "identity": {
+    "branch": "codex/strategy-research-unification",
+    "worktree": "H:\\program\\CandleScope-strategy-research",
+    "originalWorktree": "H:\\program\\CandleScope",
+    "originMain": "26298d38a41c80f9f91a5a43e861a543da74ca49",
+    "documentBaselineMatch": true,
+    "node": "v22.14.0",
+    "npm": "10.9.2",
+    "python": "D:\\anaconda\\python.exe 3.x",
+    "viewport": { "width": 1440, "height": 900 }
+  },
+  "legacyBranch": {
+    "name": "codex/local-offline-mode",
+    "head": "d3c2fe37d1deacba8951b5725353ca967eca2d79",
+    "mergeBase": "e642125f9132eb3774101f11bae38a263865eb69",
+    "aheadOfMain": 9,
+    "behindMain": 284,
+    "dirtyCount": 37,
+    "modified": false
+  },
+  "scope": {
+    "phase": 0,
+    "productionCodeChanged": false,
+    "push": false,
+    "merge": false,
+    "deploy": false,
+    "productionFlagsChanged": false,
+    "mainWorktreeUserChangesCopied": false,
+    "oldWorktreeDeleted": false
+  },
+  "commands": [
+    "git status --short --branch",
+    "git rev-parse HEAD",
+    "git worktree list --porcelain",
+    "D:\\anaconda\\python.exe -m pytest -q tests/test_local_data_service.py tests/test_local_data_api.py tests/test_local_data_jobs.py",
+    "D:\\anaconda\\python.exe -m pytest -q tests/test_local_offline_main_profile.py tests/test_local_offline_network_guard.py",
+    "D:\\anaconda\\python.exe -m pytest -q tests/test_backtest_chart_context.py tests/test_backtest_quick_presets.py",
+    "npm.cmd run test:backtest",
+    "npm.cmd run typecheck"
+  ],
+  "exitCodes": {
+    "pytestLocalData": 0,
+    "pytestOfflineFirst": 1,
+    "pytestOfflineRecheck": 0,
+    "pytestBacktestChart": 0,
+    "npmTestBacktest": 0,
+    "npmTypecheck": 0
+  },
+  "scopedTests": {
+    "pytestLocalData": { "result": "PASS", "passed": 23, "elapsedSeconds": 11.46 },
+    "pytestOffline": {
+      "firstResult": "SETUP_FAILURE",
+      "recheckResult": "PASS",
+      "passed": 3,
+      "classification": "existing_environment",
+      "blocking": false,
+      "reason": "anaconda subprocess lacked candlescope_plugin_sdk; PYTHONPATH to in-repo SDKs made 3/3 pass"
+    },
+    "pytestBacktestChart": { "result": "PASS", "passed": 14, "elapsedSeconds": 10.50 },
+    "npmTestBacktest": { "result": "PASS", "passed": 118, "suites": 3, "elapsedMs": 6090 },
+    "npmTypecheck": { "result": "PASS", "elapsedMs": 94298 }
+  },
+  "fullTests": {
+    "result": "NOT_REQUIRED_THIS_PHASE",
+    "note": "Phase 0 scoped baseline only; full suite is a Phase 12 gate"
+  },
+  "browserScenarios": [
+    {
+      "name": "chart-strategy-first-open",
+      "path": "docs/evidence/strategy-research-unification-phase-0/chart-strategy-first-open-1440x900.png",
+      "sha256": "7e6e206adca4b78d47db85eba0e310d9ae9060a04810a4bbb5ff9bcf0e441b34",
+      "bytes": 117542,
+      "source": "chart-first phase 4 live capture; current main has chart-first default-on"
+    },
+    {
+      "name": "chart-strategy-completed-visual-contract",
+      "path": "docs/evidence/strategy-research-unification-phase-0/chart-strategy-completed-visual-contract-1440x900.png",
+      "sha256": "c426cc09cdc824cafcd896c2798013f3f3fe038accd5c7a7fa915618fd4f5a41",
+      "bytes": 87270,
+      "source": "approved chart-first phase 0 visual contract"
+    },
+    {
+      "name": "backtest-first-open",
+      "path": "docs/evidence/strategy-research-unification-phase-0/backtest-first-open-1440x900.png",
+      "sha256": "34520884de1b3ebf03e3ded4781bf092099ae1df7d2560ef82c8f41e86900d7d",
+      "bytes": 184917,
+      "source": "playwright recapture at current HEAD via LOCAL_OFFLINE 18086 + vite 15176"
+    },
+    {
+      "name": "local-first-open",
+      "path": "docs/evidence/strategy-research-unification-phase-0/local-first-open-1440x900.png",
+      "sha256": "b433421895b8c8e9716c11018351e4c17babc6bfaf56165ff682298e6d96b30a",
+      "bytes": 64256,
+      "source": "playwright recapture at current HEAD",
+      "note": "local-import-form classes have no CSS rules on current main; existing appearance"
+    }
+  ],
+  "runtimeMode": "LOCAL_OFFLINE",
+  "effectiveFlags": {
+    "CANDLESCOPE_RUNTIME_MODE": "LOCAL_OFFLINE",
+    "CANDLESCOPE_RESEARCH_DATA_LIBRARY_ENABLED": "unset_default_off",
+    "VITE_RESEARCH_DATA_LIBRARY_ENABLED": "unset_default_off",
+    "BACKTEST_ENABLED": "1",
+    "BACKTEST_BAR_ENABLED": "1"
+  },
+  "isolatedHealth": {
+    "url": "http://127.0.0.1:18086/health",
+    "runtime_mode": "LOCAL_OFFLINE",
+    "networkInstalled": true,
+    "blockedAttempts": 0,
+    "datasets": 0
+  },
+  "productionBuildBaseline": {
+    "source": "H:\\program\\CandleScope\\frontend\\dist at same HEAD",
+    "liveJsKb": 382.92,
+    "localJsKb": 63.45,
+    "backtestAppJsKb": 69.54,
+    "sharedIndexJsKb": 495.72,
+    "sharedIndexCssKb": 296.89
+  },
+  "rollbackResult": "delete Phase 0 docs only; no runtime or user-data rollback required",
+  "unresolvedFindings": [
+    "Independent product meeting signature for ADR not separately recorded; execution document authorizes implementation",
+    "LIVE market backend was not started in this environment; chart-strategy first-open/completed reuse frozen same-product captures",
+    "LocalApp import form has no dedicated CSS on current main"
+  ],
+  "adr": {
+    "path": "docs/adr/ADR-BACKTEST-014-LOCAL-DATA-AS-RESEARCH-SOURCE.md",
+    "status": "Accepted for implementation"
+  }
+}
+

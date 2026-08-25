@@ -6,6 +6,7 @@ import {
   StrategyDraftStore,
   createLocalStorageStrategyDraftAdapter,
   createMemoryStrategyDraftAdapter,
+  pendingStrategyDraftSave,
   type StrategyDraftStoreAdapter,
 } from "../StrategyDraftStore.js";
 
@@ -119,4 +120,34 @@ test("local storage adapter fails closed on malformed content and writes only it
   await store.save(draft("source"));
   assert.deepEqual([...values.keys()], [STRATEGY_DRAFT_STORAGE_KEY]);
   assert.match(values.get(STRATEGY_DRAFT_STORAGE_KEY) ?? "", /return|source/);
+});
+
+test("pending draft flush captures unsaved source even before autosave fires", () => {
+  const record = {
+    schemaVersion: 1 as const,
+    id: "draft-12345678",
+    revision: 0,
+    displayName: "趋势策略",
+    language: "pyne" as const,
+    source: "return close",
+    cursor: { line: 1, column: 1 },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  assert.equal(pendingStrategyDraftSave({
+    draft: record,
+    source: record.source,
+    cursor: record.cursor,
+  }), null);
+  assert.deepEqual(pendingStrategyDraftSave({
+    draft: record,
+    source: "return close > open",
+    cursor: { line: 2, column: 4 },
+  }), {
+    id: record.id,
+    displayName: record.displayName,
+    language: record.language,
+    source: "return close > open",
+    cursor: { line: 2, column: 4 },
+  });
 });

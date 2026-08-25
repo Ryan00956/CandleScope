@@ -411,6 +411,8 @@ class ChartPyneStrategyProvider:
             if len(self._bars) <= operand.offset:
                 return None
             return self._bars[-1 - operand.offset][operand.name]
+        if operand.name in self._program.constants:
+            return self._program.constants[operand.name]
         history = self._series_history.get(operand.name) or []
         if len(history) <= operand.offset:
             return None

@@ -113,6 +113,25 @@ test("stale transition hides completed projections in the same reducer step", ()
   assert.equal(state.inputs?.attachment.strategyRevisionId, "revision-1");
 });
 
+test("completed Runs keep the previous cell Run as the comparison baseline", () => {
+  let state = createChartStrategyTesterState(inputs(), "workspace\u0000cell-1");
+  state = reduceChartStrategyTesterState(state, { type: "BEGIN_REQUEST" });
+  state = reduceChartStrategyTesterState(state, {
+    type: "REQUEST_COMPLETED",
+    token: currentChartStrategyTesterToken(state),
+    identity: identity("run-1"),
+  });
+  state = reduceChartStrategyTesterState(state, { type: "BEGIN_REQUEST" });
+  state = reduceChartStrategyTesterState(state, {
+    type: "REQUEST_COMPLETED",
+    token: currentChartStrategyTesterToken(state),
+    identity: identity("run-2"),
+    baselineRunId: "run-1",
+  });
+  assert.equal(state.resultIdentity?.runId, "run-2");
+  assert.equal(state.baselineRunId, "run-1");
+});
+
 test("twenty rapid transitions accept only the final generation", () => {
   let state = createChartStrategyTesterState(inputs(), "workspace\u0000cell-1");
   const staleTokens = [];

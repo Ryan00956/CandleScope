@@ -184,6 +184,34 @@ export interface SaveStrategyDraftInput {
   cursor: StrategyDraftCursor | null;
 }
 
+export function sameStrategyDraftCursor(
+  left: StrategyDraftCursor | null,
+  right: StrategyDraftCursor | null,
+): boolean {
+  return left?.line === right?.line && left?.column === right?.column;
+}
+
+export function pendingStrategyDraftSave(pending: {
+  draft: StrategyDraftRecord | null;
+  source: string;
+  cursor: StrategyDraftCursor | null;
+}): SaveStrategyDraftInput | null {
+  if (!pending.draft) return null;
+  if (
+    pending.draft.source === pending.source
+    && sameStrategyDraftCursor(pending.draft.cursor, pending.cursor)
+  ) {
+    return null;
+  }
+  return {
+    id: pending.draft.id,
+    displayName: pending.draft.displayName,
+    language: pending.draft.language,
+    source: pending.source,
+    cursor: pending.cursor,
+  };
+}
+
 export class StrategyDraftStore {
   private readonly views = new Map<string, StrategyDraftView>();
   private readonly listeners = new Set<(id: string, view: StrategyDraftView) => void>();

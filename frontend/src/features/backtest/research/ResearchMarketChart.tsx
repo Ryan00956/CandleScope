@@ -20,6 +20,7 @@ import { useChartSettingsRuntime } from "../../settings/chartAppearanceSettings.
 import { createChartStrategyResultMarkerSource } from "../chart-tester/chartStrategyResultMarkerSource.js";
 import {
   backtestResearchHasPanel,
+  researchFrozenSnapshotIdentity,
   researchRunIdentityReady,
   shouldEnableBacktestResearchLiveSource,
 } from "./backtestResearchModel.js";
@@ -44,9 +45,27 @@ function dateLabel(value: number | null | undefined): string {
 
 export default function ResearchMarketChart({ runtime }: { runtime: BacktestResearchRuntime }) {
   const task = runtime.view.selectedTask!;
+  const activeDataset = runtime.view.datasets.find(
+    (dataset) => dataset.dataset_id === runtime.view.selectedDatasetId,
+  ) ?? null;
+  const runIdentityReady = researchRunIdentityReady({
+    run: runtime.view.activeRun,
+    report: runtime.view.report,
+    chart: runtime.view.chart,
+  });
+  const frozenIdentity = researchFrozenSnapshotIdentity({
+    dataset: activeDataset,
+    snapshot: runtime.view.snapshot,
+    run: runtime.view.activeRun,
+    report: runtime.view.report,
+    chart: runtime.view.chart,
+  });
+  const effectiveSourceMode = runtime.view.sourceMode === "FROZEN_SNAPSHOT" && !frozenIdentity
+    ? (runIdentityReady ? "RUN_RESULT" : "LIVE_REFERENCE")
+    : runtime.view.sourceMode;
   const liveSourceEnabled = shouldEnableBacktestResearchLiveSource(
     runtime.view.runtimeMode,
-    runtime.view.sourceMode,
+    effectiveSourceMode,
   );
   const [viewSession, setViewSession] = useState<ChartSession>(runtime.view.session);
   const chartSurface = useChartSurfaceRuntime();
@@ -86,64 +105,49 @@ export default function ResearchMarketChart({ runtime }: { runtime: BacktestRese
     session: liveSession,
     datasetKey: chartSession.view.datasetKey,
     marketData,
-    paused: runtime.view.sourceMode !== "LIVE_REFERENCE",
+    paused: effectiveSourceMode !== "LIVE_REFERENCE",
   });
-  const runIdentityReady = researchRunIdentityReady({
-    run: runtime.view.activeRun,
-    report: runtime.view.report,
-    chart: runtime.view.chart,
-  });
-  const datasetIdentity = useMemo(() => runtime.view.launchContext?.dataset_identity ?? (
-    runtime.view.activeRun?.dataset_id
-      && runtime.view.activeRun.data_epoch
-      && runtime.view.activeRun.snapshot_hash
-      ? {
-          dataset_id: runtime.view.activeRun.dataset_id,
-          data_epoch: runtime.view.activeRun.data_epoch,
-          snapshot_hash: runtime.view.activeRun.snapshot_hash,
-        }
-      : null
-  ), [runtime.view.activeRun, runtime.view.launchContext]);
   const staticSource = useMemo<MarketChartSourceRuntime | null>(() => {
     const run = runtime.view.activeRun;
     const report = runtime.view.report;
     const chart = runtime.view.chart;
     if (!run || !report || !chart) return null;
-    if (runtime.view.sourceMode === "RUN_RESULT" && runIdentityReady) {
+    const reportHash = report.hashes.report ?? run.result?.report_hash;
+    if (effectiveSourceMode === "RUN_RESULT" && runIdentityReady && reportHash) {
       return createRunResultSource({
         sourceId: `research-run:${run.run_id}`,
         session: runtime.view.session,
         runId: run.run_id,
         configHash: run.config_hash,
-        reportHash: report.hashes.report!,
+        reportHash,
         chartHash: chart.chart_hash,
         bars: chart.bars.map((bar) => ({ ...bar })),
       });
     }
-    if (runtime.view.sourceMode === "FROZEN_SNAPSHOT" && datasetIdentity) {
+    if (effectiveSourceMode === "FROZEN_SNAPSHOT" && frozenIdentity) {
       return createFrozenSnapshotSource({
-        sourceId: `research-snapshot:${datasetIdentity.snapshot_hash}`,
+        sourceId: `research-snapshot:${frozenIdentity.snapshot_hash}`,
         session: runtime.view.session,
-        datasetId: datasetIdentity.dataset_id,
-        dataEpoch: datasetIdentity.data_epoch,
-        snapshotHash: datasetIdentity.snapshot_hash,
+        datasetId: frozenIdentity.dataset_id,
+        dataEpoch: frozenIdentity.data_epoch,
+        snapshotHash: frozenIdentity.snapshot_hash,
         bars: chart.bars.map((bar) => ({ ...bar })),
       });
     }
     return null;
   }, [
-    datasetIdentity,
+    effectiveSourceMode,
+    frozenIdentity,
     runIdentityReady,
     runtime.view.activeRun,
     runtime.view.chart,
     runtime.view.report,
     runtime.view.session,
-    runtime.view.sourceMode,
   ]);
   useEffect(() => () => staticSource?.dispose(), [staticSource]);
   const activeSource = staticSource ?? liveSource;
   const liveUnavailable = runtime.view.runtimeMode === "LOCAL_OFFLINE"
-    && runtime.view.sourceMode === "LIVE_REFERENCE";
+    && effectiveSourceMode === "LIVE_REFERENCE";
   const markerSource = useMemo(() => {
     if (activeSource.mode !== "RUN_RESULT" || !runtime.view.chart) return null;
     const store = activeSource.marketData.view.seriesStore;
@@ -191,7 +195,7 @@ export default function ResearchMarketChart({ runtime }: { runtime: BacktestRese
       })
     : t("research.context.noRange");
   const runModeDisabled = !runIdentityReady;
-  const frozenDisabled = !runtime.view.chart || !datasetIdentity;
+  const frozenDisabled = !frozenIdentity;
 
   return (
     <MarketPageFrame
@@ -212,9 +216,9 @@ export default function ResearchMarketChart({ runtime }: { runtime: BacktestRese
           )}
           controls={(
             <div className="research-source-switch" role="group" aria-label={t("research.aria.chartSource")}>
-              <button type="button" disabled={runtime.view.runtimeMode === "LOCAL_OFFLINE"} title={runtime.view.runtimeMode === "LOCAL_OFFLINE" ? t("research.source.liveOffline") : ""} data-active={runtime.view.sourceMode === "LIVE_REFERENCE"} onClick={() => runtime.actions.selectSourceMode("LIVE_REFERENCE")}>{t("research.source.live")}</button>
-              <button type="button" disabled={frozenDisabled} title={frozenDisabled ? t("research.source.frozenUnavailable") : ""} data-active={runtime.view.sourceMode === "FROZEN_SNAPSHOT"} onClick={() => runtime.actions.selectSourceMode("FROZEN_SNAPSHOT")}>{t("research.source.frozen")}</button>
-              <button type="button" disabled={runModeDisabled} title={runModeDisabled ? t("research.source.runUnavailable") : ""} data-active={runtime.view.sourceMode === "RUN_RESULT"} onClick={() => runtime.actions.selectSourceMode("RUN_RESULT")}>{t("research.source.run")}</button>
+              <button type="button" disabled={runtime.view.runtimeMode === "LOCAL_OFFLINE"} title={runtime.view.runtimeMode === "LOCAL_OFFLINE" ? t("research.source.liveOffline") : ""} data-active={effectiveSourceMode === "LIVE_REFERENCE"} onClick={() => runtime.actions.selectSourceMode("LIVE_REFERENCE")}>{t("research.source.live")}</button>
+              <button type="button" disabled={frozenDisabled} title={frozenDisabled ? t("research.source.frozenUnavailable") : ""} data-active={effectiveSourceMode === "FROZEN_SNAPSHOT"} onClick={() => runtime.actions.selectSourceMode("FROZEN_SNAPSHOT")}>{t("research.source.frozen")}</button>
+              <button type="button" disabled={runModeDisabled} title={runModeDisabled ? t("research.source.runUnavailable") : ""} data-active={effectiveSourceMode === "RUN_RESULT"} onClick={() => runtime.actions.selectSourceMode("RUN_RESULT")}>{t("research.source.run")}</button>
             </div>
           )}
           trailing={(

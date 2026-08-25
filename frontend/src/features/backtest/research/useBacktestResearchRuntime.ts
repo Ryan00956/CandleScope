@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChartSession } from "../../chart-session/chartSessionTypes.js";
 import { t } from "../../../i18n/index.js";
 import {
@@ -144,30 +144,66 @@ export function useBacktestResearchRuntime(options: {
   const [signalTrace, setSignalTrace] = useState<BacktestResearchRuntime["view"]["signalTrace"]>([]);
   const [reviewBridge, setReviewBridge] = useState<Record<string, unknown> | null>(null);
   const [pythonGate, setPythonGate] = useState<PythonStudioGate | null>(null);
+  const runSelectionRevisionRef = useRef(0);
+  const runSelectionAbortRef = useRef<AbortController | null>(null);
+  const studySelectionRevisionRef = useRef(0);
+  const studySelectionAbortRef = useRef<AbortController | null>(null);
 
   const openRun = useCallback(async (runId: string) => {
+    const revision = runSelectionRevisionRef.current + 1;
+    runSelectionRevisionRef.current = revision;
+    runSelectionAbortRef.current?.abort();
+    const controller = new AbortController();
+    runSelectionAbortRef.current = controller;
+    setActiveRun(null);
+    setReport(null);
+    setChart(null);
+    setRunComparison(null);
+    setSignalTrace([]);
+    setOperationError(null);
     try {
-      const bundle = await loadRunBundle(api, runId);
+      const bundle = await loadRunBundle(api, runId, controller.signal);
+      if (controller.signal.aborted || runSelectionRevisionRef.current !== revision) return;
       setActiveRun(bundle.run);
       setReport(bundle.report);
       setChart(bundle.chart);
-      setRunComparison(null);
-      setSignalTrace([]);
       setSourceMode(bundle.chart ? "RUN_RESULT" : "LIVE_REFERENCE");
     } catch (reason) {
+      if (controller.signal.aborted || runSelectionRevisionRef.current !== revision) return;
       setOperationError(message(reason));
+    } finally {
+      if (runSelectionAbortRef.current === controller) runSelectionAbortRef.current = null;
     }
   }, [api]);
 
   const openStudy = useCallback(async (studyId: string) => {
+    const revision = studySelectionRevisionRef.current + 1;
+    studySelectionRevisionRef.current = revision;
+    studySelectionAbortRef.current?.abort();
+    const controller = new AbortController();
+    studySelectionAbortRef.current = controller;
+    setActiveStudy(null);
+    setStudyComparison(null);
+    setOperationError(null);
     try {
       const existing = studies.find((study) => study.study_id === studyId);
-      setActiveStudy(existing ?? await api.getStudy(studyId));
-      setStudyComparison(null);
+      const next = existing ?? await api.getStudy(studyId, controller.signal);
+      if (controller.signal.aborted || studySelectionRevisionRef.current !== revision) return;
+      setActiveStudy(next);
     } catch (reason) {
+      if (controller.signal.aborted || studySelectionRevisionRef.current !== revision) return;
       setOperationError(message(reason));
+    } finally {
+      if (studySelectionAbortRef.current === controller) studySelectionAbortRef.current = null;
     }
   }, [api, studies]);
+
+  useEffect(() => () => {
+    runSelectionRevisionRef.current += 1;
+    studySelectionRevisionRef.current += 1;
+    runSelectionAbortRef.current?.abort();
+    studySelectionAbortRef.current?.abort();
+  }, []);
 
   useEffect(() => {
     if (entry.kind === "invalid") return undefined;

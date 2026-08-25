@@ -4,7 +4,10 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { createBacktestApi } from "../../backtestApi.js";
+import type { BacktestDataset, BacktestSnapshot } from "../../backtestApi.js";
 import type {
+  BacktestChartData,
+  BacktestReport,
   BacktestResearchLaunchContext,
   BacktestRunRecord,
 } from "../../backtestTypes.js";
@@ -12,6 +15,7 @@ import type { ChartStrategyResultBundle } from "../../chart-tester/chartStrategy
 import {
   backtestResearchHasPanel,
   backtestResearchPanels,
+  researchFrozenSnapshotIdentity,
   researchReturnHref,
   researchRunIdentityReady,
   researchSessionFromAuthority,
@@ -102,6 +106,96 @@ test("Run deep link derives session from immutable Run config and chart", () => 
     report: null,
     chart: null,
   }), false);
+});
+
+test("selected Run overrides a launch context from another chart", () => {
+  const run: BacktestRunRecord = {
+    run_id: "bt_result_btc_12345678",
+    state: "COMPLETED",
+    fidelity_mode: "BAR_APPROX",
+    source_event_kind: "BAR",
+    config_hash: "sha256:config",
+    config_json: JSON.stringify({
+      exchange: "binance",
+      market_type: "usdm",
+      symbol: "BTCUSDT",
+      interval: "15m",
+    }),
+  };
+  assert.deepEqual(researchSessionFromAuthority({
+    context,
+    run,
+    chart: {
+      run_id: run.run_id,
+      chart_hash: "sha256:chart",
+      symbol: "BTCUSDT",
+      interval: "15m",
+      bars: [],
+      fills: [],
+      equity_curve: [],
+      truncated: false,
+    },
+  }), { exchange: "binance", marketType: "usdm", symbol: "BTCUSDT", interval: "15m" });
+});
+
+test("frozen snapshot accepts bars only when dataset, snapshot, Run, and chart identities agree", () => {
+  const dataset = {
+    dataset_id: "dataset-btc",
+    data_epoch: "sha256:epoch",
+    name: "BTC",
+    symbol: "BTCUSDT",
+    interval: "15m",
+    rows: 10,
+    first_open_ms: 1,
+    last_close_ms: 2,
+    strategy_revisions: [],
+  } satisfies BacktestDataset;
+  const snapshot = {
+    data_epoch: dataset.data_epoch,
+    snapshot_hash: "sha256:snapshot",
+    coverage_start_ms: 1,
+    coverage_end_ms: 2,
+    row_count: 10,
+    quality: {},
+    fidelity_capabilities: ["BAR_APPROX"],
+  } satisfies BacktestSnapshot;
+  const run: BacktestRunRecord = {
+    run_id: "bt_result_12345678",
+    state: "COMPLETED",
+    fidelity_mode: "BAR_APPROX",
+    source_event_kind: "BAR",
+    config_hash: "sha256:config",
+    dataset_id: dataset.dataset_id,
+    data_epoch: snapshot.data_epoch,
+    snapshot_hash: snapshot.snapshot_hash,
+  };
+  const report = {
+    hashes: { report: "sha256:report" },
+  } as unknown as BacktestReport;
+  const chart = {
+    run_id: run.run_id,
+    chart_hash: "sha256:chart",
+    symbol: dataset.symbol,
+    interval: dataset.interval,
+    bars: [],
+    fills: [],
+    equity_curve: [],
+    truncated: false,
+  } satisfies BacktestChartData;
+  assert.deepEqual(researchFrozenSnapshotIdentity({ dataset, snapshot, run, report, chart }), {
+    dataset_id: dataset.dataset_id,
+    data_epoch: snapshot.data_epoch,
+    snapshot_hash: snapshot.snapshot_hash,
+  });
+  assert.equal(researchFrozenSnapshotIdentity({
+    dataset: { ...dataset, dataset_id: "dataset-eth" }, snapshot, run, report, chart,
+  }), null);
+  assert.equal(researchFrozenSnapshotIdentity({
+    dataset, snapshot: { ...snapshot, snapshot_hash: "sha256:other" }, run, report, chart,
+  }), null);
+  assert.equal(researchFrozenSnapshotIdentity({
+    dataset, snapshot, run, report, chart: { ...chart, symbol: "ETHUSDT" },
+  }), null);
 });
 
 test("live market transport is disabled for offline and immutable sources", () => {

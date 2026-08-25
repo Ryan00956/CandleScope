@@ -15,6 +15,7 @@ export type ChartStrategyAutoRunPauseReason =
 export interface ChartStrategyAutoRunContext {
   sessionKey: string;
   attachmentKey: string | null;
+  contentRevision: number | null;
   enabled: boolean;
 }
 
@@ -23,9 +24,13 @@ export function shouldScheduleChartStrategyAutoRun(
   next: ChartStrategyAutoRunContext,
 ): boolean {
   if (previous === null || next.attachmentKey === null || !next.enabled) return false;
-  return previous.sessionKey !== next.sessionKey
+  if (previous.sessionKey !== next.sessionKey
     || previous.attachmentKey !== next.attachmentKey
-    || (!previous.enabled && next.enabled);
+    || (!previous.enabled && next.enabled)) {
+    return true;
+  }
+  if (previous.contentRevision === null || next.contentRevision === null) return false;
+  return previous.contentRevision !== next.contentRevision;
 }
 
 export interface ChartStrategyAutoRunJob {

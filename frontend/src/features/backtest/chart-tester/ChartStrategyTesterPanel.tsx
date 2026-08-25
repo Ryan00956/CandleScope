@@ -3,6 +3,7 @@ import {
   lazy,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -17,16 +18,18 @@ import type { ChartContextResolution } from "../backtestApi.js";
 import type { RecentRunCompareV1 } from "../backtestTypes.js";
 import { t } from "../../../i18n/index.js";
 import { useLocale } from "../../../i18n/useLocale.js";
-import type {
-  StrategyDraftAutoSaveState,
-  StrategyDraftCursor,
-  StrategyDraftRecord,
-  StrategyDraftStore,
+import {
+  pendingStrategyDraftSave,
+  type StrategyDraftAutoSaveState,
+  type StrategyDraftCursor,
+  type StrategyDraftRecord,
+  type StrategyDraftStore,
 } from "./StrategyDraftStore.js";
 import {
   createChartStrategyDraftId,
   strategyDraftContentRevision,
 } from "./chartStrategyTesterDrafts.js";
+import { chartStrategyQuickPresetIdForMarket } from "./chartStrategyRunRequest.js";
 import {
   CHART_STRATEGY_TEMPLATES,
   diagnoseChartStrategyDraft,
@@ -68,10 +71,6 @@ function clampPanelHeight(value: number): number {
   return clampChartStrategyPanelHeight(value);
 }
 
-function sameCursor(left: StrategyDraftCursor | null, right: StrategyDraftCursor | null): boolean {
-  return left?.line === right?.line && left?.column === right?.column;
-}
-
 function attachmentForDraft(
   record: StrategyDraftRecord,
   session: ChartSession,
@@ -86,9 +85,7 @@ function attachmentForDraft(
     rangeMode: "ALL_AVAILABLE",
     customRange: null,
     fidelityPreference: "FAST",
-    quickPresetId: session.marketType === "spot"
-      ? "CRYPTO_SPOT_STANDARD_V1"
-      : "CRYPTO_PERP_STANDARD_V1",
+    quickPresetId: chartStrategyQuickPresetIdForMarket(session.marketType),
     autoRun: true,
   };
 }
@@ -226,6 +223,9 @@ export default function ChartStrategyTesterPanel({
     source: string;
     cursor: StrategyDraftCursor | null;
   }>({ draft: null, source: "", cursor: null });
+  useLayoutEffect(() => {
+    pendingSaveRef.current = { draft: activeDraft, source, cursor };
+  }, [activeDraft, cursor, source]);
 
   useEffect(() => () => resizeCleanupRef.current?.(), []);
   useEffect(() => {
@@ -238,20 +238,16 @@ export default function ChartStrategyTesterPanel({
     return () => window.clearTimeout(timer);
   }, [resultCacheKey]);
   useEffect(() => {
-    pendingSaveRef.current = { draft: activeDraft, source, cursor };
-  }, [activeDraft, cursor, source]);
-  useEffect(() => () => {
-    const pending = pendingSaveRef.current;
-    if (!pending.draft
-      || (pending.draft.source === pending.source
-        && sameCursor(pending.draft.cursor, pending.cursor))) return;
-    void draftStore.save({
-      id: pending.draft.id,
-      displayName: pending.draft.displayName,
-      language: pending.draft.language,
-      source: pending.source,
-      cursor: pending.cursor,
-    }).catch(() => undefined);
+    const flushPending = () => {
+      const input = pendingStrategyDraftSave(pendingSaveRef.current);
+      if (!input) return;
+      void draftStore.save(input).catch(() => undefined);
+    };
+    window.addEventListener("beforeunload", flushPending);
+    return () => {
+      window.removeEventListener("beforeunload", flushPending);
+      flushPending();
+    };
   }, [draftStore]);
 
   useEffect(() => {
@@ -279,7 +275,7 @@ export default function ChartStrategyTesterPanel({
 
   useEffect(() => {
     if (!activeDraft
-      || (activeDraft.source === source && sameCursor(activeDraft.cursor, cursor))) return undefined;
+      || pendingStrategyDraftSave({ draft: activeDraft, source, cursor }) === null) return undefined;
     const timer = window.setTimeout(() => {
       void draftStore.save({
         id: activeDraft.id,
@@ -396,7 +392,11 @@ export default function ChartStrategyTesterPanel({
       displayName: activeDraft.displayName,
       language: activeDraft.language,
       source,
-      attachment: { ...currentAttachment, parameters: { ...currentAttachment.parameters } },
+      attachment: {
+        ...currentAttachment,
+        parameters: { ...currentAttachment.parameters },
+        quickPresetId: chartStrategyQuickPresetIdForMarket(session.marketType),
+      },
     });
     setRunReady(true);
     onEntryStateChange("ready");

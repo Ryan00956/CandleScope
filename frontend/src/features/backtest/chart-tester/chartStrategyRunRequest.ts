@@ -103,6 +103,10 @@ function cloneFrozen<T>(value: T): T {
   return JSON.parse(canonicalChartStrategyJson(value)) as T;
 }
 
+export function chartStrategyQuickPresetIdForMarket(marketType: string): string {
+  return marketType === "spot" ? "CRYPTO_SPOT_STANDARD_V1" : "CRYPTO_PERP_STANDARD_V1";
+}
+
 export async function freezeChartStrategyRunRequest(
   request: ChartStrategyRunRequest,
 ): Promise<ChartStrategyFrozenRunRequest> {
@@ -113,6 +117,7 @@ export async function freezeChartStrategyRunRequest(
     session: Object.freeze({ ...cloned.session }),
     attachment: Object.freeze({
       ...cloned.attachment,
+      quickPresetId: chartStrategyQuickPresetIdForMarket(cloned.session.marketType),
       parameters: Object.freeze({ ...cloned.attachment.parameters }),
       customRange: cloned.attachment.customRange
         ? Object.freeze({ ...cloned.attachment.customRange })
@@ -262,6 +267,8 @@ export function buildChartStrategyRunBody(input: {
     quick_preset_id: quickPresetId,
     quick_preset_revision: presetRevision,
     chart_range_mode: input.frozen.attachment.rangeMode,
+    chart_cell_scope: input.frozen.cellScope,
+    strategy_draft_id: input.frozen.draftId,
   };
 }
 

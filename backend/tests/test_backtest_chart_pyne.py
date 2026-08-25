@@ -95,6 +95,31 @@ def test_chart_templates_execute_deterministically(
     assert restored.close() == provider.close()
 
 
+def test_chart_pyne_named_constant_participates_in_conditions_and_trace() -> None:
+    provider = ChartPyneStrategyProvider()
+    provider.prepare(
+        {
+            "source": """strategy(\"constant\")
+threshold = 10
+if close > threshold
+  target_position(1)
+else
+  target_position(0)
+""",
+            "tradeExplanationEnabled": True,
+        }
+    )
+    output = provider.step(_frame(1, 20))
+    assert output is not None
+    assert output.payload["targetExposure"] == "1"
+    trace = provider.report_metadata()["tradeExplanationTrace"]
+    assert trace[-1]["reasonCode"] == "chart_pyne_line_3"
+    assert trace[-1]["variables"]["threshold"] == {
+        "kind": "decimal",
+        "value": "10",
+    }
+
+
 def test_chart_pyne_decision_evidence_is_checkpoint_deterministic() -> None:
     provider = ChartPyneStrategyProvider()
     provider.prepare({"source": SMA, "tradeExplanationEnabled": True})
@@ -267,6 +292,82 @@ def test_completed_chart_run_links_decision_fill_and_recent_compatible_baseline(
     assert recent["baselineRunId"] == first["run_id"]
     assert recent["comparison"]["schema"] == "RUN_COMPARE_V3"
     assert recent["comparison"]["directComparisonAllowed"] is True
+
+
+def test_recent_compatible_compare_does_not_borrow_another_cell(
+    tmp_path: Path,
+) -> None:
+    service = _explanation_service(tmp_path)
+    revision = service.create_strategy_revision(
+        {
+            "name": "SMA evidence",
+            "language": "PYNE_CHART_V1",
+            "source_text": SMA,
+            "parameter_schema": [],
+        }
+    )
+    payload = {
+        "strategy_revision_id": revision["revision_id"],
+        "dataset_id": "local-chart",
+        "data_epoch": "epoch-20260824",
+        "snapshot_hash": "sha256:snapshot",
+        "fidelity_mode": "BAR_APPROX",
+        "source_event_kind": "BAR",
+        "start_time_ms": 0,
+        "end_time_ms": 600_000,
+        "symbol": "BTCUSDT",
+        "interval": "1m",
+        "parameters": {},
+        "output_mode": "TARGET_POSITION",
+        "initial_balance": "10000",
+        "account_model": "LINEAR_PERP_ONE_WAY_V1",
+        "slippage_bps": "1",
+        "taker_fee_bps": "4",
+        "maker_fee_bps": "4",
+        "exchange": "binance",
+        "market_type": "usdm",
+    }
+    service.smoke_strategy_revision(str(revision["revision_id"]), payload, now_ms=2)
+    events = tuple(
+        MarketEvent(
+            sequence=index,
+            event_time_ms=index * 60_000,
+            role="BARS",
+            payload={
+                "open": str(close),
+                "high": str(close),
+                "low": str(close),
+                "close": str(close),
+                "volume": "100",
+            },
+        )
+        for index, close in enumerate([10, 10, 10, 10, 10, 20, 20], 1)
+    )
+
+    def complete(scope: str, draft: str, key: str, now_ms: int) -> dict[str, object]:
+        created = service.create_run(
+            {
+                **payload,
+                "chart_cell_scope": scope,
+                "strategy_draft_id": draft,
+            },
+            idempotency_key=key,
+            now_ms=now_ms,
+        )
+        return service.execute_bar_run(
+            str(created["run_id"]),
+            events=events,
+            provider=ChartPyneStrategyProvider(),
+            now_ms=now_ms + 1,
+        )
+
+    first = complete("workspace\x00cell-1", "draft-cell1aaa", "cell-1-first", 3)
+    second = complete("workspace\x00cell-2", "draft-cell2bbb", "cell-2-first", 5)
+    third = complete("workspace\x00cell-1", "draft-cell1aaa", "cell-1-second", 7)
+    leaked = service.compare_recent_compatible_run(str(second["run_id"]))
+    assert leaked["baselineRunId"] is None
+    isolated = service.compare_recent_compatible_run(str(third["run_id"]))
+    assert isolated["baselineRunId"] == first["run_id"]
 
 
 def test_chart_revision_reuses_compile_identity_and_changes_with_source(

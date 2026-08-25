@@ -13,7 +13,12 @@ function deferred() {
 }
 
 test("initial mount and copied attachment do not create an auto-run intent", () => {
-  const attached = { sessionKey: "btc:1h", attachmentKey: "draft-a", enabled: true };
+  const attached = {
+    sessionKey: "btc:1h",
+    attachmentKey: "draft-a",
+    contentRevision: 1,
+    enabled: true,
+  };
   assert.equal(shouldScheduleChartStrategyAutoRun(null, attached), false);
   assert.equal(shouldScheduleChartStrategyAutoRun(attached, attached), false);
   assert.equal(shouldScheduleChartStrategyAutoRun(attached, { ...attached, sessionKey: "btc:15m" }), true);
@@ -29,6 +34,7 @@ test("64 initially mounted attached cells create no auto-run intent", () => {
     assert.equal(shouldScheduleChartStrategyAutoRun(null, {
       sessionKey: `btc:${index}`,
       attachmentKey: `draft-${index}`,
+      contentRevision: index + 1,
       enabled: true,
     }), false);
   }
@@ -78,6 +84,23 @@ test("four changing cells never exceed two active auto Runs and keep latest queu
   gates.slice(2).forEach((gate) => gate.resolve());
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.deepEqual(coordinator.diagnostics().workspaces, []);
+});
+
+test("script edits schedule auto-run after the draft is loaded", () => {
+  const attached = {
+    sessionKey: "btc:1h",
+    attachmentKey: "draft-a",
+    contentRevision: 1,
+    enabled: true,
+  };
+  assert.equal(shouldScheduleChartStrategyAutoRun(
+    { ...attached, contentRevision: null },
+    attached,
+  ), false);
+  assert.equal(shouldScheduleChartStrategyAutoRun(attached, {
+    ...attached,
+    contentRevision: 2,
+  }), true);
 });
 
 test("manual preemption removes an unsubmitted auto job without touching active work", async () => {

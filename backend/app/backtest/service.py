@@ -126,6 +126,20 @@ FIDELITY_MATRIX = {
 RESEARCH_LAUNCH_CONTEXT_SCHEMA = "candlescope.backtest-research-launch-context/1"
 
 
+def _comparison_lineage(config: Mapping[str, object]) -> tuple[str, str]:
+    return (
+        str(config.get("chart_cell_scope") or "").strip(),
+        str(config.get("strategy_draft_id") or "").strip(),
+    )
+
+
+def _comparison_lineage_compatible(
+    current_config: Mapping[str, object],
+    candidate_config: Mapping[str, object],
+) -> bool:
+    return _comparison_lineage(current_config) == _comparison_lineage(candidate_config)
+
+
 class BacktestService:
     def __init__(
         self,
@@ -847,6 +861,9 @@ class BacktestService:
                 or int(candidate.get("created_at_ms") or 0) > current_created
             ):
                 continue
+            candidate_config = json.loads(str(candidate["config_json"]))
+            if not _comparison_lineage_compatible(current_config, candidate_config):
+                continue
             candidate_report, _ = self.repository.get_reports_for_compare(
                 candidate_id, candidate_id
             )
@@ -856,7 +873,7 @@ class BacktestService:
             if not isinstance(candidate_context, Mapping):
                 candidate_context = build_comparison_context(
                     run=candidate,
-                    config=json.loads(str(candidate["config_json"])),
+                    config=candidate_config,
                     provider_identity={},
                     revision=self.repository.get_strategy_revision(
                         str(candidate["strategy_revision_id"])
@@ -4143,6 +4160,12 @@ class BacktestService:
         for chart_field in ("symbol", "interval", "chart_range_mode"):
             if payload.get(chart_field) is not None:
                 execution_config[chart_field] = str(payload[chart_field])
+        cell_scope = str(payload.get("chart_cell_scope") or "").strip()
+        draft_id = str(payload.get("strategy_draft_id") or "").strip()
+        if cell_scope:
+            execution_config["chart_cell_scope"] = cell_scope
+        if draft_id:
+            execution_config["strategy_draft_id"] = draft_id
         if quick_preset_id:
             execution_config.update(
                 {

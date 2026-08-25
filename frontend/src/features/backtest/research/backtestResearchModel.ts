@@ -1,6 +1,8 @@
 import type { ChartSession } from "../../chart-session/chartSessionTypes.js";
+import type { BacktestDataset, BacktestSnapshot } from "../backtestApi.js";
 import type {
   BacktestChartData,
+  BacktestResearchDatasetIdentity,
   BacktestResearchLaunchContext,
   BacktestReport,
   BacktestRunRecord,
@@ -47,6 +49,15 @@ export function researchSessionFromAuthority(input: {
   chart: BacktestChartData | null;
   fallback?: ChartSession;
 }): ChartSession {
+  if (input.run) {
+    const config = parseRunConfig(input.run);
+    return {
+      exchange: String(config.exchange ?? input.fallback?.exchange ?? "binance"),
+      marketType: String(config.market_type ?? input.fallback?.marketType ?? "usdm"),
+      symbol: String(input.chart?.symbol ?? config.symbol ?? input.fallback?.symbol ?? "BTCUSDT"),
+      interval: String(input.chart?.interval ?? config.interval ?? input.fallback?.interval ?? "15m"),
+    } as ChartSession;
+  }
   if (input.context) {
     return {
       exchange: input.context.chart_session.exchange,
@@ -55,12 +66,11 @@ export function researchSessionFromAuthority(input: {
       interval: input.context.chart_session.interval,
     };
   }
-  const config = parseRunConfig(input.run);
   return {
-    exchange: String(config.exchange ?? input.fallback?.exchange ?? "binance"),
-    marketType: String(config.market_type ?? input.fallback?.marketType ?? "usdm"),
-    symbol: String(input.chart?.symbol ?? config.symbol ?? input.fallback?.symbol ?? "BTCUSDT"),
-    interval: String(input.chart?.interval ?? config.interval ?? input.fallback?.interval ?? "15m"),
+    exchange: input.fallback?.exchange ?? "binance",
+    marketType: input.fallback?.marketType ?? "usdm",
+    symbol: input.chart?.symbol ?? input.fallback?.symbol ?? "BTCUSDT",
+    interval: input.chart?.interval ?? input.fallback?.interval ?? "15m",
   } as ChartSession;
 }
 
@@ -89,6 +99,30 @@ export function researchRunIdentityReady(input: {
     && input.chart?.chart_hash
     && input.chart.run_id === input.run.run_id,
   );
+}
+
+export function researchFrozenSnapshotIdentity(input: {
+  dataset: BacktestDataset | null;
+  snapshot: BacktestSnapshot | null;
+  run: BacktestRunRecord | null;
+  report: BacktestReport | null;
+  chart: BacktestChartData | null;
+}): BacktestResearchDatasetIdentity | null {
+  const { dataset, snapshot, run, report, chart } = input;
+  if (!dataset || !snapshot || !run || !chart) return null;
+  if (!researchRunIdentityReady({ run, report, chart })) return null;
+  if (
+    run.dataset_id !== dataset.dataset_id
+    || run.data_epoch !== snapshot.data_epoch
+    || run.snapshot_hash !== snapshot.snapshot_hash
+    || chart.symbol !== dataset.symbol
+    || chart.interval !== dataset.interval
+  ) return null;
+  return {
+    dataset_id: dataset.dataset_id,
+    data_epoch: snapshot.data_epoch,
+    snapshot_hash: snapshot.snapshot_hash,
+  };
 }
 
 export function shouldEnableBacktestResearchLiveSource(

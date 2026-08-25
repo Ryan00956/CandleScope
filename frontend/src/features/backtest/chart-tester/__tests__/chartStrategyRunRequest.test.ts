@@ -5,6 +5,7 @@ import { BacktestApiError, type ChartContextResolution, type StrategyRevisionRec
 import type { BacktestRunRecord } from "../../backtestTypes.js";
 import {
   buildChartStrategyRunBody,
+  chartStrategyQuickPresetIdForMarket,
   chartStrategyRunDiagnostics,
   freezeChartStrategyRunRequest,
   runChartStrategyBacktest,
@@ -184,6 +185,31 @@ test("freezes source/parameters and creates a stable expanded quick Run", async 
   assert.equal(body.quick_preset_revision, "1");
   assert.equal(body.dataset_id, "local-chart");
   assert.equal(body.strategy_source, undefined);
+  assert.equal(body.chart_cell_scope, request.cellScope);
+  assert.equal(body.strategy_draft_id, request.draftId);
+});
+
+test("freezes the market fee preset from the session, not a stale attachment", async () => {
+  assert.equal(chartStrategyQuickPresetIdForMarket("spot"), "CRYPTO_SPOT_STANDARD_V1");
+  assert.equal(chartStrategyQuickPresetIdForMarket("usdm"), "CRYPTO_PERP_STANDARD_V1");
+  const frozen = await freezeChartStrategyRunRequest({
+    ...request,
+    session: { ...request.session, marketType: "spot" },
+  });
+  assert.equal(frozen.attachment.quickPresetId, "CRYPTO_SPOT_STANDARD_V1");
+  const spotResolution = resolution();
+  spotResolution.request = { ...spotResolution.request, market_type: "spot" };
+  spotResolution.quick_preset_id = "CRYPTO_SPOT_STANDARD_V1";
+  spotResolution.cost_preset = {
+    ...spotResolution.cost_preset,
+    preset_id: "CRYPTO_SPOT_STANDARD_V1",
+  };
+  const body = buildChartStrategyRunBody({
+    frozen,
+    revision,
+    resolution: spotResolution,
+  });
+  assert.equal(body.quick_preset_id, "CRYPTO_SPOT_STANDARD_V1");
 });
 
 test("READY follows revision-resolve-smoke-validate-reresolve-create-poll", async () => {

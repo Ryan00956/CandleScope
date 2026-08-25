@@ -36,8 +36,8 @@ export default function BacktestResearchApp() {
       />
     );
   }
-  const workspaceKey = runtime.view.launchContext?.context_id
-    ?? runtime.view.activeRun?.run_id
+  const workspaceKey = runtime.view.activeRun?.run_id
+    ?? runtime.view.launchContext?.context_id
     ?? runtime.view.activeStudy?.study_id
     ?? "research-home";
   return <ResearchMarketChart key={workspaceKey} runtime={runtime} />;

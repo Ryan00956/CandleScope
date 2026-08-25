@@ -18,6 +18,7 @@ import type {
   ChartStrategyTesterEntryState,
 } from "./chartStrategyTesterUiModel.js";
 import {
+  chartStrategyQuickPresetIdForMarket,
   chartStrategyRunDiagnostics,
   runChartStrategyBacktest,
 } from "./chartStrategyRunRequest.js";
@@ -155,10 +156,11 @@ export default function ChartStrategyTesterCellBridge({
   const autoRunContext = useMemo<ChartStrategyAutoRunContext>(() => ({
     sessionKey: `${session.exchange}\u0000${session.marketType}\u0000${session.symbol}\u0000${session.interval}`,
     attachmentKey: autoRunAttachmentKey,
+    contentRevision: draftContentRevision,
     enabled: attachment?.autoRun === true,
-  }), [attachment?.autoRun, autoRunAttachmentKey, session.exchange, session.interval,
-    session.marketType, session.symbol]);
-  const autoRunContextKey = `${autoRunContext.sessionKey}\u0000${autoRunContext.attachmentKey ?? ""}\u0000${autoRunContext.enabled ? "1" : "0"}`;
+  }), [attachment?.autoRun, autoRunAttachmentKey, draftContentRevision, session.exchange,
+    session.interval, session.marketType, session.symbol]);
+  const autoRunContextKey = `${autoRunContext.sessionKey}\u0000${autoRunContext.attachmentKey ?? ""}\u0000${autoRunContext.contentRevision ?? ""}\u0000${autoRunContext.enabled ? "1" : "0"}`;
   const projectionSeriesStore = useMemo(() => seriesStore ?? new SeriesWindowStore({
     intervalSeconds: parseIntervalSeconds(session.interval),
     seriesKey: `chart-strategy:${cellScope}`,
@@ -405,7 +407,15 @@ export default function ChartStrategyTesterCellBridge({
         return;
       }
       if (outcome.run.state === "COMPLETED") {
-        runtime.dispatch({ type: "REQUEST_COMPLETED", token, identity: outcome.identity });
+        const previousRunId = runtime.snapshot().resultIdentity?.runId ?? null;
+        runtime.dispatch({
+          type: "REQUEST_COMPLETED",
+          token,
+          identity: outcome.identity,
+          ...(previousRunId && previousRunId !== outcome.identity.runId
+            ? { baselineRunId: previousRunId }
+            : {}),
+        });
         if (origin === "AUTO") setAutoRunPauseReason(null);
       } else {
         runtime.dispatch({
@@ -474,6 +484,13 @@ export default function ChartStrategyTesterCellBridge({
     void startRun(request);
   }, [cancelPendingAutoRun, cellId, startRun, workspaceId]);
 
+  useEffect(() => {
+    if (!attachment) return;
+    const nextPreset = chartStrategyQuickPresetIdForMarket(session.marketType);
+    if (attachment.quickPresetId === nextPreset) return;
+    onAttachmentChange({ ...attachment, quickPresetId: nextPreset });
+  }, [attachment, onAttachmentChange, session.marketType]);
+
   const handlePrepareData = useCallback(() => {
     const pending = pendingDataRef.current;
     if (!pending) return;
@@ -530,6 +547,7 @@ export default function ChartStrategyTesterCellBridge({
         ...attachment,
         parameters: { ...attachment.parameters },
         customRange: attachment.customRange ? { ...attachment.customRange } : null,
+        quickPresetId: chartStrategyQuickPresetIdForMarket(session.marketType),
       },
     };
     queueMicrotask(() => setAutoRunPauseReason("WAITING_DEBOUNCE"));
@@ -613,7 +631,15 @@ export default function ChartStrategyTesterCellBridge({
       },
     }).then((run) => {
       if (run.state === "COMPLETED") {
-        runtime.dispatch({ type: "REQUEST_COMPLETED", token, identity });
+        const previousRunId = runtime.snapshot().resultIdentity?.runId ?? null;
+        runtime.dispatch({
+          type: "REQUEST_COMPLETED",
+          token,
+          identity,
+          ...(previousRunId && previousRunId !== identity.runId
+            ? { baselineRunId: previousRunId }
+            : {}),
+        });
       } else {
         runtime.dispatch({
           type: "REQUEST_FAILED",

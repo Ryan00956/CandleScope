@@ -2,7 +2,7 @@
   "schemaVersion": "candlescope.strategy-research-unification-release/1",
   "generatedAt": "2026-08-25T18:27:49+08:00",
   "status": "ENGINEERING_QUALIFIED_FLAGS_DEFAULT_OFF",
-  "candidateSha": "PENDING_PHASE12_COMMIT",
+  "candidateSha": "87af1d9649a3a008ecbcc47ca8ae0880f8732ea9",
   "phaseCommits": {
     "phase0": { "sha": "0522ba90ee23d4b897ec6714bbd3086b3e3a9c8b", "subject": "docs(strategy): freeze local-data research unification contract" },
     "phase1": { "sha": "4c1498813649029c3c3bb80258c587fac169a323", "subject": "feat(research): define unified strategy data source contracts" },
@@ -16,7 +16,7 @@
     "phase9": { "sha": "32edf2a44d3015fff5cc40870d782fc27b02ae05", "subject": "feat(strategy): use unified research workspace in offline profile" },
     "phase10": { "sha": "8b680c9dd27a9db59553c554bc9abf1d395efc35", "subject": "feat(strategy): unify quick and advanced research navigation" },
     "phase11": { "sha": "67ac5e46f4790d4a44068416c4466cf5e3ff681e", "subject": "refactor(strategy): retire duplicate local and backtest app orchestration" },
-    "phase12": { "sha": "PENDING_PHASE12_COMMIT", "subject": "test(strategy): qualify unified local-data research release" }
+    "phase12": { "sha": "87af1d9649a3a008ecbcc47ca8ae0880f8732ea9", "subject": "test(strategy): qualify unified local-data research release" }
   },
   "effectiveFlags": {
     "CANDLESCOPE_RESEARCH_DATA_LIBRARY_ENABLED": "0",

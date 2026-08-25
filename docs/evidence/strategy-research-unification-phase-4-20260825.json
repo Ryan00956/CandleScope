@@ -1,0 +1,30 @@
+{
+  "schemaVersion": "candlescope.strategy-research-unification.phase4/1",
+  "generatedAt": "2026-08-25T17:10:00+08:00",
+  "status": "PHASE4_ENGINEERING_COMPLETE",
+  "baselineSha": "1135a91ff06c139d14371fac435866f4bff17f05",
+  "candidateSha": "PENDING_PHASE4_COMMIT",
+  "dirtyPathsBefore": ["?? docs/LOCAL_DATA_STRATEGY_RESEARCH_UNIFICATION_EXECUTION_zh.md"],
+  "dirtyPathsAfterOriginalTree": ["?? docs/LOCAL_DATA_STRATEGY_RESEARCH_UNIFICATION_EXECUTION_zh.md"],
+  "commands": [
+    "D:\\anaconda\\python.exe -m pytest -q tests/test_research_data_access.py tests/test_local_data_api.py tests/test_local_offline_main_profile.py tests/test_local_data_jobs.py tests/test_research_data_runtime.py"
+  ],
+  "exitCodes": { "pytestAccess": 0 },
+  "scopedTests": { "pytestAccess": { "result": "PASS", "passed": 27 } },
+  "fullTests": { "result": "NOT_REQUIRED_THIS_PHASE" },
+  "browserScenarios": ["n/a API access matrix"],
+  "runtimeMode": "LIVE_flag_off_default",
+  "effectiveFlags": {
+    "CANDLESCOPE_RESEARCH_DATA_LIBRARY_ENABLED": "0"
+  },
+  "securityMatrix": {
+    "F1": "PASS trusted 127.0.0.1 Origin import 201",
+    "F2": "PASS LAN Origin direct 403",
+    "F3": "PASS LAN Origin via Vite loopback peer 403",
+    "F4": "PASS X-Forwarded-For spoof 403",
+    "F5": "PASS remote Origin GET datasets/klines 403",
+    "F6": "PASS deny logs omit absolute paths"
+  },
+  "rollbackResult": "flag=0 LIVE does not mount /api/v1/local (404)",
+  "unresolvedFindings": []
+}

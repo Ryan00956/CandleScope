@@ -13,14 +13,25 @@ from fastapi.testclient import TestClient
 from app.core.config import HOST
 from app.main import app
 
+class Peer:
+    def __init__(self, app, host):
+        self.app = app
+        self.host = host
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") in {"http", "websocket"}:
+            scope = dict(scope)
+            scope["client"] = (self.host, 50000)
+        await self.app(scope, receive, send)
+
 assert HOST == "127.0.0.1"
-with TestClient(app) as client:
+with TestClient(Peer(app, "127.0.0.1")) as client:
     health = client.get("/health")
     assert health.status_code == 200, health.text
     payload = health.json()
     assert payload["runtime_mode"] == "LOCAL_OFFLINE"
     assert payload["local_offline"]["network"]["installed"] is True
-    assert client.get("/api/v1/local/capabilities").status_code == 200
+    caps = client.get("/api/v1/local/capabilities", headers={"host": "127.0.0.1:18080"})
+    assert caps.status_code == 200, caps.text
     blocked = client.get("/api/v1/klines/history")
     assert blocked.status_code == 403, blocked.text
     assert not hasattr(app.state, "plugin_runtime_host")

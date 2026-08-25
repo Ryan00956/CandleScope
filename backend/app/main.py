@@ -58,6 +58,7 @@ from app.core.config import (
     BACKTEST_SETTINGS,
     LOCAL_DATA_DIR,
     REPLAY_AGG_TRADE_ARCHIVE_DIR,
+    RESEARCH_DATA_LIBRARY_ENABLED,
     RUNTIME_MODE,
     SYMBOL_CATALOG_FOREGROUND_DWELL_SECONDS,
     SYMBOL_CATALOG_FOREGROUND_RECHECK_SECONDS,
@@ -84,6 +85,7 @@ if RUNTIME_MODE == "LIVE":
     from app.api.v1.subscriptions import router as subscriptions_router
     from app.api.v1.symbols import router as symbols_router
     from app.api.v1.trade_flow import router as trade_flow_router
+    from app.api.v1.local_data import router as local_data_router
     from app.data_engine.data_manager.capacity import build_capacity_snapshot
     from app.plugin_core_v2 import create_core_plugin_router
     from app.data_engine.storage import (
@@ -139,6 +141,8 @@ else:
     app.include_router(price_ws_router, prefix="/api/v1")
     app.include_router(replay_router, prefix="/api/v1")
     app.include_router(create_core_plugin_router())
+    if RESEARCH_DATA_LIBRARY_ENABLED:
+        app.include_router(local_data_router, prefix="/api/v1")
 
 if BACKTEST_SETTINGS.enabled:
     from app.api.v1.backtests import router as backtests_router
@@ -534,14 +538,18 @@ async def startup_event() -> None:
     # unsupported first-party sidecar degrades Pyne/Pine; it does not abort
     # DataEngine, alerts, or builtin indicators.
     try:
-        if BACKTEST_SETTINGS.enabled:
-            from app.backtest.runtime import BacktestRuntime
+        if BACKTEST_SETTINGS.enabled or RESEARCH_DATA_LIBRARY_ENABLED:
             from app.local_data.runtime import LocalDataRuntime
 
             data_runtime = LocalDataRuntime(LOCAL_DATA_DIR)
             data_runtime.start()
             app.state.local_data_runtime = data_runtime
             app.state.local_data_service = data_runtime.service
+            app.state.local_import_jobs = data_runtime.jobs
+        if BACKTEST_SETTINGS.enabled:
+            from app.backtest.runtime import BacktestRuntime
+
+            data_runtime = getattr(app.state, "local_data_runtime")
             backtest_runtime = BacktestRuntime.start(
                 BACKTEST_SETTINGS,
                 local_data_service=data_runtime.service,

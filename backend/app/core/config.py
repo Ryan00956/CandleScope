@@ -461,6 +461,21 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 DATA_DIR = Path(os.getenv("CANDLE_DATA_DIR", BASE_DIR / "data"))
 KLINES_DB_PATH = Path(os.getenv("KLINES_DB_PATH", DATA_DIR / "candlescope.db"))
 LOCAL_DATA_DIR = Path(os.getenv("CANDLESCOPE_LOCAL_DATA_DIR", DATA_DIR / "local-data"))
+
+
+def _parse_strict_flag(name: str, default: str = "0") -> bool:
+    raw = os.getenv(name, default).strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off", ""}:
+        return False
+    raise ValueError(f"{name} must be 0 or 1")
+
+
+RESEARCH_DATA_LIBRARY_ENABLED = _parse_strict_flag(
+    "CANDLESCOPE_RESEARCH_DATA_LIBRARY_ENABLED",
+    "0",
+)
 LOCAL_DATA_MAX_UPLOAD_BYTES = int(
     os.getenv("CANDLESCOPE_LOCAL_DATA_MAX_UPLOAD_BYTES", str(512 * 1024**2))
 )

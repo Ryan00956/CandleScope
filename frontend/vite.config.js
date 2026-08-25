@@ -20,6 +20,10 @@ const apiProxyAgent = new URL(apiProxyTarget).protocol === 'https:'
 const buildApiProxy = () => ({
   '/api': {
     target: apiProxyTarget,
+    // Keep the browser Origin so LIVE local-library access can reject LAN
+    // pages even when the TCP peer is Vite on 127.0.0.1. Host may be rewritten
+    // to the backend; Origin is not an authentication substitute, but it is
+    // the browser identity the backend must see.
     changeOrigin: true,
     ws: true,
     agent: apiProxyAgent,

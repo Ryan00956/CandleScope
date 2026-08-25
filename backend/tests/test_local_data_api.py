@@ -8,16 +8,21 @@ from fastapi.testclient import TestClient
 
 from app.api.v1 import local_data
 from app.local_data import LocalDatasetService
+from tests.asgi_peer import PeerASGIApp
+
+_TRUSTED_HEADERS = {
+    "origin": "http://127.0.0.1:15173",
+    "host": "127.0.0.1:18080",
+}
 
 
 def _client(tmp_path: Path, monkeypatch) -> TestClient:
-    monkeypatch.setattr(local_data, "RUNTIME_MODE", "LOCAL_OFFLINE")
     app = FastAPI()
     app.include_router(local_data.router, prefix="/api/v1")
     service = LocalDatasetService(tmp_path / "local-data")
     service.start()
     app.state.local_data_service = service
-    return TestClient(app)
+    return TestClient(PeerASGIApp(app, "127.0.0.1"), headers=_TRUSTED_HEADERS)
 
 
 def test_import_list_and_query_local_csv(tmp_path: Path, monkeypatch) -> None:

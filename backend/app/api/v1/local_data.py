@@ -8,13 +8,14 @@ import json
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from starlette.background import BackgroundTask
 from starlette.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from app.api.v1.indicators import _spec_to_preset
-from app.core.config import LOCAL_DATA_MAX_UPLOAD_BYTES, RUNTIME_MODE
+from app.core.config import LOCAL_DATA_MAX_UPLOAD_BYTES
+from app.research_data.access import require_local_research_access
 from app.indicator import registry
 from app.local_data import (
     MAX_LOCAL_RESAMPLE_FACTOR,
@@ -30,7 +31,11 @@ from app.local_data.indicator_compute import (
 )
 
 
-router = APIRouter(prefix="/local", tags=["local-data"])
+router = APIRouter(
+    prefix="/local",
+    tags=["local-data"],
+    dependencies=[Depends(require_local_research_access)],
+)
 
 
 class ResolveEventTimesRequest(BaseModel):
@@ -70,12 +75,12 @@ class ProjectExportRequest(BaseModel):
 
 def _service(request: Request) -> LocalDatasetService:
     service = getattr(request.app.state, "local_data_service", None)
-    if RUNTIME_MODE != "LOCAL_OFFLINE" or service is None:
+    if service is None:
         raise HTTPException(
             status_code=409,
             detail={
                 "code": "local_profile_not_active",
-                "message": "Restart CandleScope with CANDLESCOPE_RUNTIME_MODE=LOCAL_OFFLINE",
+                "message": "Local research library is not running in this process",
             },
         )
     return service

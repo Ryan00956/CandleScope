@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { getLocale, t } from "../../i18n/index.js";
+import { t } from "../../i18n/index.js";
 import { useLocale } from "../../i18n/useLocale.js";
 import type { ReactNode, RefObject } from "react";
 import SingleChartPanes from "../../components/SingleChartPanes.js";
@@ -22,36 +22,20 @@ import {
   getVisibleRangeForInterval,
   saveVisibleRangeForInterval,
 } from "../chart-session/visibleRangeStorage.js";
-import {
-  activateLocalRevision,
-  cancelLocalImportJob,
-  compareLocalRevisions,
-  createLocalImportJob,
-  exportLocalProject,
-  fetchLocalRevisionDetails,
-  fetchLocalIndicatorPresets,
-  getLocalImportJob,
-  importLocalProject,
-  listLocalDatasets,
-  listLocalRevisions,
-  listLocalTrash,
-  LocalDataApiError,
-  restoreLocalTrash,
-  trashLocalDataset,
-  updateLocalDataset,
-} from "./localDataApi.js";
 import type {
   LocalDatasetManifest,
-  LocalDatasetRevision,
   LocalImportJob,
-  LocalRevisionComparison,
-  LocalRevisionDetails,
-  LocalTrashEntry,
 } from "./localDataTypes.js";
+import { ResearchDatasetManagement } from "../research-data/ResearchDatasetManagement.js";
+import { ResearchDatasetRail } from "../research-data/ResearchDatasetRail.js";
 import {
-  captureLocalProjectState,
-  restoreLocalProjectState,
-} from "./localProjectState.js";
+  formatResearchDate,
+  formatResearchRows,
+} from "../research-data/researchDataFormat.js";
+import {
+  useResearchDataLibrary,
+  type ResearchImportSubmitInput,
+} from "../research-data/useResearchDataLibrary.js";
 import LocalAnalysisPanel from "./LocalAnalysisPanel.js";
 import LocalIntervalSelector from "./LocalIntervalSelector.js";
 import { createLocalAnalysisMarkerSource } from "./localAnalysisMarkerSource.js";
@@ -86,398 +70,6 @@ import {
 } from "./localIndicatorCatalog.js";
 import { resolveLocalIntervalSupport } from "./localIntervalPolicy.js";
 
-
-function formatRows(rows: number): string {
-  return new Intl.NumberFormat(getLocale()).format(rows);
-}
-
-function formatDate(value: string): string {
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString(getLocale());
-}
-
-function errorMessage(reason: unknown): string {
-  if (reason instanceof LocalDataApiError && reason.code === "local_profile_not_active") {
-    return t("local.offlineMode");
-  }
-  return reason instanceof Error ? reason.message : t("local.opFailed");
-}
-
-function wait(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
-}
-
-function LocalImportForm({
-  importing,
-  importJob,
-  uploadProgress,
-  selected,
-  onCancel,
-  onImport,
-}: {
-  importing: boolean;
-  importJob: LocalImportJob | null;
-  uploadProgress: number | null;
-  selected: LocalDatasetManifest | null;
-  onCancel(): void;
-  onImport(input: {
-    file: File;
-    name: string;
-    symbol: string;
-    interval: string;
-    timezone: string;
-    timestampUnit: "auto" | "s" | "ms" | "iso";
-    volumeRequired: boolean;
-    datasetId?: string;
-  }): Promise<void>;
-}) {
-  const [file, setFile] = useState<File | null>(null);
-  const [name, setName] = useState("");
-  const [symbol, setSymbol] = useState("BTC-USDT");
-  const [interval, setInterval] = useState("1m");
-  const [timezone, setTimezone] = useState("UTC");
-  const [timestampUnit, setTimestampUnit] = useState<"auto" | "s" | "ms" | "iso">("auto");
-  const [volumeRequired, setVolumeRequired] = useState(false);
-  const [asRevision, setAsRevision] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
-
-  return (
-    <form
-      className="local-import-form"
-      onSubmit={(event) => {
-        event.preventDefault();
-        if (file === null) return;
-        void onImport({
-          file,
-          name: name.trim() || file.name.replace(/\.csv$/i, ""),
-          symbol,
-          interval,
-          timezone,
-          timestampUnit,
-          volumeRequired,
-          ...(asRevision && selected !== null ? { datasetId: selected.dataset_id } : {}),
-        }).then(() => {
-          setFile(null);
-          setName("");
-          if (fileInputRef.current !== null) fileInputRef.current.value = "";
-        }).catch(() => undefined);
-      }}
-    >
-      <header>
-        <div>
-          <span>{t("local.kicker.import")}</span>
-          <strong>{t("local.import")}</strong>
-        </div>
-        <small>{t("local.localOnly")}</small>
-      </header>
-      <label className="local-file-picker">
-        <span>{file?.name ?? t("local.chooseFile")}</span>
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept=".csv,text/csv"
-          onChange={(event) => setFile(event.target.files?.[0] ?? null)}
-        />
-      </label>
-      <label>
-        {t("local.datasetName")}
-        <input value={name} onChange={(event) => setName(event.target.value)} placeholder={t("local.namePh")} />
-      </label>
-      <div className="local-import-grid">
-        <label>
-          {t("local.symbol")}
-          <input required value={symbol} onChange={(event) => setSymbol(event.target.value)} />
-        </label>
-        <label>
-          {t("local.interval")}
-          <input required value={interval} onChange={(event) => setInterval(event.target.value)} placeholder="1m" />
-        </label>
-        <label>
-          {t("local.timezone")}
-          <input required value={timezone} onChange={(event) => setTimezone(event.target.value)} placeholder="UTC" />
-        </label>
-        <label>
-          {t("local.timeFormat")}
-          <select value={timestampUnit} onChange={(event) => setTimestampUnit(event.target.value as typeof timestampUnit)}>
-            <option value="auto">{t("local.autoDetect")}</option>
-            <option value="s">{t("local.unixS")}</option>
-            <option value="ms">{t("local.unixMs")}</option>
-            <option value="iso">{t("local.iso")}</option>
-          </select>
-        </label>
-        <label>
-          {t("local.volume")}
-          <select
-            value={volumeRequired ? "required" : "optional"}
-            onChange={(event) => setVolumeRequired(event.target.value === "required")}
-          >
-            <option value="optional">{t("local.volumeOptional")}</option>
-            <option value="required">{t("local.volumeRequired")}</option>
-          </select>
-        </label>
-      </div>
-      <p>{t("local.requiredCols")}</p>
-      {selected !== null && (
-        <label className="local-revision-choice">
-          <input
-            type="checkbox"
-            checked={asRevision}
-            onChange={(event) => setAsRevision(event.target.checked)}
-          />
-          {t("local.asRevision", { name: selected.name })}
-        </label>
-      )}
-      <button type="submit" disabled={file === null || importing}>
-        {importing ? t("local.importing") : t("local.importBtn")}
-      </button>
-      {importing && (
-        <div className="local-import-progress" role="status">
-          <div><span>{importJob?.stage ?? "uploading"}</span><b>{importJob ? t("local.rows", { count: formatRows(importJob.processed_rows) }) : `${Math.round((uploadProgress ?? 0) * 100)}%`}</b></div>
-          <progress value={importJob?.total_rows ? importJob.processed_rows / importJob.total_rows : (uploadProgress ?? undefined)} />
-          <button type="button" onClick={onCancel}>{t("local.cancelImport")}</button>
-        </div>
-      )}
-    </form>
-  );
-}
-
-function LocalDatasetRail({
-  datasets,
-  selectedId,
-  importing,
-  importJob,
-  uploadProgress,
-  onSelect,
-  onImport,
-  onCancelImport,
-  management,
-  analysis,
-}: {
-  datasets: LocalDatasetManifest[];
-  selectedId: string | null;
-  importing: boolean;
-  importJob: LocalImportJob | null;
-  uploadProgress: number | null;
-  onSelect(datasetId: string): void;
-  onImport: Parameters<typeof LocalImportForm>[0]["onImport"];
-  onCancelImport(): void;
-  management: ReactNode;
-  analysis: ReactNode;
-}) {
-  return (
-    <aside className="local-data-rail" aria-label={t("local.libraryAria")}>
-      <LocalImportForm
-        importing={importing}
-        importJob={importJob}
-        uploadProgress={uploadProgress}
-        selected={datasets.find((dataset) => dataset.dataset_id === selectedId) ?? null}
-        onCancel={onCancelImport}
-        onImport={onImport}
-      />
-      <section className="local-dataset-library">
-        <header>
-          <div>
-            <span>{t("local.kicker.library")}</span>
-            <strong>{t("local.datasets")}</strong>
-          </div>
-          <small>{t("local.count", { count: datasets.length })}</small>
-        </header>
-        <div className="local-dataset-list">
-          {datasets.length === 0 ? (
-            <div className="local-dataset-empty">{t("local.empty")}</div>
-          ) : datasets.map((dataset) => (
-            <button
-              type="button"
-              key={dataset.dataset_id}
-              className={dataset.dataset_id === selectedId ? "active" : ""}
-              onClick={() => onSelect(dataset.dataset_id)}
-            >
-              <span><strong>{dataset.name}</strong><em>{dataset.symbol} · {dataset.interval} · {dataset.volume_available ? "OHLCV" : "OHLC-only"}</em></span>
-              <span><b>{formatRows(dataset.rows)}</b><small>{t("local.gaps", { count: dataset.excluded_range_count })}</small></span>
-            </button>
-          ))}
-        </div>
-      </section>
-      {management}
-      {analysis}
-    </aside>
-  );
-}
-
-function LocalDatasetManagement({
-  manifest,
-  settings,
-  events,
-  onChanged,
-  onSettingsImported,
-  onError,
-}: {
-  manifest: LocalDatasetManifest | null;
-  settings: ChartSettings;
-  events: readonly LocalAnalysisEvent[];
-  onChanged(preferredId?: string): Promise<void>;
-  onSettingsImported(settings: ChartSettings): void;
-  onError(message: string): void;
-}) {
-  const [revisions, setRevisions] = useState<LocalDatasetRevision[]>([]);
-  const [details, setDetails] = useState<LocalRevisionDetails | null>(null);
-  const [comparison, setComparison] = useState<LocalRevisionComparison | null>(null);
-  const [trash, setTrash] = useState<LocalTrashEntry[]>([]);
-  const [archived, setArchived] = useState<LocalDatasetManifest[]>([]);
-  const [draftName, setDraftName] = useState(manifest?.name ?? "");
-  const [busy, setBusy] = useState<string | null>(null);
-  const packageInputRef = useRef<HTMLInputElement | null>(null);
-
-  const reloadMetadata = useCallback(async () => {
-    const [loadedTrash, allDatasets, loadedRevisions, loadedDetails] = await Promise.all([
-      listLocalTrash(),
-      listLocalDatasets(undefined, true),
-      manifest === null ? Promise.resolve([]) : listLocalRevisions(manifest.dataset_id),
-      manifest === null ? Promise.resolve(null) : fetchLocalRevisionDetails(manifest),
-    ]);
-    setTrash(loadedTrash);
-    setArchived(allDatasets.filter((dataset) => dataset.archived === true));
-    setRevisions(loadedRevisions);
-    setDetails(loadedDetails);
-  }, [manifest]);
-
-  useEffect(() => {
-    setDraftName(manifest?.name ?? "");
-    setComparison(null);
-    void reloadMetadata().catch((reason: unknown) => onError(errorMessage(reason)));
-  }, [manifest, onError, reloadMetadata]);
-
-  const run = useCallback(async (label: string, action: () => Promise<void>) => {
-    setBusy(label);
-    try {
-      await action();
-    } catch (reason) {
-      onError(errorMessage(reason));
-    } finally {
-      setBusy(null);
-    }
-  }, [onError]);
-
-  return (
-    <section className="local-dataset-management">
-      <header>
-        <div><span>{t("local.kicker.dataOps")}</span><strong>{t("local.ops")}</strong></div>
-        <small>{busy ?? "ready"}</small>
-      </header>
-      {manifest !== null && (
-        <>
-          <div className="local-library-actions">
-            <input value={draftName} onChange={(event) => setDraftName(event.target.value)} aria-label={t("local.datasetName")} />
-            <button type="button" disabled={busy !== null || !draftName.trim() || draftName.trim() === manifest.name} onClick={() => void run("renaming", async () => {
-              await updateLocalDataset(manifest.dataset_id, { name: draftName.trim() });
-              await onChanged(manifest.dataset_id);
-            })}>{t("local.rename")}</button>
-            <button type="button" disabled={busy !== null} onClick={() => void run("archiving", async () => {
-              await updateLocalDataset(manifest.dataset_id, { archived: true });
-              await onChanged();
-            })}>{t("local.archive")}</button>
-            <button type="button" className="danger" disabled={busy !== null} onClick={() => {
-              if (!window.confirm(t("local.trashConfirm", { name: manifest.name }))) return;
-              void run("trashing", async () => {
-                await trashLocalDataset(manifest.dataset_id);
-                await onChanged();
-                await reloadMetadata();
-              });
-            }}>{t("local.trash")}</button>
-          </div>
-          <div className="local-quality-card">
-            <div><span>{t("local.quality")}</span><strong>{details?.quality.status ?? t("local.reading")}</strong></div>
-            <dl>
-              <div><dt>{t("local.rowsLabel")}</dt><dd>{formatRows(details?.quality.rows ?? manifest.rows)}</dd></div>
-              <div><dt>{t("local.gapsLabel")}</dt><dd>{details?.quality.excluded_ranges.length ?? manifest.excluded_range_count}</dd></div>
-              <div><dt>{t("local.noVolume")}</dt><dd>{formatRows(details?.quality.missing_volume_rows ?? 0)}</dd></div>
-              <div><dt>{t("local.revisions")}</dt><dd>{manifest.revision_count ?? revisions.length}</dd></div>
-            </dl>
-            {(details?.quality.excluded_ranges.length ?? 0) > 0 && (
-              <ul>{details?.quality.excluded_ranges.slice(0, 3).map((gap) => (
-                <li key={`${gap.start_ms}-${gap.end_ms}`}>{t("local.gapBars", { time: new Date(gap.start_ms).toLocaleString(getLocale()), count: gap.missing_bars })}</li>
-              ))}</ul>
-            )}
-          </div>
-          <div className="local-revision-list">
-            <strong>{t("local.revisionHistory")}</strong>
-            {revisions.map((revision) => (
-              <div key={revision.data_epoch} className={revision.current ? "current" : ""}>
-                <span><b>{revision.data_epoch.slice(7, 17)}</b><small>{t("local.revisionRows", { date: formatDate(revision.imported_at), rows: formatRows(revision.rows), status: revision.quality_status })}</small></span>
-                {revision.current ? <em>{t("local.current")}</em> : <span className="local-revision-actions">
-                  <button type="button" disabled={busy !== null} onClick={() => void run("comparing", async () => {
-                    setComparison(await compareLocalRevisions(manifest.dataset_id, revision.data_epoch, manifest.data_epoch));
-                  })}>{t("local.compare")}</button>
-                  <button type="button" disabled={busy !== null} onClick={() => {
-                    if (!window.confirm(t("local.switchConfirm"))) return;
-                    void run("switching", async () => {
-                      await activateLocalRevision(manifest, revision.data_epoch);
-                      await onChanged(manifest.dataset_id);
-                    });
-                  }}>{t("local.switchRevision")}</button>
-                </span>}
-              </div>
-            ))}
-          </div>
-          {comparison !== null && (
-            <div className="local-revision-comparison">
-              <span>{t("local.diff")}</span>
-              <b>{t("local.diffStats", { added: comparison.added, removed: comparison.removed, changed: comparison.changed, unchanged: comparison.unchanged })}</b>
-            </div>
-          )}
-          <button type="button" className="local-project-export" disabled={busy !== null} onClick={() => void run("exporting", async () => {
-            const state = await captureLocalProjectState(manifest, settings, events);
-            await exportLocalProject(manifest, state);
-          })}>{t("local.exportProject")}</button>
-        </>
-      )}
-      <label className="local-project-import">
-        <span>{t("local.importProject")}</span>
-        <input
-          ref={packageInputRef}
-          type="file"
-          accept=".csproject,application/zip,application/vnd.candlescope.local-project+zip"
-          disabled={busy !== null}
-          onChange={(event) => {
-            const file = event.target.files?.[0];
-            if (!file) return;
-            void run("importing project", async () => {
-              const imported = await importLocalProject(file);
-              await onChanged(imported.dataset_id);
-              const importedSettings = await restoreLocalProjectState(imported.dataset, imported.client_state);
-              if (importedSettings !== null) onSettingsImported(importedSettings);
-              await onChanged(imported.dataset_id);
-            }).finally(() => {
-              if (packageInputRef.current !== null) packageInputRef.current.value = "";
-            });
-          }}
-        />
-      </label>
-      {archived.length > 0 && (
-        <div className="local-trash-list">
-          <strong>{t("local.archived")}</strong>
-          {archived.map((dataset) => (
-            <div key={dataset.dataset_id}><span>{dataset.name}<small>{dataset.symbol} · {dataset.interval}</small></span><button type="button" disabled={busy !== null} onClick={() => void run("unarchiving", async () => {
-              await updateLocalDataset(dataset.dataset_id, { archived: false });
-              await onChanged(dataset.dataset_id);
-            })}>{t("local.restoreLibrary")}</button></div>
-          ))}
-        </div>
-      )}
-      {trash.length > 0 && (
-        <div className="local-trash-list">
-          <strong>{t("local.recycle")}</strong>
-          {trash.slice(0, 3).map((entry) => (
-            <div key={entry.trash_id}><span>{entry.name}<small>{formatDate(entry.deleted_at)}</small></span><button type="button" disabled={busy !== null} onClick={() => void run("restoring", async () => {
-              const restored = await restoreLocalTrash(entry.trash_id);
-              await onChanged(restored.dataset_id);
-            })}>{t("local.restore")}</button></div>
-          ))}
-        </div>
-      )}
-    </section>
-  );
-}
 
 function LocalChart({
   manifest,
@@ -655,7 +247,7 @@ function LocalDatasetWorkspace({
   importJob: LocalImportJob | null;
   uploadProgress: number | null;
   onSelect(datasetId: string): void;
-  onImport: Parameters<typeof LocalImportForm>[0]["onImport"];
+  onImport(input: ResearchImportSubmitInput): Promise<void>;
   onCancelImport(): void;
   management: ReactNode;
   analysis: ReactNode;
@@ -840,7 +432,7 @@ function LocalDatasetWorkspace({
           />
         )}
         rightRail={(
-          <LocalDatasetRail
+          <ResearchDatasetRail
             datasets={datasets}
             selectedId={manifest.dataset_id}
             importing={importing}
@@ -899,16 +491,23 @@ export default function LocalApp() {
   useLocale();
   const pageExportRef = useRef<HTMLDivElement | null>(null);
   const { settings, setSettings, resolvedTheme } = useChartSettingsRuntime();
-  const [datasets, setDatasets] = useState<LocalDatasetManifest[]>([]);
-  const [indicatorPresets, setIndicatorPresets] = useState<IndicatorPreset[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [loadingLibrary, setLoadingLibrary] = useState(true);
-  const [importing, setImporting] = useState(false);
-  const [importJob, setImportJob] = useState<LocalImportJob | null>(null);
-  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
-  const importAbortRef = useRef<AbortController | null>(null);
-  const importJobRef = useRef<LocalImportJob | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const library = useResearchDataLibrary();
+  const {
+    datasets,
+    indicatorPresets,
+    selectedId,
+    selected,
+    loadingLibrary,
+    importing,
+    importJob,
+    uploadProgress,
+    error,
+    setError,
+    setSelectedId,
+    refresh,
+    handleImport,
+    cancelImport,
+  } = library;
   const [indicatorPanelOpen, setIndicatorPanelOpen] = useState(false);
   const [activeIndicatorCount, setActiveIndicatorCount] = useState(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -919,38 +518,6 @@ export default function LocalApp() {
     value: string;
   } | null>(null);
 
-  const refresh = useCallback(async (preferredId?: string) => {
-    const loaded = await listLocalDatasets();
-    setDatasets(loaded);
-    setSelectedId((current) => {
-      const candidate = preferredId ?? current;
-      if (candidate && loaded.some((dataset) => dataset.dataset_id === candidate)) return candidate;
-      return loaded[0]?.dataset_id ?? null;
-    });
-  }, []);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    setLoadingLibrary(true);
-    Promise.all([
-      listLocalDatasets(controller.signal),
-      fetchLocalIndicatorPresets(controller.signal),
-    ]).then(([loaded, presets]) => {
-      setDatasets(loaded);
-      setIndicatorPresets(presets);
-      setSelectedId(loaded[0]?.dataset_id ?? null);
-    }).catch((reason: unknown) => {
-      if (!controller.signal.aborted) setError(errorMessage(reason));
-    }).finally(() => {
-      if (!controller.signal.aborted) setLoadingLibrary(false);
-    });
-    return () => controller.abort();
-  }, []);
-
-  const selected = useMemo(
-    () => datasets.find((dataset) => dataset.dataset_id === selectedId) ?? null,
-    [datasets, selectedId],
-  );
   const intervalScope = selected === null
     ? null
     : `${selected.dataset_id}:${selected.data_epoch}`;
@@ -997,7 +564,7 @@ export default function LocalApp() {
     } catch {
       // The selection still works for this session when persistence is unavailable.
     }
-  }, [intervalScope, selected]);
+  }, [intervalScope, selected, setError]);
   const analysisStore = useMemo(() => selected === null ? null : new LocalAnalysisEventStore({
     datasetId: selected.dataset_id,
     dataEpoch: selected.data_epoch,
@@ -1033,62 +600,8 @@ export default function LocalApp() {
     }));
   }, []);
 
-  const handleImport: Parameters<typeof LocalImportForm>[0]["onImport"] = async (input) => {
-    setImporting(true);
-    setImportJob(null);
-    setUploadProgress(0);
-    setError(null);
-    const controller = new AbortController();
-    importAbortRef.current = controller;
-    try {
-      let job = await createLocalImportJob(input, {
-        signal: controller.signal,
-        onUploadProgress: setUploadProgress,
-      });
-      importJobRef.current = job;
-      setImportJob(job);
-      setUploadProgress(1);
-      while (job.status === "queued" || job.status === "running") {
-        await wait(250);
-        job = await getLocalImportJob(job.job_id);
-        importJobRef.current = job;
-        setImportJob(job);
-      }
-      if (job.status === "completed" && job.dataset !== null) {
-        await refresh(job.dataset.dataset_id);
-      } else if (job.status !== "cancelled") {
-        throw new LocalDataApiError(
-          job.error?.message ?? t("local.importFailed"),
-          422,
-          job.error?.code ?? "import_failed",
-        );
-      }
-    } catch (reason) {
-      if (reason instanceof DOMException && reason.name === "AbortError") return;
-      setError(errorMessage(reason));
-      throw reason;
-    } finally {
-      importAbortRef.current = null;
-      importJobRef.current = null;
-      setImporting(false);
-      setImportJob(null);
-      setUploadProgress(null);
-    }
-  };
-
-  const cancelImport = useCallback(() => {
-    importAbortRef.current?.abort();
-    const jobId = importJobRef.current?.job_id;
-    if (jobId !== undefined) {
-      void cancelLocalImportJob(jobId).then((job) => {
-        importJobRef.current = job;
-        setImportJob(job);
-      }).catch((reason: unknown) => setError(errorMessage(reason)));
-    }
-  }, []);
-
   const management = (
-    <LocalDatasetManagement
+    <ResearchDatasetManagement
       manifest={selected}
       settings={settings}
       events={analysisSnapshot.events}
@@ -1150,7 +663,7 @@ export default function LocalApp() {
             />
           )}
           <div className="local-dataset-truthbar">
-            <span>{selected ? `${selectedInterval}${selectedInterval === selected.interval ? t("local.sourceData") : t("local.derived", { interval: selected.interval })} · ${selected.timezone} · ${formatRows(selected.rows)} source bars · ${selected.volume_available ? "OHLCV" : t("local.volumeUnavailable")}` : t("local.waitData")}</span>
+            <span>{selected ? `${selectedInterval}${selectedInterval === selected.interval ? t("local.sourceData") : t("local.derived", { interval: selected.interval })} · ${selected.timezone} · ${formatResearchRows(selected.rows)} source bars · ${selected.volume_available ? "OHLCV" : t("local.volumeUnavailable")}` : t("local.waitData")}</span>
             <span>{selected ? `dataEpoch ${selected.data_epoch.slice(7, 19)}` : "source: local_dataset"}</span>
           </div>
         </div>
@@ -1200,7 +713,7 @@ export default function LocalApp() {
             exportOverlay={null}
             chart={<EmptyChart />}
             rightRail={(
-              <LocalDatasetRail
+              <ResearchDatasetRail
                 datasets={datasets}
                 selectedId={selectedId}
                 importing={importing}
@@ -1243,7 +756,7 @@ export default function LocalApp() {
           source="local"
           connectionStatus={error === null ? "offline-ready" : "error"}
           left={<><span className="status-dot connected" />{t("local.status.ready")}</>}
-          right={selected ? <>{t("local.statusRight", { events: analysisSnapshot.events.length, gaps: selected.excluded_range_count, date: formatDate(selected.imported_at) })}</> : loadingLibrary ? t("local.waitingLibrary") : t("local.noDataset")}
+          right={selected ? <>{t("local.statusRight", { events: analysisSnapshot.events.length, gaps: selected.excluded_range_count, date: formatResearchDate(selected.imported_at) })}</> : loadingLibrary ? t("local.waitingLibrary") : t("local.noDataset")}
         />
       )}
     />

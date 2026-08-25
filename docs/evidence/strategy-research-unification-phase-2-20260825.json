@@ -1,0 +1,44 @@
+{
+  "schemaVersion": "candlescope.strategy-research-unification.phase2/1",
+  "generatedAt": "2026-08-25T16:20:00+08:00",
+  "status": "PHASE2_ENGINEERING_COMPLETE",
+  "baselineSha": "f174937f288ff0fdac2e5c71bf0e39060fd6f8b4",
+  "candidateSha": "PENDING_PHASE2_COMMIT",
+  "dirtyPathsBefore": [
+    "?? docs/LOCAL_DATA_STRATEGY_RESEARCH_UNIFICATION_EXECUTION_zh.md"
+  ],
+  "dirtyPathsAfterOriginalTree": [
+    "?? docs/LOCAL_DATA_STRATEGY_RESEARCH_UNIFICATION_EXECUTION_zh.md"
+  ],
+  "commands": [
+    "npm.cmd run test:research-data",
+    "npx tsx --test src/features/local-data/**/*.test.{ts,tsx}",
+    "npm.cmd run test:backtest",
+    "npm.cmd run typecheck",
+    "npm.cmd run lint",
+    "npm.cmd run build"
+  ],
+  "exitCodes": {
+    "testResearchData": 0,
+    "testLocalData": 0,
+    "testBacktest": 0,
+    "typecheck": 0,
+    "lint": 1,
+    "build": 0
+  },
+  "scopedTests": {
+    "testResearchData": { "result": "PASS", "passed": 16 },
+    "testLocalData": { "result": "PASS", "passed": 28 }
+  },
+  "fullTests": { "result": "NOT_REQUIRED_THIS_PHASE" },
+  "browserScenarios": ["unchanged /local.html contract; Phase 0 screenshot remains the visual baseline"],
+  "runtimeMode": "n/a",
+  "effectiveFlags": {
+    "VITE_RESEARCH_DATA_LIBRARY_ENABLED": "unset_default_off"
+  },
+  "rollbackResult": "revert extract commit; no data migration",
+  "unresolvedFindings": [
+    "npm run lint fails repo-wide with ~150 pre-existing eslint errors",
+    "extracted components keep LocalApp set-state-in-effect patterns"
+  ]
+}

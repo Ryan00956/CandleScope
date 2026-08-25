@@ -32,7 +32,15 @@ function loadFixture(): {
   freezeInputs: Record<string, Record<string, unknown>>;
   invalid: Array<{ name: string; code: string; source: unknown }>;
 } {
-  return JSON.parse(readFileSync(fixturePath, "utf8"));
+  const parsed: unknown = JSON.parse(readFileSync(fixturePath, "utf8"));
+  if (parsed === null || typeof parsed !== "object") {
+    throw new Error("canonical research fixture is not an object");
+  }
+  return parsed as {
+    sourceRefs: Record<string, unknown>;
+    freezeInputs: Record<string, Record<string, unknown>>;
+    invalid: Array<{ name: string; code: string; source: unknown }>;
+  };
 }
 
 function importedFreezeInput(): Record<string, unknown> {

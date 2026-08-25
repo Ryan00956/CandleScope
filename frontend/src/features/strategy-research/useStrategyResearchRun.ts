@@ -7,6 +7,7 @@ import {
   type ChartStrategyResultBundle,
 } from "../backtest/chart-tester/chartStrategyResultCache.js";
 import {
+  ChartStrategyRunError,
   chartStrategyRunDiagnostics,
   qualitySummaryFromImportedManifest,
   runResearchBacktest,
@@ -18,7 +19,7 @@ import type {
 } from "../backtest/chart-tester/chartStrategyTesterState.js";
 import type { ChartStrategyRunRequest } from "../backtest/chart-tester/chartStrategyTesterUiModel.js";
 import type { LocalDatasetManifest } from "../local-data/localDataTypes.js";
-import type { ResearchSourceRefV1 } from "../research-data/researchDataTypes.js";
+import type { ResearchRuntimeMode, ResearchSourceRefV1 } from "../research-data/researchDataTypes.js";
 
 export function sessionFromResearchSource(
   source: ResearchSourceRefV1 | null,
@@ -48,6 +49,7 @@ export function useStrategyResearchRun(input: {
   source: ResearchSourceRefV1 | null;
   imported: LocalDatasetManifest | null;
   interval: string | null;
+  runtimeMode: ResearchRuntimeMode;
   onRunId(runId: string | null): void;
 }) {
   const tester = useMemo(() => new ChartStrategyTesterRuntime("strategy-research", null), []);
@@ -96,6 +98,13 @@ export function useStrategyResearchRun(input: {
     try {
       const source = input.source;
       if (source === null) throw new Error("source required");
+      if (input.runtimeMode === "LOCAL_OFFLINE" && (source.kind === "CURRENT_CHART" || materialize)) {
+        throw new ChartStrategyRunError(
+          "OFFLINE_LIVE_SOURCE_UNAVAILABLE",
+          "live market data is unavailable in the offline runtime",
+          { next_step: "use imported library data" },
+        );
+      }
       const researchSource = source.kind === "IMPORTED_DATASET" && input.imported
         ? {
           kind: "IMPORTED_DATASET" as const,

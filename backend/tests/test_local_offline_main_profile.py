@@ -34,6 +34,14 @@ with TestClient(Peer(app, "127.0.0.1")) as client:
     assert caps.status_code == 200, caps.text
     blocked = client.get("/api/v1/klines/history")
     assert blocked.status_code == 403, blocked.text
+    stream = client.get("/api/v1/stream")
+    assert stream.status_code == 403, stream.text
+    replay = client.get("/api/v1/replay/sessions")
+    assert replay.status_code == 403, replay.text
+    plugins = client.get("/api/v1/plugins")
+    assert plugins.status_code == 403, plugins.text
+    backtests = client.get("/api/v1/backtests/capabilities")
+    assert backtests.status_code == 200, backtests.text
     assert not hasattr(app.state, "plugin_runtime_host")
     assert not hasattr(app.state, "data_engine_runtime")
     assert not hasattr(app.state, "replay_runtime")

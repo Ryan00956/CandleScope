@@ -93,6 +93,7 @@ test("BAR_ONLY result panel does not advertise trade-sequence precision", () => 
       barOnly: true,
       error: null,
       runStatus: "READY",
+      network: null,
     }),
   );
   assert.match(html, /strategy-research-bar-only-result/);

@@ -1,0 +1,45 @@
+{
+  "schemaVersion": "candlescope.strategy-research-unification.phase9/1",
+  "generatedAt": "2026-08-25T20:20:00+08:00",
+  "status": "PHASE9_ENGINEERING_COMPLETE",
+  "baselineSha": "a669b3b08b390e2847fdaa48dbfb2e40010e0258",
+  "candidateSha": "PENDING_PHASE9_COMMIT",
+  "dirtyPathsBefore": ["?? docs/LOCAL_DATA_STRATEGY_RESEARCH_UNIFICATION_EXECUTION_zh.md"],
+  "dirtyPathsAfterOriginalTree": ["?? docs/LOCAL_DATA_STRATEGY_RESEARCH_UNIFICATION_EXECUTION_zh.md"],
+  "commands": [
+    "npm.cmd run test:research-data",
+    "npm.cmd run test:backtest",
+    "npm.cmd run typecheck",
+    "npm.cmd run check:architecture",
+    "pytest backend/tests/test_local_offline_main_profile.py backend/tests/test_local_offline_network_guard.py"
+  ],
+  "exitCodes": {
+    "testResearchData": 0,
+    "testBacktest": 0,
+    "typecheck": 0,
+    "architecture": 0,
+    "pytestOffline": 0
+  },
+  "scopedTests": {
+    "testResearchData": { "result": "PASS", "passed": 75 },
+    "testBacktest": { "result": "PASS", "passed": 121 },
+    "pytestOffline": { "result": "PASS", "passed": 3 }
+  },
+  "fullTests": { "result": "NOT_REQUIRED_THIS_PHASE" },
+  "browserScenarios": [
+    {
+      "note": "no interactive browser MCP this phase; offline launcher URL and health/runtime_mode gated by tests",
+      "launch": "/strategy.html?source=imported",
+      "compatibility": "/local.html retained"
+    }
+  ],
+  "runtimeMode": "LOCAL_OFFLINE",
+  "effectiveFlags": {
+    "VITE_RESEARCH_DATA_LIBRARY_ENABLED": "1 in start-local-offline only; production default remains 0"
+  },
+  "rollbackResult": "restore start-local-offline to /local.html; LocalOfflineBoundary unchanged",
+  "unresolvedFindings": [
+    "Interactive browser network-panel capture was not available this phase",
+    "Repo-wide check:i18n still reports a pre-existing LocalApp empty-state string from Phase 7"
+  ]
+}

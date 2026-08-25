@@ -16,6 +16,7 @@ export function StrategyResearchShell({
   onOpenLibrary,
   pageExportRef,
   controls,
+  runtimeMode,
   intervalSelector,
   toolbar,
   exportOverlay,
@@ -33,6 +34,7 @@ export function StrategyResearchShell({
   onOpenLibrary(): void;
   pageExportRef: Ref<HTMLDivElement>;
   controls: ReactNode;
+  runtimeMode: "LIVE" | "LOCAL_OFFLINE";
   intervalSelector: ReactNode;
   toolbar: ReactNode;
   exportOverlay: ReactNode;
@@ -44,7 +46,12 @@ export function StrategyResearchShell({
   extraSurfaces: ReactNode;
 }) {
   return (
-    <div className="strategy-research-shell" data-testid="strategy-research-shell" data-visual-state={visualState}>
+    <div
+      className="strategy-research-shell"
+      data-testid="strategy-research-shell"
+      data-visual-state={visualState}
+      data-runtime-mode={runtimeMode}
+    >
       <MarketPageFrame
         rootRef={pageExportRef}
         topBar={(

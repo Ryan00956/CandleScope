@@ -42,6 +42,8 @@ import { StrategyResearchResultPanel } from "./StrategyResearchResultPanel.js";
 import { StrategyResearchScriptPanel } from "./StrategyResearchScriptPanel.js";
 import { StrategyResearchShell } from "./StrategyResearchShell.js";
 import { useStrategyResearchRun } from "./useStrategyResearchRun.js";
+import { loadStrategyResearchHostHealth } from "./strategyResearchHostHealth.js";
+import type { StrategyResearchNetworkDiagnostics } from "./strategyResearchHostHealth.js";
 import {
   parseStrategyResearchLaunch,
   strategyResearchLaunchActions,
@@ -154,8 +156,24 @@ export default function StrategyResearchApp({
     dispatchImportedSource(dispatch, source, selected);
   }, [dispatch, launchImported, library.selected, source]);
 
+  const [networkDiagnostics, setNetworkDiagnostics] = useState<StrategyResearchNetworkDiagnostics | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void loadStrategyResearchHostHealth(controller.signal).then((health) => {
+      runtime.runtimeMode = health.runtimeMode;
+      setNetworkDiagnostics(health.network);
+      bump();
+    }).catch((reason: unknown) => {
+      if (controller.signal.aborted) return;
+      console.error("Strategy research host health failed", reason);
+    });
+    return () => controller.abort();
+  }, [runtime]);
+
   const onSelectKind = useCallback((kind: ResearchSourceKind) => {
     if (kind === "CURRENT_CHART") {
+      if (runtime.runtimeMode === "LOCAL_OFFLINE") return;
       dispatch({ type: "source/select", source: currentChartSource() });
       return;
     }
@@ -234,6 +252,7 @@ export default function StrategyResearchApp({
     source,
     imported: importedManifest,
     interval: selectedInterval,
+    runtimeMode: runtime.runtimeMode,
     onRunId: (runId) => dispatch({ type: "result/setRun", runId }),
   });
 
@@ -279,6 +298,7 @@ export default function StrategyResearchApp({
       barOnly={researchRun.barOnly}
       error={researchRun.error}
       runStatus={researchRun.runStatus}
+      network={networkDiagnostics}
     />
   );
   const controls = (
@@ -337,6 +357,7 @@ export default function StrategyResearchApp({
     onOpenLibrary: () => dispatch({ type: "source/libraryOpen", open: true }),
     pageExportRef,
     controls,
+    runtimeMode: runtime.runtimeMode,
     drawer,
     script,
     result,

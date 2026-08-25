@@ -18,7 +18,7 @@ Usage: ./start-local-offline.sh [options]
   --data-dir DIR         Local analysis directory (default: backend/data/local-data)
   --backend-port PORT    Backend port (default: 18080)
   --frontend-port PORT   Vite port (default: 15173)
-  --no-browser           Do not open the local analysis page
+  --no-browser           Do not open the research workspace
   --help                 Show this help
 EOF
 }
@@ -79,6 +79,8 @@ DATA_DIR="$(cd "$DATA_DIR" && pwd)"
 
 export CANDLESCOPE_RUNTIME_MODE=LOCAL_OFFLINE
 export CANDLESCOPE_LOCAL_DATA_DIR="$DATA_DIR"
+export CANDLESCOPE_RESEARCH_DATA_LIBRARY_ENABLED=1
+export VITE_RESEARCH_DATA_LIBRARY_ENABLED=1
 export VITE_API_PROXY_TARGET="http://127.0.0.1:$BACKEND_PORT"
 export VITE_DEV_PORT="$FRONTEND_PORT"
 export PYTHONIOENCODING=utf-8
@@ -107,7 +109,7 @@ BACKEND_PID=$!
 FRONTEND_PID=$!
 
 HEALTH_URL="http://127.0.0.1:$BACKEND_PORT/health"
-PAGE_URL="http://127.0.0.1:$FRONTEND_PORT/local.html"
+PAGE_URL="http://127.0.0.1:$FRONTEND_PORT/strategy.html?source=imported"
 SECONDS=0
 READY=0
 while [[ "$SECONDS" -lt 30 ]]; do

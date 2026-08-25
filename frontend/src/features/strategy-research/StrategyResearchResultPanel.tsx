@@ -6,6 +6,7 @@ import {
 import type { ChartStrategyResultBundle } from "../backtest/chart-tester/chartStrategyResultCache.js";
 import type { ChartStrategyTesterStaleReason } from "../backtest/chart-tester/chartStrategyTesterState.js";
 import { useLocale } from "../../i18n/useLocale.js";
+import type { StrategyResearchNetworkDiagnostics } from "./strategyResearchHostHealth.js";
 
 export function StrategyResearchResultPanel({
   result,
@@ -14,6 +15,7 @@ export function StrategyResearchResultPanel({
   barOnly,
   error,
   runStatus,
+  network,
 }: {
   result: ChartStrategyResultBundle | null;
   stale: boolean;
@@ -21,6 +23,7 @@ export function StrategyResearchResultPanel({
   barOnly: boolean;
   error: string | null;
   runStatus: string;
+  network: StrategyResearchNetworkDiagnostics | null;
 }) {
   const locale = useLocale();
   if (error !== null) {
@@ -32,6 +35,11 @@ export function StrategyResearchResultPanel({
         <p>{t("strategy.resultSlot")}</p>
         {barOnly ? (
           <p data-testid="strategy-research-bar-only-result">{t("chartTester.result.fidelityFast")}</p>
+        ) : null}
+        {network !== null ? (
+          <p data-testid="strategy-research-network-guard">
+            {network.installed ? t("strategy.network.installed") : t("strategy.network.missing")}
+          </p>
         ) : null}
       </section>
     );
@@ -57,6 +65,14 @@ export function StrategyResearchResultPanel({
         stale={stale}
         onOpenTrades={() => undefined}
       />
+      {network !== null ? (
+        <details className="strategy-research-network-guard" data-testid="strategy-research-network-guard">
+          <summary>{t("strategy.network.summary")}</summary>
+          <p>{network.installed ? t("strategy.network.installed") : t("strategy.network.missing")}</p>
+          <p>{t("strategy.network.policy", { policy: network.policy })}</p>
+          <p>{t("strategy.network.blocked", { count: network.blockedAttempts })}</p>
+        </details>
+      ) : null}
     </section>
   );
 }

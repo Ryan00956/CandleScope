@@ -153,3 +153,5 @@ export function useResearchDataLibrary() {
     cancelImport,
   };
 }
+
+export type ResearchDataLibraryController = ReturnType<typeof useResearchDataLibrary>;

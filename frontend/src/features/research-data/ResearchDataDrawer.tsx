@@ -1,10 +1,12 @@
+import type { ReactNode } from "react";
+
 import { t } from "../../i18n/index.js";
 import { ordinarySourceLabel, isCapabilityAvailable } from "./researchDataSourceModel.js";
 import type { ResearchCapabilitySummaryV1, ResearchRuntimeMode, ResearchSourceKind } from "./researchDataTypes.js";
 import { RESEARCH_DATA_LIBRARY_ENABLED } from "./researchDataFlags.js";
 import { ResearchDatasetRail } from "./ResearchDatasetRail.js";
 import { ResearchDatasetManagement } from "./ResearchDatasetManagement.js";
-import { useResearchDataLibrary } from "./useResearchDataLibrary.js";
+import type { ResearchDataLibraryController } from "./useResearchDataLibrary.js";
 import type { ChartSettings } from "../settings/chartAppearanceSettings.js";
 import type { LocalAnalysisEvent } from "../local-data/localAnalysisTypes.js";
 
@@ -13,9 +15,12 @@ export function ResearchDataDrawer(props: {
   runtimeMode: ResearchRuntimeMode;
   capabilities: ResearchCapabilitySummaryV1 | null;
   libraryEnabled?: boolean;
+  library?: ResearchDataLibraryController;
   settings: ChartSettings;
   events: readonly LocalAnalysisEvent[];
+  analysis?: ReactNode;
   onSelectKind(kind: ResearchSourceKind): void;
+  onSelectDataset?(datasetId: string): void;
   onClose(): void;
 }) {
   if (!props.open) return null;
@@ -26,21 +31,26 @@ function ResearchDataDrawerBody({
   runtimeMode,
   capabilities,
   libraryEnabled = RESEARCH_DATA_LIBRARY_ENABLED,
+  library,
   settings,
   events,
+  analysis = null,
   onSelectKind,
+  onSelectDataset,
   onClose,
 }: {
   open: boolean;
   runtimeMode: ResearchRuntimeMode;
   capabilities: ResearchCapabilitySummaryV1 | null;
   libraryEnabled?: boolean;
+  library?: ResearchDataLibraryController;
   settings: ChartSettings;
   events: readonly LocalAnalysisEvent[];
+  analysis?: ReactNode;
   onSelectKind(kind: ResearchSourceKind): void;
+  onSelectDataset?(datasetId: string): void;
   onClose(): void;
 }) {
-  const library = useResearchDataLibrary();
   const kinds: ResearchSourceKind[] = ["CURRENT_CHART", "IMPORTED_DATASET", "COMPLETED_RUN"];
   return (
     <aside className="research-data-drawer" data-testid="research-data-drawer">
@@ -72,14 +82,17 @@ function ResearchDataDrawerBody({
           );
         })}
       </div>
-      {libraryEnabled ? (
+      {libraryEnabled && library ? (
         <ResearchDatasetRail
           datasets={library.datasets}
           selectedId={library.selectedId}
           importing={library.importing}
           importJob={library.importJob}
           uploadProgress={library.uploadProgress}
-          onSelect={library.setSelectedId}
+          onSelect={(datasetId) => {
+            library.setSelectedId(datasetId);
+            onSelectDataset?.(datasetId);
+          }}
           onImport={library.handleImport}
           onCancelImport={library.cancelImport}
           management={(
@@ -92,7 +105,7 @@ function ResearchDataDrawerBody({
               onError={library.setError}
             />
           )}
-          analysis={null}
+          analysis={analysis}
         />
       ) : null}
     </aside>

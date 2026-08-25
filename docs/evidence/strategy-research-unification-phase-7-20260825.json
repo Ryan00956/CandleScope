@@ -1,0 +1,44 @@
+{
+  "schemaVersion": "candlescope.strategy-research-unification.phase7/1",
+  "generatedAt": "2026-08-25T18:40:00+08:00",
+  "status": "PHASE7_ENGINEERING_COMPLETE",
+  "baselineSha": "fbbfbab7930f63f06c46d1c8f1c0959d4969f471",
+  "candidateSha": "PENDING_PHASE7_COMMIT",
+  "dirtyPathsBefore": ["?? docs/LOCAL_DATA_STRATEGY_RESEARCH_UNIFICATION_EXECUTION_zh.md"],
+  "dirtyPathsAfterOriginalTree": ["?? docs/LOCAL_DATA_STRATEGY_RESEARCH_UNIFICATION_EXECUTION_zh.md"],
+  "commands": [
+    "npm.cmd run test:research-data",
+    "npm.cmd run test:backtest",
+    "npm.cmd run typecheck",
+    "npm.cmd run check:architecture"
+  ],
+  "exitCodes": {
+    "testResearchData": 0,
+    "testBacktest": 0,
+    "typecheck": 0,
+    "architecture": 0
+  },
+  "scopedTests": {
+    "testResearchData": { "result": "PASS", "passed": 68 },
+    "testBacktest": { "result": "PASS", "passed": 118 }
+  },
+  "fullTests": { "result": "NOT_REQUIRED_THIS_PHASE" },
+  "browserScenarios": [
+    {
+      "route": "/strategy.html",
+      "note": "no interactive browser MCP this phase; imported-data parity gated by unit/source tests",
+      "visualState": "first",
+      "emptyChart": "strategy-research-empty-chart"
+    }
+  ],
+  "runtimeMode": "n/a",
+  "effectiveFlags": {
+    "VITE_RESEARCH_DATA_LIBRARY_ENABLED": "0"
+  },
+  "rollbackResult": "flag=0 restores LocalApp assembly on /local.html; interval/analysis/indicator persistence keys unchanged",
+  "unresolvedFindings": [
+    "CURRENT_CHART chart remains a placeholder until Phase 8 Frozen Run",
+    "Script and result slots remain placeholders until Phase 8",
+    "Interactive browser network-panel capture was not available; allowlist is enforced by fetch mock and source tests"
+  ]
+}

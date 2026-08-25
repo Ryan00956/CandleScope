@@ -111,7 +111,10 @@ test("unified shell renders without creating a second library store or loading M
   assert.match(html, /strategy-research-chart-slot/);
   assert.doesNotMatch(html, /monaco/i);
   const appSource = readFileSync(path.resolve(here, "../StrategyResearchApp.tsx"), "utf8");
+  const drawerSource = readFileSync(path.resolve(here, "../../research-data/ResearchDataDrawer.tsx"), "utf8");
   assert.doesNotMatch(appSource, /monaco-editor|PythonStudio|BacktestApp|LocalApp/);
+  assert.match(appSource, /useResearchDataLibrary\(\)/);
+  assert.doesNotMatch(drawerSource, /useResearchDataLibrary\(\)/);
 });
 
 test("compatibility mains call the same bootstrap and keep legacy fallbacks", () => {

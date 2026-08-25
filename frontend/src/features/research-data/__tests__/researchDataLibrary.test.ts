@@ -137,14 +137,20 @@ test("import job polling follows queued to completed and cancel stops at cancell
 });
 
 test("LocalApp no longer embeds import or management implementations and keeps interval localStorage keys", () => {
+  const directory = path.dirname(fileURLToPath(import.meta.url));
   const source = readFileSync(
-    path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../local-data/LocalApp.tsx"),
+    path.resolve(directory, "../../local-data/LocalApp.tsx"),
+    "utf8",
+  );
+  const intervalSource = readFileSync(
+    path.resolve(directory, "../../local-data/useLocalIntervalSelection.ts"),
     "utf8",
   );
   assert.match(source, /useResearchDataLibrary/);
   assert.match(source, /ResearchDatasetRail/);
   assert.match(source, /ResearchDatasetManagement/);
-  assert.match(source, /candlescope:local-interval:v1:/);
+  assert.match(source, /useLocalIntervalSelection/);
+  assert.match(intervalSource, /candlescope:local-interval:v1:/);
   assert.doesNotMatch(source, /function LocalImportForm/);
   assert.doesNotMatch(source, /function LocalDatasetRail/);
   assert.doesNotMatch(source, /function LocalDatasetManagement/);

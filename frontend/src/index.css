@@ -8979,8 +8979,15 @@ body {
   white-space: nowrap;
 }
 .replay-entry-link:hover { background: rgba(245, 158, 11, 0.16); }
+.backtest-entry-link {
+  border-color: rgba(59, 130, 246, 0.5);
+  color: #60a5fa;
+  background: rgba(59, 130, 246, 0.1);
+}
+.backtest-entry-link:hover { background: rgba(59, 130, 246, 0.18); }
 .replay-entry-disabled { color: var(--text-muted); border-color: var(--border-color); cursor: not-allowed; }
 .replay-entry-link:focus-visible,
+.backtest-entry-link:focus-visible,
 .replay-top-bar a:focus-visible,
 .replay-control-stack button:focus-visible,
 .replay-right-rail button:focus-visible {

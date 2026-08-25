@@ -363,7 +363,7 @@ export function rebuildReplayViewerSeries(
   } = {},
 ): void {
   const projectedRows = aggregateReplayBaseBars(
-    source.snapshot({ force: true }),
+    source.snapshot(),
     baseInterval,
     displayInterval,
   );
@@ -556,6 +556,87 @@ function firstDifferentRow(
   return previous.length === next.length ? -1 : sharedLength;
 }
 
+function tailChangedTime(sourceDelta: WindowDelta): number | null {
+  if (sourceDelta.type === WINDOW_DELTA_TYPES.TICK) {
+    const time = Number(sourceDelta.bar?.time);
+    return Number.isSafeInteger(time) && time >= 0 ? time : null;
+  }
+  if (sourceDelta.type !== WINDOW_DELTA_TYPES.APPEND) return null;
+  const starts = (sourceDelta.changedRanges ?? [])
+    .filter((range) => range.type === WINDOW_DELTA_TYPES.APPEND)
+    .map((range) => Number(range.start))
+    .filter((time) => Number.isSafeInteger(time) && time >= 0);
+  return starts.length === 0 ? null : Math.min(...starts);
+}
+
+function lowerBoundReplayTime(rows: readonly KlineBar[], time: number): number {
+  let left = 0;
+  let right = rows.length;
+  while (left < right) {
+    const middle = left + Math.floor((right - left) / 2);
+    if (Number(rows[middle]?.time) < time) left = middle + 1;
+    else right = middle;
+  }
+  return left;
+}
+
+function applyReplayViewerTailDelta(
+  target: SeriesWindowStore,
+  sourceRows: readonly KlineBar[],
+  previousRows: readonly KlineBar[],
+  baseInterval: string,
+  displayInterval: string,
+  sourceDelta: WindowDelta,
+  publicTimeMs: number | null,
+  meta: Record<string, unknown>,
+): WindowDelta | null {
+  const trimmedLeft = Number(sourceDelta.trimmedLeft) || 0;
+  const trimmedRight = Number(sourceDelta.trimmedRight) || 0;
+  if (trimmedLeft !== 0 || trimmedRight !== 0 || previousRows.length === 0) {
+    return null;
+  }
+  const changedTime = tailChangedTime(sourceDelta);
+  if (changedTime === null) return null;
+  const displayTimeline = replayIntervalTimeline(displayInterval, "display interval");
+  const bucketStart = timelineTime(
+    displayTimeline.floor(changedTime),
+    "display bucket start",
+  );
+  const previousTail = previousRows.at(-1);
+  if (previousTail === undefined || Number(previousTail.time) > bucketStart) {
+    return null;
+  }
+  const sourceStart = lowerBoundReplayTime(sourceRows, bucketStart);
+  if (sourceStart >= sourceRows.length) return null;
+  const projectedTail = aggregateReplayBaseBars(
+    sourceRows.slice(sourceStart),
+    baseInterval,
+    displayInterval,
+  );
+  const contextTail = revealedContextRows(previousRows, publicTimeMs)
+    .filter((row) => Number(row.time) >= bucketStart);
+  const tailRows = mergeDisplayContextWithProjection(contextTail, projectedTail);
+  if (tailRows.length === 0) return null;
+
+  const previousBudget = target.maxBars;
+  const appended = tailRows.filter((row) => row.time > previousTail.time);
+  target.maxBars = Math.max(previousBudget, previousRows.length + appended.length);
+  try {
+    let result: WindowDelta | null = null;
+    const updatedTail = tailRows.find((row) => row.time === previousTail.time);
+    if (updatedTail !== undefined && !sameProjectedRow(
+      previousTail as Readonly<Record<string, unknown>>,
+      updatedTail as Readonly<Record<string, unknown>>,
+    )) {
+      result = target.applyTick(updatedTail, meta);
+    }
+    if (appended.length > 0) result = target.applyRange(appended, meta);
+    return result ?? target.applyRange(tailRows, meta);
+  } finally {
+    target.maxBars = previousBudget;
+  }
+}
+
 /**
  * Reprojects a source-store delta without publishing a replacement snapshot.
  *
@@ -572,11 +653,7 @@ export function applyReplayViewerSeriesDelta(
   displayInterval: string,
   sourceDelta: WindowDelta,
 ): WindowDelta {
-  const projectedRows = aggregateReplayBaseBars(
-    source.snapshot({ force: true }),
-    baseInterval,
-    displayInterval,
-  );
+  const sourceRows = source.snapshot();
   const displaySeconds = nominalSeconds(displayInterval, "display interval");
   const sourceDeltaType = sourceDelta.type;
   const meta = {
@@ -588,7 +665,7 @@ export function applyReplayViewerSeriesDelta(
   target.intervalSeconds = displaySeconds;
   target.seriesKey = buildReplayViewerSeriesKey(source, displayInterval);
 
-  if (projectedRows.length === 0 || sourceDeltaType === WINDOW_DELTA_TYPES.CLEAR) {
+  if (sourceRows.length === 0 || sourceDeltaType === WINDOW_DELTA_TYPES.CLEAR) {
     return target.clear(meta);
   }
   // A bounded before-window intentionally stops following a monotonic
@@ -606,6 +683,24 @@ export function applyReplayViewerSeriesDelta(
   const publicTimeMs = Number.isSafeInteger(rawPublicTimeMs) && rawPublicTimeMs >= 0
     ? rawPublicTimeMs
     : null;
+  if (!authoritativeReset && !target.rightTruncated) {
+    const tailResult = applyReplayViewerTailDelta(
+      target,
+      sourceRows,
+      previousRows,
+      baseInterval,
+      displayInterval,
+      sourceDelta,
+      publicTimeMs,
+      meta,
+    );
+    if (tailResult !== null) return tailResult;
+  }
+  const projectedRows = aggregateReplayBaseBars(
+    sourceRows,
+    baseInterval,
+    displayInterval,
+  );
   const preserveRevealedPrefix = sourceDeltaType !== WINDOW_DELTA_TYPES.REPLACE
     || sourceDelta.preserveRevealedPrefix === true;
   const contextRows = revealedContextRows(previousRows, publicTimeMs);

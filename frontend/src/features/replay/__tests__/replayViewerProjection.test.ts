@@ -291,7 +291,7 @@ test("tail projection publishes tick then append semantics like the live chart p
     seriesKey: "replay-base",
   });
   source.replace(Array.from({ length: 14 }, (_, index) => baseBar(index)));
-  const viewer = new SeriesWindowStore();
+  const viewer = new SeriesWindowStore({ maxBars: 1 });
   rebuildReplayViewerSeries(viewer, source, "1m", "15m");
   const emitted: string[] = [];
   const unsubscribe = viewer.subscribe((delta) => { emitted.push(delta.type); });
@@ -307,6 +307,31 @@ test("tail projection publishes tick then append semantics like the live chart p
     viewer.snapshot(),
     aggregateReplayBaseBars(source.snapshot(), "1m", "15m"),
   );
+});
+
+test("tail projection does not reaggregate unchanged historical buckets", () => {
+  const source = new SeriesWindowStore({
+    intervalSeconds: 60,
+    seriesKey: "replay-base",
+  });
+  source.replace(Array.from({ length: 1_000 }, (_, index) => baseBar(index)));
+  const viewer = new SeriesWindowStore();
+  rebuildReplayViewerSeries(viewer, source, "1m", "15m");
+  const firstHistoricalBar = source.snapshot()[0];
+  assert.ok(firstHistoricalBar);
+  Object.defineProperty(firstHistoricalBar, "high", {
+    configurable: true,
+    enumerable: true,
+    get: () => {
+      throw new Error("unchanged history was reaggregated");
+    },
+  });
+
+  const sourceDelta = source.applyRange([baseBar(1_000)]);
+  assert.doesNotThrow(() => {
+    applyReplayViewerSeriesDelta(viewer, source, "1m", "15m", sourceDelta);
+  });
+  assert.equal(viewer.last()?.sourceToTime, HOUR_START + 1_000 * 60);
 });
 
 test("display-only context survives execution ticks and explicit restore drops it", () => {

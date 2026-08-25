@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from app.replay.canonical import canonical_json, canonical_sha256
+from app.replay.training import review as review_module
 from app.replay.training.account import fee_for_notional
 from app.replay.training.errors import TrainingRunError
 from app.replay.training.models import ReplayV2CommandType, TimeDisclosurePolicy
@@ -26,6 +27,53 @@ from tests.test_replay_v2_training_phase6 import (
 
 
 pytestmark = pytest.mark.anyio
+
+
+async def test_review_minimum_equity_resumes_from_latest_drawdown_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    connection.execute(
+        """
+        CREATE TABLE replay_review_timeline_event(
+            run_id TEXT NOT NULL,
+            timeline_sequence INTEGER NOT NULL,
+            category TEXT NOT NULL,
+            projection_json TEXT NOT NULL
+        )
+        """
+    )
+    rows = [
+        ("run-1", sequence, "COMMAND", canonical_json({"domain": {"equity": "100"}}))
+        for sequence in range(1, 101)
+    ]
+    rows.extend(
+        (
+            ("run-1", 101, "EQUITY", canonical_json({"domain": {"equity": "80"}})),
+            ("run-1", 102, "COMMAND", canonical_json({"domain": {"equity": "75"}})),
+            ("run-1", 103, "COMMAND", canonical_json({"domain": {"equity": "90"}})),
+        )
+    )
+    connection.executemany(
+        "INSERT INTO replay_review_timeline_event VALUES (?, ?, ?, ?)",
+        rows,
+    )
+    original_loads = review_module.json.loads
+    decoded = 0
+
+    def observed_loads(value: str) -> object:
+        nonlocal decoded
+        decoded += 1
+        return original_loads(value)
+
+    monkeypatch.setattr(review_module.json, "loads", observed_loads)
+    assert ReviewRecorder._minimum_prior_equity(
+        connection,
+        run_id="run-1",
+    ) == Decimal("75")
+    assert decoded == 3
+    connection.close()
 
 
 async def test_review_descriptors_distinguish_hedge_structure_from_audit_receipts() -> (
@@ -247,6 +295,22 @@ async def test_opposite_funding_fee_revision_retry_and_restart_are_exact(
         assert portfolio["funding_cashflow"] == "0"
         assert portfolio["active_fee_policy"]["policy_version"] == ("BINANCE_VIP0_V1")
         assert portfolio["active_fee_policy"]["liquidation_fee_bps"] == "25"
+        aggregated = await training.store.base_store.run_extension_read(
+            lambda connection: training.store._hedge_accounting_totals_by_leg(
+                connection,
+                run_id=run_id,
+            )
+        )
+        assert aggregated[("track-1", "LONG")] == (
+            Decimal("-0.01"),
+            Decimal("0.06"),
+            Decimal("0"),
+        )
+        assert aggregated[("track-1", "SHORT")] == (
+            Decimal("0.01"),
+            Decimal("0.06"),
+            Decimal("0"),
+        )
 
         # Simulate a lost response: replay exactly the already-committed public
         # input.  The applied receipt short-circuits both settlements and cash.
@@ -306,6 +370,26 @@ async def test_opposite_funding_fee_revision_retry_and_restart_are_exact(
         )
         child_run_id = str(forked["run"]["run_id"])
         child_portfolio = (await training.get_market_tracks(child_run_id))["portfolio"]
+        child_live_portfolio = (
+            await training.get_live_market_tracks(child_run_id)
+        )["portfolio"]
+        for field in (
+            "cash_balance",
+            "equity",
+            "available_equity",
+            "reserved_margin",
+            "margin_used",
+            "realized_pnl",
+            "unrealized_pnl",
+            "fees_paid",
+            "funding_cashflow",
+            "liquidation_fees_paid",
+            "risk_ratio",
+            "positions",
+            "orders",
+            "history",
+        ):
+            assert child_live_portfolio[field] == child_portfolio[field]
         child_accounting = {
             item["position_side"]: item
             for item in child_portfolio["hedge_state"]["leg_accounting"]

@@ -8,7 +8,9 @@ import json
 import os
 import shutil
 import sqlite3
+import threading
 import uuid
+from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from decimal import Decimal
@@ -41,6 +43,7 @@ PUBLIC_EVENT_SCHEMA_VERSION = "replay.hedge-public-history.event.v1"
 SIMULATION_EVENT_SCHEMA_VERSION = "replay.hedge-simulation-input.event.v1"
 HEDGE_INPUT_PROOF_SCHEMA_VERSION = "replay.hedge-input-binding.v1"
 HEDGE_INPUT_AUDIT_SCHEMA_VERSION = "replay.hedge-input-audit.v1"
+HEDGE_INPUT_CHECKSUM_CACHE_MAX_OBJECTS = 64
 PUBLIC_INPUT_FIDELITY = "PINNED_HISTORICAL_PUBLIC_INPUT"
 HYBRID_PUBLIC_INPUT_FIDELITY = "VERSIONED_HYBRID_PUBLIC_INPUT"
 SIMULATION_INPUT_FIDELITY = "VERSIONED_DETERMINISTIC_SIMULATION"
@@ -1610,6 +1613,8 @@ class HedgeInputArchiveManager:
         self._verified_event_cache: dict[
             tuple[str, str, str], tuple[HedgeInputEvent, ...]
         ] = {}
+        self._checksum_cache: OrderedDict[tuple[str, int, int], str] = OrderedDict()
+        self._checksum_cache_lock = threading.RLock()
 
     async def start(self) -> None:
         await asyncio.to_thread(self._ensure_dirs)
@@ -2791,7 +2796,55 @@ class HedgeInputArchiveManager:
                 details={"source_kind": source_kind, "fallback_applied": False},
             )
         path = self._owned_path(str(row["local_path"]))
-        if not path.is_file() or _digest_file(path) != row["checksum_sha256"]:
+        if not path.is_file():
+            raise TrainingRunError(
+                "HEDGE_INPUT_OBJECT_MISSING_OR_TAMPERED",
+                "pinned HEDGE input is missing or changed",
+                status_code=409,
+                details={"source_kind": source_kind, "fallback_applied": False},
+            )
+        stat = path.stat()
+        row_keys = row.keys()
+        if "byte_size" in row_keys and stat.st_size != int(row["byte_size"]):
+            raise TrainingRunError(
+                "HEDGE_INPUT_OBJECT_MISSING_OR_TAMPERED",
+                "pinned HEDGE input is missing or changed",
+                status_code=409,
+                details={"source_kind": source_kind, "fallback_applied": False},
+            )
+        key = (str(path), stat.st_mtime_ns, stat.st_size)
+        with self._checksum_cache_lock:
+            checksum = self._checksum_cache.get(key)
+            if checksum is not None:
+                self._checksum_cache.move_to_end(key)
+        if checksum is None:
+            checksum = await asyncio.to_thread(_digest_file, path)
+            verified_stat = path.stat()
+            if (
+                verified_stat.st_mtime_ns != stat.st_mtime_ns
+                or verified_stat.st_size != stat.st_size
+            ):
+                raise TrainingRunError(
+                    "HEDGE_INPUT_OBJECT_MISSING_OR_TAMPERED",
+                    "pinned HEDGE input changed during checksum validation",
+                    status_code=409,
+                    details={"source_kind": source_kind, "fallback_applied": False},
+                )
+            with self._checksum_cache_lock:
+                stale_keys = tuple(
+                    cached_key
+                    for cached_key in self._checksum_cache
+                    if cached_key[0] == str(path) and cached_key != key
+                )
+                for stale_key in stale_keys:
+                    self._checksum_cache.pop(stale_key, None)
+                self._checksum_cache[key] = checksum
+                self._checksum_cache.move_to_end(key)
+                while (
+                    len(self._checksum_cache) > HEDGE_INPUT_CHECKSUM_CACHE_MAX_OBJECTS
+                ):
+                    self._checksum_cache.popitem(last=False)
+        if checksum != row["checksum_sha256"]:
             raise TrainingRunError(
                 "HEDGE_INPUT_OBJECT_MISSING_OR_TAMPERED",
                 "pinned HEDGE input is missing or changed",
@@ -2807,13 +2860,7 @@ class HedgeInputArchiveManager:
         path: Path,
         checksum_sha256: str,
     ) -> tuple[HedgeInputEvent, ...]:
-        """Reuse parsed immutable events after the runtime checksum guard passes.
-
-        ``_guard_catalog_row`` hashes the owned object on every access, so this
-        cache cannot hide a post-start mutation.  The cache only avoids parsing,
-        canonical validation, and a second file digest for bytes that just
-        matched the checksum pinned in SQLite.
-        """
+        """Reuse parsed immutable events after the runtime checksum guard passes."""
 
         key = (source_kind, str(path), checksum_sha256)
         cached = self._verified_event_cache.get(key)
@@ -3001,30 +3048,7 @@ class HedgeInputArchiveManager:
             if runtime_snapshot is None
             else runtime_snapshot
         )
-
-        def read(connection: sqlite3.Connection) -> tuple[dict[str, int], int]:
-            public_cursors = {
-                str(row["track_id"]): int(row["last_event_sequence"])
-                for row in connection.execute(
-                    """
-                    SELECT track_id, last_event_sequence
-                    FROM replay_hedge_track_public_projection WHERE run_id = ?
-                    """,
-                    (run_id,),
-                ).fetchall()
-            }
-            simulation = connection.execute(
-                """
-                SELECT last_event_sequence FROM replay_hedge_input_projection
-                WHERE run_id = ? AND source_kind = 'SIMULATION'
-                """,
-                (run_id,),
-            ).fetchone()
-            if simulation is None:
-                raise TypeError("HEDGE simulation projection is missing")
-            return public_cursors, int(simulation["last_event_sequence"])
-
-        public_cursors, simulation_cursor = await self.store.run_extension_read(read)
+        public_cursors, simulation_cursor = await self._projection_cursors(run_id)
         candidates = [
             event.event_time_ms
             for event in public
@@ -3052,30 +3076,7 @@ class HedgeInputArchiveManager:
             if runtime_snapshot is None
             else runtime_snapshot
         )
-
-        def read(connection: sqlite3.Connection) -> tuple[dict[str, int], int]:
-            public_cursors = {
-                str(row["track_id"]): int(row["last_event_sequence"])
-                for row in connection.execute(
-                    """
-                    SELECT track_id, last_event_sequence
-                    FROM replay_hedge_track_public_projection WHERE run_id = ?
-                    """,
-                    (run_id,),
-                ).fetchall()
-            }
-            simulation_row = connection.execute(
-                """
-                SELECT last_event_sequence FROM replay_hedge_input_projection
-                WHERE run_id = ? AND source_kind = 'SIMULATION'
-                """,
-                (run_id,),
-            ).fetchone()
-            if simulation_row is None:
-                raise TypeError("HEDGE simulation projection is missing")
-            return public_cursors, int(simulation_row["last_event_sequence"])
-
-        public_cursors, simulation_cursor = await self.store.run_extension_read(read)
+        public_cursors, simulation_cursor = await self._projection_cursors(run_id)
         return tuple(
             sorted(
                 (
@@ -3100,6 +3101,71 @@ class HedgeInputArchiveManager:
                 ),
             )
         )
+
+    async def events_through(
+        self,
+        *,
+        run_id: str,
+        target_actual_time_ms: int,
+        runtime_snapshot: HedgeInputRuntimeSnapshot | None = None,
+    ) -> tuple[HedgeInputEvent, ...]:
+        """Return every unconsumed event through one inclusive actual-time bound."""
+
+        public, simulation = (
+            await self._runtime_events(run_id)
+            if runtime_snapshot is None
+            else runtime_snapshot
+        )
+        public_cursors, simulation_cursor = await self._projection_cursors(run_id)
+        return tuple(
+            sorted(
+                (
+                    event
+                    for event in (*public, *simulation)
+                    if (
+                        event.event_sequence
+                        > (
+                            public_cursors.get(event.track_id, 0)
+                            if event.source_kind == "PUBLIC"
+                            and event.track_id is not None
+                            else simulation_cursor
+                        )
+                        and event.event_time_ms <= target_actual_time_ms
+                    )
+                ),
+                key=lambda event: (
+                    event.event_time_ms,
+                    event.event_phase,
+                    event.stable_track_id,
+                    event.event_sequence,
+                ),
+            )
+        )
+
+    async def _projection_cursors(self, run_id: str) -> tuple[dict[str, int], int]:
+        def read(connection: sqlite3.Connection) -> tuple[dict[str, int], int]:
+            public_cursors = {
+                str(row["track_id"]): int(row["last_event_sequence"])
+                for row in connection.execute(
+                    """
+                    SELECT track_id, last_event_sequence
+                    FROM replay_hedge_track_public_projection WHERE run_id = ?
+                    """,
+                    (run_id,),
+                ).fetchall()
+            }
+            simulation_row = connection.execute(
+                """
+                SELECT last_event_sequence FROM replay_hedge_input_projection
+                WHERE run_id = ? AND source_kind = 'SIMULATION'
+                """,
+                (run_id,),
+            ).fetchone()
+            if simulation_row is None:
+                raise TypeError("HEDGE simulation projection is missing")
+            return public_cursors, int(simulation_row["last_event_sequence"])
+
+        return await self.store.run_extension_read(read)
 
     async def audit_run(self, run_id: str) -> dict[str, object]:
         """Independently rebuild the pinned input proof, cursors, and receipts."""

@@ -11,6 +11,7 @@ import pytest
 
 from app.replay.service import ReplayService
 from app.replay.storage import ReplaySQLiteStore
+from app.replay.training import historical_book as historical_book_module
 from app.replay.training.errors import TrainingRunError
 from app.replay.training.historical_book import (
     ARCHIVE_PROTOCOL,
@@ -145,8 +146,13 @@ async def _service(
     archive_root: Path,
     enabled: bool = True,
     symbols: tuple[str, ...] = ("BTCUSDT", "ETHUSDT"),
+    coalesce_trade_timestamps: bool = False,
 ) -> ReplayService:
-    repository, trade_archive = _multi_trade_sources(archive_root, symbols)
+    repository, trade_archive = _multi_trade_sources(
+        archive_root,
+        symbols,
+        coalesce_trade_timestamps=coalesce_trade_timestamps,
+    )
     settings = replace(
         replay_settings(path),
         replay_historical_book_enabled=enabled,
@@ -389,8 +395,187 @@ async def test_advance_updates_book_projection_without_queue_claim(
         await service.shutdown(step_timeout=1.0)
 
 
+async def test_advance_coalesces_same_timestamp_market_cohort_before_book_commit(
+    tmp_path: Path,
+) -> None:
+    service = await _service(
+        tmp_path / "same-timestamp-cohort.db",
+        archive_root=tmp_path / "trade-same-timestamp-cohort",
+        coalesce_trade_timestamps=True,
+    )
+    try:
+        assert service.training is not None
+        service.settings = replace(
+            service.settings,
+            replay_fast_forward_optimization_enabled=False,
+        )
+        await service.training.historical_books.import_archive(
+            _book_archive(
+                tmp_path / "same-timestamp-cohort-btc-book.sqlite3",
+                symbol="BTCUSDT",
+            )
+        )
+        await service.training.historical_books.import_archive(
+            _book_archive(
+                tmp_path / "same-timestamp-cohort-eth-book.sqlite3",
+                symbol="ETHUSDT",
+            )
+        )
+        run_id, session_id = await _create_book_run(service)
+        session = await service.get_session(session_id)
+        await service.training.command(
+            run_id,
+            _command(
+                run_id,
+                "same-timestamp-cohort-add-eth",
+                ReplayV2CommandType.ADD_TRACK,
+                session,
+                {
+                    "exchange": "binance",
+                    "market_type": "futures",
+                    "symbol": "ETHUSDT",
+                    "settlement_asset": "USDT",
+                    "subscription_tier": "FULL",
+                },
+            ),
+        )
+        await _acquire(
+            service,
+            run_id=run_id,
+            selected_session_id=session_id,
+            command_id="same-timestamp-cohort-acquire",
+        )
+        session = await service.get_session(session_id)
+        target = TRADE_REPLAY_START_MS + 1_000
+        result = await service.training.command(
+            run_id,
+            _command(
+                run_id,
+                "same-timestamp-cohort-advance",
+                ReplayV2CommandType.ADVANCE_TO,
+                session,
+                {"virtual_time_ms": target},
+            ),
+        )
+
+        stable = result["data"]["stable_order"]
+        assert [event["source_sequence"] for event in stable] == [1, 2, 1, 2]
+        assert [event["market_track_stable_id"] for event in stable] == [
+            "track-1",
+            "track-1",
+            "track-2",
+            "track-2",
+        ]
+        assert {event["actual_event_time_ms"] for event in stable} == {target}
+        assert result["cursor"]["source_sequence"] == 2
+        with sqlite3.connect(service.store.path) as connection:
+            ready_counts = connection.execute(
+                """
+                SELECT track_id, COUNT(*) FROM replay_historical_book_event
+                WHERE run_id = ? AND event_type = 'READY'
+                  AND at_virtual_time_ms = ?
+                GROUP BY track_id ORDER BY track_id
+                """,
+                (run_id, target),
+            ).fetchall()
+            assert ready_counts == [("track-1", 1), ("track-2", 1)]
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_live_market_tracks_keep_audit_history_bounded_and_rest_full(
+    tmp_path: Path,
+) -> None:
+    service = await _service(
+        tmp_path / "live-portfolio.db",
+        archive_root=tmp_path / "trade-live-portfolio",
+    )
+    try:
+        assert service.training is not None
+        created = await service.training.create_run(await _trade_request(service))
+        run_id = str(created["run"]["run_id"])
+
+        def insert_history(connection: sqlite3.Connection) -> None:
+            rows = []
+            for sequence in range(1, 1_001):
+                rows.append(
+                    (
+                        run_id,
+                        f"live-risk-{sequence}",
+                        sequence,
+                        sequence,
+                        sequence,
+                        f"sha256:{sha256(f'public-{sequence}'.encode()).hexdigest()}",
+                        f"sha256:{sha256(f'risk-{sequence}'.encode()).hexdigest()}",
+                        sequence,
+                    )
+                )
+            connection.executemany(
+                """
+                INSERT INTO replay_training_risk_snapshot(
+                    run_id, snapshot_id, snapshot_sequence, virtual_time_ms,
+                    source_sequence, account_status, equity,
+                    available_balance, total_initial_margin,
+                    total_maintenance_margin, risk_ratio,
+                    active_rule_revision, public_input_hash,
+                    component_hash, created_at_ms
+                ) VALUES (?, ?, ?, ?, ?, 'ACTIVE', '10000', '10000',
+                          '0', '0', NULL, 1, ?, ?, ?)
+                """,
+                rows,
+            )
+
+        await service.store.run_extension_write(insert_history)
+        with sqlite3.connect(service.store.path) as connection:
+            assert connection.execute(
+                """
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'index'
+                  AND name = 'idx_replay_training_contract_order_active'
+                """
+            ).fetchone() == (1,)
+        full = await service.training.get_market_tracks(run_id)
+        live, queue = await service.training.subscribe_market_tracks(
+            run_id,
+            live=True,
+        )
+        service.training.unsubscribe_market_tracks(run_id, queue)
+
+        full_portfolio = full["portfolio"]
+        live_portfolio = live["portfolio"]
+        assert isinstance(full_portfolio, dict)
+        assert isinstance(live_portfolio, dict)
+        assert {
+            key: value
+            for key, value in full_portfolio.items()
+            if key != "hedge_state"
+        } == {
+            key: value
+            for key, value in live_portfolio.items()
+            if key != "hedge_state"
+        }
+        full_hedge = full_portfolio["hedge_state"]
+        live_hedge = live_portfolio["hedge_state"]
+        assert isinstance(full_hedge, dict)
+        assert isinstance(live_hedge, dict)
+        assert full_hedge["schema_version"] == "replay.hedge-relational-state.v1"
+        assert len(full_hedge["risk_snapshots"]) == 1_000
+        assert live_hedge["schema_version"] == "replay.hedge-relational-live.v1"
+        assert "risk_snapshots" not in live_hedge
+        history_heads = live_hedge["history_heads"]
+        assert isinstance(history_heads, dict)
+        assert "counts" not in history_heads
+        assert history_heads["latest_risk_snapshot"]["snapshot_sequence"] == 1_000
+        assert len(json.dumps(live, separators=(",", ":"))) * 10 < len(
+            json.dumps(full, separators=(",", ":"))
+        )
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
 async def test_forward_cache_is_track_scoped_and_backward_requests_rebuild(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = await _service(
         tmp_path / "cache.db",
@@ -405,39 +590,101 @@ async def test_forward_cache_is_track_scoped_and_backward_requests_rebuild(
         tracks = (await service.training.store.get_market_tracks(run_id))["tracks"]
         track_id = str(tracks[0]["track_id"])
         key = (run_id, track_id)
+        manager = service.training.historical_books
+        with manager._projection_cache_lock:
+            manager._projection_cache.clear()
+        real_read_only = historical_book_module._read_only
+        opened_paths: list[Path] = []
 
-        await service.training.historical_books.prepare_run_projection(
+        def counted_read_only(path: Path) -> sqlite3.Connection:
+            opened_paths.append(path)
+            return real_read_only(path)
+
+        monkeypatch.setattr(historical_book_module, "_read_only", counted_read_only)
+
+        await manager.prepare_run_projection(
             run_id=run_id,
             tracks=tracks,
             actual_time_ms=TRADE_REPLAY_START_MS,
             virtual_time_ms=TRADE_REPLAY_START_MS,
         )
-        assert service.training.historical_books._projection_cache[
-            key
-        ].state.previous_ordinal == 0
+        assert manager._projection_cache[key].state.previous_ordinal == 0
+        assert len(opened_paths) == 1
 
         target = TRADE_REPLAY_START_MS + 3 * INTERVAL_MS
-        prepared = await service.training.historical_books.prepare_run_projection(
+        prepared = await manager.prepare_run_projection(
             run_id=run_id,
             tracks=tracks,
             actual_time_ms=target,
             virtual_time_ms=target,
         )
         assert prepared[0][1].last_update_id == 103
-        assert service.training.historical_books._projection_cache[
-            key
-        ].state.previous_ordinal == 3
+        assert manager._projection_cache[key].state.previous_ordinal == 3
+        assert len(opened_paths) == 2
 
-        rebuilt = await service.training.historical_books.prepare_run_projection(
+        repeated = await manager.prepare_run_projection(
+            run_id=run_id,
+            tracks=tracks,
+            actual_time_ms=target,
+            virtual_time_ms=target,
+        )
+        assert repeated == prepared
+        assert len(opened_paths) == 2
+
+        rebuilt = await manager.prepare_run_projection(
             run_id=run_id,
             tracks=tracks,
             actual_time_ms=TRADE_REPLAY_START_MS,
             virtual_time_ms=TRADE_REPLAY_START_MS,
         )
         assert rebuilt[0][1].last_update_id == 100
-        assert service.training.historical_books._projection_cache[
-            key
-        ].state.previous_ordinal == 0
+        assert manager._projection_cache[key].state.previous_ordinal == 0
+        assert len(opened_paths) == 3
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_owned_archive_checksum_cache_retains_multiple_immutable_objects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = await _service(
+        tmp_path / "checksum-cache.db",
+        archive_root=tmp_path / "trade-checksum-cache",
+    )
+    try:
+        assert service.training is not None
+        manager = service.training.historical_books
+        await manager.import_archive(
+            _book_archive(tmp_path / "checksum-btc.sqlite3", symbol="BTCUSDT")
+        )
+        await manager.import_archive(
+            _book_archive(tmp_path / "checksum-eth.sqlite3", symbol="ETHUSDT")
+        )
+        rows = await manager.store.run_extension_read(
+            lambda connection: tuple(
+                connection.execute(
+                    "SELECT * FROM replay_historical_book_archive ORDER BY archive_id"
+                ).fetchall()
+            )
+        )
+        assert len(rows) == 2
+        with manager._checksum_cache_lock:
+            manager._checksum_cache.clear()
+        real_digest = historical_book_module._digest_file
+        digest_calls: list[Path] = []
+
+        def counted_digest(path: Path) -> str:
+            digest_calls.append(path)
+            return real_digest(path)
+
+        monkeypatch.setattr(historical_book_module, "_digest_file", counted_digest)
+        for _ in range(2):
+            for row in rows:
+                manager._owned_file(row, verify_checksum=True)
+
+        assert len(digest_calls) == 2
+        assert len(manager._checksum_cache) == 2
     finally:
         await service.shutdown(step_timeout=1.0)
 

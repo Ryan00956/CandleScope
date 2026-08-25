@@ -144,7 +144,7 @@ test("Phase 11 live launcher is lazy, modal, and has no v1 fallback", () => {
   const watchlist = source("src/features/replay/components/ReplayWatchlistPanel.tsx");
 
   assert.match(app, /lazy\(loadReplayLauncherDialog\)/);
-  assert.match(app, /showReplayLauncher\s*\?\s*buildLiveReplayLaunchContext/);
+  assert.match(app, /replayLaunchContext !== null/);
   assert.match(topBar, /onClick=\{onOpenReplayLauncher\}/);
   assert.doesNotMatch(topBar, /REPLAY_PRODUCT_V2_ENABLED|href=\{replayEntry\.href\}|K 线回放 ↗/);
   assert.match(launcher, /presentation="modal"/);
@@ -164,4 +164,21 @@ test("Phase 11 live launcher is lazy, modal, and has no v1 fallback", () => {
   assert.match(trainingHub, /replay\.hub\.submit/);
   assert.match(watchlist, /launch_context\?\.watchlist_snapshot\.groups/);
   assert.doesNotMatch(watchlist, /localStorage|candlescope-watchlists/);
+});
+
+test("live launcher freezes its launch snapshot while the modal is open", () => {
+  const testDirectory = dirname(fileURLToPath(import.meta.url));
+  const frontendRoot = resolve(testDirectory, "../../../..");
+  const app = readFileSync(resolve(frontendRoot, "src/app/App.tsx"), "utf8");
+
+  assert.match(
+    app,
+    /useState<\s*ReturnType<typeof buildLiveReplayLaunchContext> \| null\s*>\(null\)/,
+  );
+  assert.match(
+    app,
+    /setReplayLaunchContext\(buildLiveReplayLaunchContext\(\{[\s\S]*?watchlists: watchlist\.view\.watchlists,[\s\S]*?\}\)\)/,
+  );
+  assert.match(app, /setReplayLaunchContext\(null\)/);
+  assert.doesNotMatch(app, /showReplayLauncher|setShowReplayLauncher/);
 });

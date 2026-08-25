@@ -79,6 +79,7 @@ from .historical_book import HistoricalBookArchiveManager, HistoricalBookProject
 from .hedge_inputs import (
     HYBRID_PUBLIC_INPUT_FIDELITY,
     HedgeInputArchiveManager,
+    HedgeInputEvent,
     PreparedHedgeInputBinding,
 )
 from .account import isolated_margin_key, round_to_step
@@ -129,9 +130,12 @@ if TYPE_CHECKING:
 ADVANCE_PROGRESS_RETENTION_SECONDS = 2.0
 FINAL_STATE_PROJECTION_DELIVERY = "FINAL_STATE"
 FINAL_STATE_EMPTY_ACCOUNT_CHUNK_EVENTS = 10_000
+FINAL_STATE_EMPTY_ACCOUNT_INTERACTIVE_BATCH_UNITS = 512
+STABLE_ORDER_RESPONSE_EVENTS = 512
 ORDERED_PLAYBACK_INTERACTIVE_BATCH_UNITS = 1
 ORDERED_PLAYBACK_FINAL_STATE_MIN_RATE = 60
 ORDERED_PLAYBACK_FINAL_STATE_TARGET_HZ = 3
+ORDERED_SOURCE_COHORT_PLAN_EVENTS = 32
 _NATIVE_DISPLAY_PIN_PROOF_CACHE_SIZE = 4_096
 _MARKET_TRACK_PLAN_CACHE_SIZE = 1_024
 _MARKET_TRACK_PLAN_TTL_MS = 60_000
@@ -1407,6 +1411,13 @@ class TrainingRunService:
         }
 
     @staticmethod
+    def _requires_barrier_account_audit(binding: Mapping[str, object]) -> bool:
+        return (
+            binding.get("account_data_mode")
+            == AccountDataMode.HISTORICAL_EXACT.value
+        )
+
+    @staticmethod
     def _public_hedge_input_audit(
         audit: Mapping[str, object],
     ) -> dict[str, object]:
@@ -1565,15 +1576,27 @@ class TrainingRunService:
         projection = await self.store.get_market_tracks(normalized)
         return await self._with_global_clock(normalized, projection)
 
+    async def get_live_market_tracks(self, run_id: str) -> dict[str, object]:
+        """Return the bounded UI projection; audit history remains REST-only."""
+
+        normalized = self._identifier(run_id, field_name="run_id")
+        projection = await self.store.get_market_tracks(
+            normalized,
+            live_portfolio=True,
+        )
+        return await self._with_global_clock(normalized, projection)
+
     async def subscribe_market_tracks(
         self,
         run_id: str,
+        *,
+        live: bool = False,
     ) -> tuple[dict[str, object], asyncio.Queue[None]]:
         """Atomically attach a coalescing Run projection subscriber.
 
-        Registration happens before the initial read. A concurrent commit can
-        therefore only cause one harmless follow-up snapshot; it cannot create
-        a gap between the HTTP-equivalent initial projection and the live tail.
+        Registration happens before the requested initial read. A concurrent
+        commit can therefore only cause one harmless follow-up snapshot; it
+        cannot create a gap between the initial projection and the live tail.
         """
 
         normalized = self._identifier(run_id, field_name="run_id")
@@ -1581,7 +1604,11 @@ class TrainingRunService:
         subscribers = self._market_track_subscribers.setdefault(normalized, set())
         subscribers.add(queue)
         try:
-            projection = await self.get_market_tracks(normalized)
+            projection = await (
+                self.get_live_market_tracks(normalized)
+                if live
+                else self.get_market_tracks(normalized)
+            )
         except BaseException:
             self.unsubscribe_market_tracks(normalized, queue)
             raise
@@ -4660,19 +4687,10 @@ class TrainingRunService:
             }
             else self._assert_expected_cursor(command, session)
         )
-        track_projection = await self.store.get_market_tracks(normalized_run)
-        projection_tracks = track_projection.get("tracks")
-        if not isinstance(projection_tracks, list):
-            raise TrainingRunError(
-                "TRAINING_RUN_STORAGE_DEGRADED",
-                "market tracks projection is invalid",
-                status_code=503,
-            )
-        all_tracks = [
-            cast(Mapping[str, object], track)
-            for track in projection_tracks
-            if isinstance(track, Mapping)
-        ]
+        all_tracks = cast(
+            list[Mapping[str, object]],
+            await self.store.get_market_track_heads(normalized_run),
+        )
         full_tracks = [
             track for track in all_tracks if track.get("subscription_tier") == "FULL"
         ]
@@ -7267,6 +7285,8 @@ class TrainingRunService:
                             status_code=409,
                             details={"track_id": track["track_id"]},
                         )
+                if self._requires_barrier_account_audit(binding):
+                    await self.store.invalidate_account_audit(command.run_id)
                 generation, stop = actor.begin_ordered_playback(
                     client_instance_id=command.client_instance_id,
                     basis=basis,
@@ -7524,6 +7544,7 @@ class TrainingRunService:
         fast_forward_plan: dict[str, object] | None = None
         control_plan: dict[str, object] | None = None
         advance_job: dict[str, object] | None = None
+        stable_order_state = {"truncated": False}
         advance_key: tuple[str, str] | None = None
         source_goal: _OrderedSourceGoal | None = None
         if command.type is ReplayV2CommandType.ADVANCE:
@@ -7588,7 +7609,9 @@ class TrainingRunService:
                         binding=binding,
                         tracks=ordered,
                         target_virtual_time_ms=source_goal.target_virtual_time_ms,
+                        audit_account_at_barrier=False,
                         source_goal=source_goal,
+                        stable_order_state=stable_order_state,
                     )
                 )
             else:
@@ -7605,6 +7628,8 @@ class TrainingRunService:
                             binding=binding,
                             tracks=ordered,
                             target_virtual_time_ms=next_time,
+                            audit_account_at_barrier=False,
+                            stable_order_state=stable_order_state,
                         )
                     )
             control_plan = {
@@ -7739,7 +7764,13 @@ class TrainingRunService:
                         tracks=ordered,
                         target_virtual_time_ms=target,
                         job=advance_job,
+                        # Finalize exact account/HEDGE state at each internal
+                        # wave, then run the exhaustive history proof once at
+                        # the user-command acknowledgement barrier below.
+                        allow_final_state_batch=True,
+                        audit_account_at_barrier=False,
                         source_goal=source_goal,
+                        stable_order_state=stable_order_state,
                     )
                 )
             except BaseException:
@@ -7757,6 +7788,8 @@ class TrainingRunService:
                     advance_key,
                     None,
                 )
+        if self._requires_barrier_account_audit(binding):
+            await self.audit_account(command.run_id)
         selected = await self.replay_service.get_session(selected_session_id)
         final = self._snapshot(selected)
         viewer = await self.store.get_viewer_state(command.run_id)
@@ -7813,6 +7846,11 @@ class TrainingRunService:
                     else {}
                 ),
                 **(
+                    {"stable_order_truncated": True}
+                    if advance_job is None and stable_order_state["truncated"]
+                    else {}
+                ),
+                **(
                     {"plan": fast_forward_plan or control_plan}
                     if fast_forward_plan is not None or control_plan is not None
                     else {}
@@ -7839,20 +7877,15 @@ class TrainingRunService:
         )
         terminal_state = "PAUSED"
         terminal_reason: str | None = None
+        audit_at_terminal = False
         try:
             while not stop.is_set():
                 async with actor.serialized():
                     if not actor.playback_is_active(generation):
                         break
                     binding = await self.store.run_binding(run_id)
-                    projection = await self.store.get_market_tracks(run_id)
-                    projection_tracks = projection.get("tracks")
-                    if not isinstance(projection_tracks, list):
-                        raise TrainingRunError(
-                            "TRAINING_RUN_STORAGE_DEGRADED",
-                            "market tracks projection is invalid",
-                            status_code=503,
-                        )
+                    audit_at_terminal = self._requires_barrier_account_audit(binding)
+                    projection_tracks = await self.store.get_market_track_heads(run_id)
                     tracks = TrainingRunActor.ordered_full_tracks(
                         track
                         for track in projection_tracks
@@ -8208,6 +8241,11 @@ class TrainingRunService:
                         state=terminal_state,
                         reason=terminal_reason,
                     )
+                    if audit_at_terminal:
+                        # Playback can contain many internal waves. Keep its
+                        # proof exact while paying the O(history) audit once at
+                        # the terminal PAUSE/ENDED/ERROR barrier.
+                        await self.audit_account(run_id)
             self._notify_market_tracks(run_id)
 
     async def _ordered_source_goal(
@@ -8456,6 +8494,7 @@ class TrainingRunService:
         allow_final_state_batch: bool = False,
         audit_account_at_barrier: bool = True,
         source_goal: _OrderedSourceGoal | None = None,
+        stable_order_state: dict[str, bool] | None = None,
     ) -> tuple[StableMarketEvent, ...]:
         if source_goal is not None and len(tracks) != 1:
             raise TrainingRunError(
@@ -8481,6 +8520,7 @@ class TrainingRunService:
                 stable_market_event_order(
                     (*pending_account_events, *pending_hedge_events)
                 ),
+                materialize_portfolio=False,
             )
         hedge_runtime_snapshot = (
             await self.hedge_inputs.runtime_snapshot(command.run_id)
@@ -8567,8 +8607,14 @@ class TrainingRunService:
                 target_virtual_time_ms=target_virtual_time_ms,
                 enabled=allow_final_state_batch and source_goal is None,
             )
+            # Read a bounded lookahead so one exact same-timestamp market
+            # cohort can cross the adapter in one command.  The prefix below
+            # still stops at the first different timestamp, preserving every
+            # account/rule/funding/global ordering barrier.
             source_plan_limit = (
-                1 if final_state_profile is None else final_state_profile[0]
+                ORDERED_SOURCE_COHORT_PLAN_EVENTS
+                if final_state_profile is None
+                else final_state_profile[0]
             )
             if source_goal is not None:
                 remaining = source_goal.target_source_sequence - market_sequences[0]
@@ -8578,7 +8624,10 @@ class TrainingRunService:
                         "market track crossed the planned source-event boundary",
                         status_code=409,
                     )
-                source_plan_limit = max(1, min(32, remaining))
+                source_plan_limit = max(
+                    1,
+                    min(ORDERED_SOURCE_COHORT_PLAN_EVENTS, remaining),
+                )
             planned_event_times: dict[str, tuple[int, ...]] = {}
             planned_source_boundaries: dict[str, int] = {}
             for track, _snapshot in snapshots:
@@ -8655,6 +8704,36 @@ class TrainingRunService:
                         field_name="source_sequence",
                     ) + cohort_count
                     next_times.append(next_time)
+
+            def shrink_final_state_plan_to_first_event() -> None:
+                nonlocal final_state_profile
+                next_times.clear()
+                for track_index, (track, _snapshot) in enumerate(snapshots):
+                    track_key = str(track["track_id"])
+                    planned_times = planned_event_times.get(track_key, ())
+                    if not planned_times:
+                        continue
+                    first_time = planned_times[0]
+                    planned_event_times[track_key] = (first_time,)
+                    planned_source_boundaries[track_key] = (
+                        market_sequences[track_index] + 1
+                    )
+                    next_times.append(first_time)
+                final_state_profile = None
+
+            if final_state_profile is not None and len(tracks) > 1:
+                planned_batches = tuple(
+                    planned_event_times.get(str(track["track_id"]), ())
+                    for track, _snapshot in snapshots
+                )
+                if (
+                    not planned_batches
+                    or not planned_batches[0]
+                    or any(batch != planned_batches[0] for batch in planned_batches[1:])
+                ):
+                    # A multi-track terminal projection is exact only when
+                    # every adapter consumes the same ordered BAR timestamps.
+                    shrink_final_state_plan_to_first_event()
             if len(times) != 1:
                 raise TrainingRunError(
                     "GLOBAL_CLOCK_DIVERGED",
@@ -8713,6 +8792,52 @@ class TrainingRunService:
                     status_code=409,
                     details={"fallback_applied": False},
                 )
+            batched_hedge_events: tuple[HedgeInputEvent, ...] = ()
+            batched_hedge_virtual_times: tuple[int, ...] = ()
+            hedge_batch_wave_time: int | None = None
+            if (
+                hedge_mode
+                and final_state_profile is not None
+                and final_state_profile[1]
+                and next_times
+            ):
+                planned_batch_time = min(next_times)
+                account_after_batch = (
+                    next_account_virtual is None
+                    or next_account_virtual > planned_batch_time
+                )
+                candidate_hedge_events = await self.hedge_inputs.events_through(
+                    run_id=command.run_id,
+                    target_actual_time_ms=self._actual_event_time_ms(
+                        binding,
+                        planned_batch_time,
+                    ),
+                    runtime_snapshot=hedge_runtime_snapshot,
+                )
+                hedge_batch_is_safe = (
+                    not book_required
+                    and account_after_batch
+                    and all(
+                        event.source_kind == "PUBLIC"
+                        and event.event_kind == "MARK_INDEX"
+                        and event.event_phase == MARK_INDEX_EVENT_PHASE
+                        for event in candidate_hedge_events
+                    )
+                )
+                if hedge_batch_is_safe:
+                    if candidate_hedge_events:
+                        batched_hedge_events = candidate_hedge_events
+                        batched_hedge_virtual_times = tuple(
+                            self._virtual_event_time_ms(binding, event.event_time_ms)
+                            for event in candidate_hedge_events
+                        )
+                        hedge_batch_wave_time = planned_batch_time
+                        next_hedge_virtual = planned_batch_time
+                else:
+                    # A rule, fee, funding, simulation, book, or exact-account
+                    # barrier must retain phase ordering against the first market
+                    # event.  Shrink this preflight plan before choosing wave_time.
+                    shrink_final_state_plan_to_first_event()
             source_goal_reached = (
                 source_goal is None
                 or current_source_sequence == source_goal.target_source_sequence
@@ -8781,15 +8906,16 @@ class TrainingRunService:
                 actual_time_ms=actual_wave_time,
                 guarded=True,
             )
-            hedge_events = (
-                await self.hedge_inputs.events_at(
+            if not hedge_mode:
+                hedge_events = ()
+            elif hedge_batch_wave_time == wave_time:
+                hedge_events = batched_hedge_events
+            else:
+                hedge_events = await self.hedge_inputs.events_at(
                     run_id=command.run_id,
                     actual_time_ms=actual_wave_time,
                     runtime_snapshot=hedge_runtime_snapshot,
                 )
-                if hedge_mode
-                else ()
-            )
             pre_account_events = tuple(
                 item
                 for item in account_events
@@ -8982,13 +9108,22 @@ class TrainingRunService:
                             command.run_id,
                             events=post_hedge_events,
                             virtual_time_ms=wave_time,
+                            event_virtual_times_ms=(
+                                batched_hedge_virtual_times
+                                if hedge_batch_wave_time == wave_time
+                                else None
+                            ),
                         )
                     )
-                    await self.store.finalize_account_history(
-                        command.run_id,
-                        write_audit=False,
-                        risk_virtual_time_ms=wave_time,
-                    )
+                    if (
+                        str(binding.get("account_data_mode"))
+                        == AccountDataMode.HISTORICAL_EXACT.value
+                    ):
+                        await self.store.finalize_account_history(
+                            command.run_id,
+                            write_audit=False,
+                            risk_virtual_time_ms=wave_time,
+                        )
                     await self.store.finalize_hedge_inputs(
                         command.run_id,
                         risk_virtual_time_ms=wave_time,
@@ -9058,9 +9193,15 @@ class TrainingRunService:
                 ordered_wave = stable_market_event_order(wave_events)
                 pending_global_events.extend(ordered_wave)
                 all_events.extend(ordered_wave)
-                if job is not None and len(all_events) > 512:
-                    del all_events[:-512]
-                    job["stable_order_truncated"] = True
+                if (
+                    (job is not None or stable_order_state is not None)
+                    and len(all_events) > STABLE_ORDER_RESPONSE_EVENTS
+                ):
+                    del all_events[:-STABLE_ORDER_RESPONSE_EVENTS]
+                    if job is not None:
+                        job["stable_order_truncated"] = True
+                    if stable_order_state is not None:
+                        stable_order_state["truncated"] = True
             if market_barrier and (
                 not market_cohort_incomplete or source_goal is not None
             ):
@@ -9068,10 +9209,14 @@ class TrainingRunService:
                     await self.store.record_global_events(
                         command.run_id,
                         stable_market_event_order(pending_global_events),
+                        materialize_portfolio=False,
                     )
                     pending_global_events.clear()
                 else:
-                    await self.store.checkpoint_market_tracks(command.run_id)
+                    await self.store.checkpoint_market_tracks(
+                        command.run_id,
+                        materialize_portfolio=False,
+                    )
                 self._notify_market_tracks(command.run_id)
             if market_cohort_incomplete and source_goal is not None:
                 reached = await self.replay_service.get_session(
@@ -9164,7 +9309,7 @@ class TrainingRunService:
         if (
             not enabled
             or str(binding.get("source_kind")) != "BAR"
-            or len(tracks) != 1
+            or not tracks
             or self._cursor_time(snapshot) >= target_virtual_time_ms
         ):
             return None
@@ -9175,18 +9320,32 @@ class TrainingRunService:
             target_virtual_time_ms=target_virtual_time_ms,
         )
         dependencies = set(decision.context.path_dependencies)
+        allowed_dependencies = {"OPEN_ORDER", "OPEN_POSITION"}
+        if len(tracks) > 1:
+            allowed_dependencies.add("MULTI_TRACK_GLOBAL_ORDER")
+        if str(binding.get("position_mode")) == "HEDGE":
+            # A pinned funding schedule is only a potential barrier.  The
+            # coordinator inspects the exact events inside each proposed chunk
+            # and shrinks to one source event whenever a settlement is present.
+            allowed_dependencies.add("FUNDING_SCHEDULE")
         if decision.context.blocking_reasons or not dependencies.issubset(
-            {"OPEN_ORDER", "OPEN_POSITION"}
+            allowed_dependencies
         ):
             return None
-        if str(binding.get("account_model")) == "TOUCH_OR_TAPE_V2" and dependencies:
+        trading_dependencies = dependencies.intersection(
+            {"OPEN_ORDER", "OPEN_POSITION"}
+        )
+        if (
+            str(binding.get("account_model")) == "TOUCH_OR_TAPE_V2"
+            and trading_dependencies
+        ):
             # Contract-account marks and liquidation checks still require the
             # global event barrier while any trading path is active.
             return None
-        require_empty_account = not dependencies
+        require_empty_account = not trading_dependencies
         limit = min(
             (
-                MAX_PLAYBACK_BATCH_UNITS
+                FINAL_STATE_EMPTY_ACCOUNT_INTERACTIVE_BATCH_UNITS
                 if require_empty_account
                 else ORDERED_PLAYBACK_INTERACTIVE_BATCH_UNITS
             ),
@@ -9271,14 +9430,7 @@ class TrainingRunService:
             cursor.get("virtual_time_ms"), field_name="virtual_time_ms"
         )
         if tracks is None:
-            projection = await self.store.get_market_tracks(run_id)
-            values = projection.get("tracks")
-            if not isinstance(values, list):
-                raise TrainingRunError(
-                    "TRAINING_RUN_STORAGE_DEGRADED",
-                    "market tracks projection is invalid",
-                    status_code=503,
-                )
+            values = await self.store.get_market_track_heads(run_id)
             tracks = [
                 cast(Mapping[str, object], track)
                 for track in values
@@ -10652,14 +10804,7 @@ class TrainingRunService:
             str(binding.get("book_mode", "OFF"))
             == BookMode.BOOK_ASSISTED_REQUIRED.value
         ):
-            track_projection = await self.store.get_market_tracks(command.run_id)
-            raw_tracks = track_projection.get("tracks")
-            if not isinstance(raw_tracks, list):
-                raise TrainingRunError(
-                    "TRAINING_RUN_STORAGE_DEGRADED",
-                    "market tracks projection is invalid",
-                    status_code=503,
-                )
+            raw_tracks = await self.store.get_market_track_heads(command.run_id)
             full_tracks = [
                 cast(Mapping[str, object], track)
                 for track in raw_tracks

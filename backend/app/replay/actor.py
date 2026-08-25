@@ -158,6 +158,7 @@ class ActorMutation:
     events: tuple[ReplayEvent, ...]
     source_events: tuple[Mapping[str, object], ...]
     component_state: Mapping[str, object]
+    previous_component_state: Mapping[str, object] | None = None
     command: ReplayCommand | None = None
     result: CommandResult | None = None
     error: ReplayDomainError | None = None
@@ -178,6 +179,12 @@ class ActorMutation:
             "component_state",
             MappingProxyType(dict(self.component_state)),
         )
+        if self.previous_component_state is not None:
+            object.__setattr__(
+                self,
+                "previous_component_state",
+                MappingProxyType(dict(self.previous_component_state)),
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1684,6 +1691,8 @@ class ReplaySessionActor:
                     error=None,
                     checkpoint=checkpoint,
                     component_state=component_state,
+                    previous_component_state=rollback.component_state,
+                    previous_journal_entries=rollback.journal_entries,
                     state_hash=state_hash,
                 )
             except asyncio.CancelledError:
@@ -1799,6 +1808,12 @@ class ReplaySessionActor:
                             result=None,
                             error=exc,
                             checkpoint=None,
+                            previous_component_state=(
+                                None if rollback is None else rollback.component_state
+                            ),
+                            previous_journal_entries=(
+                                None if rollback is None else rollback.journal_entries
+                            ),
                         )
                     except asyncio.CancelledError:
                         if rollback is not None:
@@ -1839,6 +1854,8 @@ class ReplaySessionActor:
                     error=None,
                     checkpoint=checkpoint,
                     component_state=component_state,
+                    previous_component_state=rollback.component_state,
+                    previous_journal_entries=rollback.journal_entries,
                     state_hash=state_hash,
                 )
             except asyncio.CancelledError:
@@ -2588,6 +2605,8 @@ class ReplaySessionActor:
                         result=None,
                         error=None,
                         checkpoint=checkpoint,
+                        previous_component_state=rollback.component_state,
+                        previous_journal_entries=rollback.journal_entries,
                     ),
                     timeout=request.step_timeout,
                 )
@@ -2701,6 +2720,8 @@ class ReplaySessionActor:
                 error=None,
                 checkpoint=checkpoint_blob,
                 component_state=component_state,
+                previous_component_state=rollback.component_state,
+                previous_journal_entries=rollback.journal_entries,
                 state_hash=state_hash,
             )
         except asyncio.CancelledError:
@@ -3135,6 +3156,8 @@ class ReplaySessionActor:
                 error=None,
                 checkpoint=checkpoint,
                 component_state=component_state,
+                previous_component_state=rollback.component_state,
+                previous_journal_entries=rollback.journal_entries,
             )
         except asyncio.CancelledError:
             self._restore_rollback(rollback, force_paused=True)
@@ -3755,6 +3778,8 @@ class ReplaySessionActor:
         error: ReplayDomainError | None,
         checkpoint: bytes | None,
         component_state: Mapping[str, object] | None = None,
+        previous_component_state: Mapping[str, object] | None = None,
+        previous_journal_entries: Sequence[Mapping[str, object]] | None = None,
         state_hash: str | None = None,
     ) -> None:
         pending_events = tuple(self._pending_events or ())
@@ -3770,6 +3795,19 @@ class ReplaySessionActor:
             persisted_components["journal"] = [
                 dict(entry) for entry in self._journal_entries
             ]
+            if (previous_component_state is None) != (
+                previous_journal_entries is None
+            ):
+                raise ValueError(
+                    "previous component state and journal must be provided together"
+                )
+            previous_persisted_components: dict[str, object] | None = None
+            if previous_component_state is not None:
+                assert previous_journal_entries is not None
+                previous_persisted_components = dict(previous_component_state)
+                previous_persisted_components["journal"] = [
+                    dict(entry) for entry in previous_journal_entries
+                ]
             mutation = ActorMutation(
                 kind=kind,
                 session_id=self.session_id,
@@ -3781,6 +3819,7 @@ class ReplaySessionActor:
                 events=events,
                 source_events=source_events,
                 component_state=persisted_components,
+                previous_component_state=previous_persisted_components,
                 command=command,
                 result=result,
                 error=error,

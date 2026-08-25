@@ -566,16 +566,21 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
   const previewOrder = viewer.actions.previewOrder;
   const orderCapacity = viewer.actions.orderCapacity;
   const previewPositionIntent = orderType === "MARKET" && !reduceOnly ? "OPEN" : "NET";
-  const previewKey = JSON.stringify([
-    selectedTrackId,
+  const cursorReady = store.virtualTimeMs !== null;
+  const cursorAdvisoryEpoch = JSON.stringify([
     store.revision,
     store.sourceSequence,
     store.virtualTimeMs,
+  ]);
+  const previewKey = JSON.stringify([
+    selectedTrackId,
     previewPositionIntent,
     clientOrderId,
     previewSide,
     orderType,
-    quantity,
+    sizeMode,
+    sizeInput,
+    sizeShareIntent,
     reduceOnly,
     price,
     leverage,
@@ -583,9 +588,6 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
   ]);
   const maxQuantityContextKey = JSON.stringify([
     selectedTrackId,
-    store.revision,
-    store.sourceSequence,
-    store.virtualTimeMs,
     previewSide,
     orderType,
     reduceOnly,
@@ -597,7 +599,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
       !viewerReady
       || store.connectionState !== "connected"
       || store.state !== "PAUSED"
-      || store.virtualTimeMs === null
+      || !cursorReady
       || tradeValidationSide !== null
       || reduceOnlyUnavailableMessage !== null
       || (orderType !== "MARKET" && !price.trim())
@@ -608,7 +610,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
     const controller = new AbortController();
     capacityAdvisoryControllerRef.current = controller;
     let settled = false;
-    capacityScheduler.schedule(maxQuantityContextKey, () => {
+    const scheduled = capacityScheduler.schedule(maxQuantityContextKey, () => {
       const context: ReplayOrderCapacityContext = {
         side: previewSide,
         order_type: orderType,
@@ -667,10 +669,14 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
       if (capacityAdvisoryControllerRef.current === controller) {
         capacityAdvisoryControllerRef.current = null;
       }
-      if (!settled) capacityScheduler.forget(maxQuantityContextKey);
+      if (scheduled && !settled) capacityScheduler.forget(maxQuantityContextKey);
     };
+  // Cursor-driven equity is deliberately sampled only when this draft context
+  // changes. The cached cap is conservatively rebased between those requests.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     capacityScheduler,
+    cursorReady,
     leverage,
     maxQuantityContextKey,
     maxQuantitySizingKey,
@@ -683,10 +689,8 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
     price,
     reduceOnly,
     reduceOnlyUnavailableMessage,
-    sizingAvailableEquity,
     store.connectionState,
     store.state,
-    store.virtualTimeMs,
     tradeValidationSide,
     viewerReady,
   ]);
@@ -703,20 +707,27 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
   const capacityReadyKey = currentCapacityState?.status === "ready"
     ? currentCapacityState.key
     : null;
-  const estimatedMaxQuantity = capacity?.max_quantity
-    ?? (maxQuantitySnapshot?.key === maxQuantityContextKey
-      ? maxQuantitySnapshot.value
-      : rebasedMaxQuantity === null
-        ? null
-        : quantityForStep(rebasedMaxQuantity, quantityStep));
+  const estimatedMaxQuantity = rebasedMaxQuantity !== null
+    ? quantityForStep(rebasedMaxQuantity, quantityStep)
+    : capacity?.max_quantity
+      ?? (maxQuantitySnapshot?.key === maxQuantityContextKey
+        ? maxQuantitySnapshot.value
+        : null);
   const sizingAvailability = replayOrderSizingAvailability(estimatedMaxQuantity, quantity);
   const quantityExceedsCapacity = sizingAvailability.quantityExceedsCapacity;
+  useEffect(() => {
+    // A server preview describes one exact replay boundary. Keep the
+    // conservative, locally rebased capacity estimate, but never display a
+    // stale fill/margin preview after the cursor moves. Editing the draft will
+    // request a new advisory; submission always revalidates the exact cursor.
+    setPreviewState((current) => current === null ? current : null);
+  }, [cursorAdvisoryEpoch]);
   useEffect(() => {
     if (
       !viewerReady
       || store.connectionState !== "connected"
       || store.state !== "PAUSED"
-      || store.virtualTimeMs === null
+      || !cursorReady
       || tradeValidationSide !== null
       || capacityReadyKey !== maxQuantityContextKey
       || !quantity.trim()
@@ -735,7 +746,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
     const controller = new AbortController();
     previewAdvisoryControllerRef.current = controller;
     let settled = false;
-    previewScheduler.schedule(previewKey, () => {
+    const scheduled = previewScheduler.schedule(previewKey, () => {
       const previewDraftOrder: ReplayOrderRequest = {
         client_order_id: clientOrderId,
         side: previewSide,
@@ -789,11 +800,16 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
       if (previewAdvisoryControllerRef.current === controller) {
         previewAdvisoryControllerRef.current = null;
       }
-      if (!settled) previewScheduler.forget(previewKey);
+      if (scheduled && !settled) previewScheduler.forget(previewKey);
     };
+  // `quantity` may move with a market-priced size intent while the cursor
+  // advances. That movement clears the preview above, but intentionally does
+  // not create a new HTTP advisory until the user changes the draft.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     clientOrderId,
     capacityReadyKey,
+    cursorReady,
     leverage,
     orderType,
     positionMode,
@@ -803,16 +819,12 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
     price,
     previewScheduler,
     previewKey,
-    quantity,
     reduceOnly,
     riskValue,
     selectedTrackId,
     previewSide,
     store.connectionState,
-    store.revision,
-    store.sourceSequence,
     store.state,
-    store.virtualTimeMs,
     targetPrice,
     tradePlanDraft,
     tradeReason,
@@ -821,7 +833,6 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
     maxQuantityContextKey,
     maxQuantitySizingKey,
     quantityExceedsCapacity,
-    sizingAvailableEquity,
     viewerReady,
   ]);
   const currentPreviewState = previewState?.key === previewKey ? previewState : null;

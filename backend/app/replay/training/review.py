@@ -1052,6 +1052,49 @@ class ReviewRecorder:
         return 0
 
     @staticmethod
+    def _minimum_prior_equity(
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+    ) -> Decimal | None:
+        """Resume an exact minimum scan from the latest drawdown anchor."""
+
+        anchor = connection.execute(
+            """
+            SELECT timeline_sequence, projection_json
+            FROM replay_review_timeline_event
+            WHERE run_id = ? AND category = 'EQUITY'
+            ORDER BY timeline_sequence DESC LIMIT 1
+            """,
+            (run_id,),
+        ).fetchone()
+        minimum: Decimal | None = None
+        anchor_sequence = 0
+        if anchor is not None:
+            try:
+                projection = json.loads(str(anchor["projection_json"]))
+                minimum = Decimal(str(projection["domain"]["equity"]))
+                anchor_sequence = int(anchor["timeline_sequence"])
+            except (InvalidOperation, KeyError, TypeError):
+                minimum = None
+                anchor_sequence = 0
+        for row in connection.execute(
+            """
+            SELECT projection_json FROM replay_review_timeline_event
+            WHERE run_id = ? AND timeline_sequence > ?
+            ORDER BY timeline_sequence
+            """,
+            (run_id, anchor_sequence),
+        ).fetchall():
+            try:
+                projection = json.loads(str(row["projection_json"]))
+                equity = Decimal(str(projection["domain"]["equity"]))
+            except (InvalidOperation, KeyError, TypeError):
+                continue
+            minimum = equity if minimum is None else min(minimum, equity)
+        return minimum
+
+    @staticmethod
     def _descriptor_domain(
         connection: sqlite3.Connection,
         *,
@@ -1793,19 +1836,10 @@ class ReviewRecorder:
         )
         descriptors = self.descriptors(context, previous, projection)
         if any(category == "EQUITY" for category, _ in descriptors):
-            prior_equities: list[Decimal] = []
-            for row in connection.execute(
-                """
-                SELECT projection_json FROM replay_review_timeline_event
-                WHERE run_id = ? ORDER BY timeline_sequence
-                """,
-                (run_id,),
-            ).fetchall():
-                try:
-                    decoded = json.loads(str(row["projection_json"]))
-                    prior_equities.append(Decimal(str(decoded["domain"]["equity"])))
-                except (InvalidOperation, KeyError, TypeError):
-                    continue
+            prior_minimum_equity = self._minimum_prior_equity(
+                connection,
+                run_id=run_id,
+            )
             current_equity = Decimal(
                 str(dict(projection["domain"])["equity"])  # type: ignore[arg-type]
             )
@@ -1816,8 +1850,8 @@ class ReviewRecorder:
                 )
                 for category, event_type in descriptors
                 if category != "EQUITY"
-                or not prior_equities
-                or current_equity < min(prior_equities)
+                or prior_minimum_equity is None
+                or current_equity < prior_minimum_equity
             ]
         if not descriptors:
             return ()

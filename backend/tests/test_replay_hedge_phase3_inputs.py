@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from app.replay.canonical import canonical_json
+from app.replay.training import hedge_inputs as hedge_inputs_module
 from app.replay.training.errors import TrainingRunError
 from app.replay.training.hedge_inputs import (
     build_hedge_public_history_archive,
@@ -416,6 +417,40 @@ async def test_runtime_tamper_pauses_run_without_market_fallback(
             ).fetchone()
             assert binding is not None and binding[0] == "PAUSED"
             assert binding[1] == "TrainingRunError"
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_runtime_checksum_guard_reuses_unchanged_owned_objects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "phase3-checksum-cache.db"
+    service = await _risk_service(database)
+    try:
+        _request_value, run_id, _session_id = await _prepared_run(
+            service, tmp_path, prefix="phase3-checksum-cache"
+        )
+        assert service.training is not None
+        manager = service.training.hedge_inputs
+        with manager._checksum_cache_lock:
+            manager._checksum_cache.clear()
+        real_digest = hedge_inputs_module._digest_file
+        digest_calls: list[Path] = []
+
+        def counted_digest(path: Path) -> str:
+            digest_calls.append(path)
+            return real_digest(path)
+
+        monkeypatch.setattr(hedge_inputs_module, "_digest_file", counted_digest)
+        first = await manager.runtime_snapshot(run_id)
+        first_pass_calls = len(digest_calls)
+        second = await manager.runtime_snapshot(run_id)
+
+        assert second == first
+        assert first_pass_calls >= 2
+        assert len(digest_calls) == first_pass_calls
+        assert len(manager._checksum_cache) >= 2
     finally:
         await service.shutdown(step_timeout=1.0)
 

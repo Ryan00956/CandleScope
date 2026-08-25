@@ -45,6 +45,7 @@ BOOK_EXECUTION_FIDELITY = "BOOK_ASSISTED_CONTINUITY_GATED_NO_QUEUE"
 HISTORICAL_L2_LIQUIDATION_FIDELITY = "HISTORICAL_L2_VISIBLE_DEPTH_CONSERVATIVE_V1"
 BOOK_PROJECTION_DEPTH = 5_000
 BOOK_PROJECTION_CACHE_MAX_TRACKS = 32
+BOOK_CHECKSUM_CACHE_MAX_OBJECTS = 32
 
 _BookRow = sqlite3.Row | Mapping[str, object]
 
@@ -145,6 +146,7 @@ class _ProjectionCacheEntry:
     generation: int
     checksum_sha256: str
     state: _ReconstructionState
+    projection: HistoricalBookProjection | None
 
 
 def _digest_file(path: Path) -> str:
@@ -695,7 +697,8 @@ class HistoricalBookArchiveManager:
             if root is not None
             else store.path.parent / f"{store.path.stem}-historical-books"
         ).resolve()
-        self._checksum_cache: dict[tuple[str, int, int], str] = {}
+        self._checksum_cache: OrderedDict[tuple[str, int, int], str] = OrderedDict()
+        self._checksum_cache_lock = threading.RLock()
         self._projection_cache: OrderedDict[tuple[str, str], _ProjectionCacheEntry] = (
             OrderedDict()
         )
@@ -1578,7 +1581,8 @@ class HistoricalBookArchiveManager:
             await asyncio.to_thread(trash.unlink)
         except OSError:
             pass
-        self._checksum_cache.clear()
+        with self._checksum_cache_lock:
+            self._checksum_cache.clear()
         self._invalidate_projection_cache(archive_id=archive_id)
         return {
             "archive_id": archive_id,
@@ -1906,7 +1910,8 @@ class HistoricalBookArchiveManager:
                 (relative, descriptor.byte_size, now, now, descriptor.archive_id),
             )
         )
-        self._checksum_cache.clear()
+        with self._checksum_cache_lock:
+            self._checksum_cache.clear()
         self._invalidate_projection_cache(archive_id=descriptor.archive_id)
 
     def _projection_from_path(
@@ -1918,6 +1923,23 @@ class HistoricalBookArchiveManager:
         *,
         cache_key: tuple[str, str] | None = None,
     ) -> HistoricalBookProjection:
+        archive_id = str(row["archive_id"])
+        generation = _counter(row["generation"], "generation")
+        checksum = str(row["checksum_sha256"])
+        if cache_key is not None:
+            with self._projection_cache_lock:
+                cached = self._projection_cache.get(cache_key)
+                if (
+                    cached is not None
+                    and cached.archive_id == archive_id
+                    and cached.generation == generation
+                    and cached.checksum_sha256 == checksum
+                    and cached.state.target_ms == actual_time_ms
+                    and cached.projection is not None
+                ):
+                    self._projection_cache.move_to_end(cache_key)
+                    return cached.projection
+        cache_entry: _ProjectionCacheEntry | None = None
         with closing(_read_only(path)) as connection:
             meta = _meta(connection)
             if str(meta["dataset_epoch"]) != str(row["dataset_epoch"]) or str(
@@ -1934,9 +1956,6 @@ class HistoricalBookArchiveManager:
                     require_full_coverage=False,
                 )
             else:
-                archive_id = str(row["archive_id"])
-                generation = _counter(row["generation"], "generation")
-                checksum = str(row["checksum_sha256"])
                 with self._projection_cache_lock:
                     cached = self._projection_cache.get(cache_key)
                     initial = None
@@ -1955,12 +1974,14 @@ class HistoricalBookArchiveManager:
                         require_full_coverage=False,
                         initial=initial,
                     )
-                    self._projection_cache[cache_key] = _ProjectionCacheEntry(
+                    cache_entry = _ProjectionCacheEntry(
                         archive_id=archive_id,
                         generation=generation,
                         checksum_sha256=checksum,
                         state=state,
+                        projection=None,
                     )
+                    self._projection_cache[cache_key] = cache_entry
                     self._projection_cache.move_to_end(cache_key)
                     while (
                         len(self._projection_cache) > BOOK_PROJECTION_CACHE_MAX_TRACKS
@@ -1986,8 +2007,8 @@ class HistoricalBookArchiveManager:
                 "asks": [list(level) for level in visible_asks],
             }
         )
-        return HistoricalBookProjection(
-            archive_id=str(row["archive_id"]),
+        projection = HistoricalBookProjection(
+            archive_id=archive_id,
             actual_time_ms=actual_time_ms,
             virtual_time_ms=virtual_time_ms,
             last_update_id=update_id,
@@ -1995,6 +2016,11 @@ class HistoricalBookArchiveManager:
             asks=visible_asks,
             book_hash=book_hash,
         )
+        if cache_key is not None and cache_entry is not None:
+            with self._projection_cache_lock:
+                if self._projection_cache.get(cache_key) is cache_entry:
+                    cache_entry.projection = projection
+        return projection
 
     def _invalidate_projection_cache(
         self,
@@ -2049,10 +2075,35 @@ class HistoricalBookArchiveManager:
             raise ValueError("historical book local object size changed")
         if verify_checksum:
             key = (str(path), stat.st_mtime_ns, stat.st_size)
-            checksum = self._checksum_cache.get(key)
+            with self._checksum_cache_lock:
+                checksum = self._checksum_cache.get(key)
+                if checksum is not None:
+                    self._checksum_cache.move_to_end(key)
             if checksum is None:
                 checksum = _digest_file(path)
-                self._checksum_cache = {key: checksum}
+                verified_stat = path.stat()
+                if (
+                    verified_stat.st_mtime_ns != stat.st_mtime_ns
+                    or verified_stat.st_size != stat.st_size
+                ):
+                    raise ValueError(
+                        "historical book local object changed during checksum validation"
+                    )
+                with self._checksum_cache_lock:
+                    stale_keys = tuple(
+                        cached_key
+                        for cached_key in self._checksum_cache
+                        if cached_key[0] == str(path) and cached_key != key
+                    )
+                    for stale_key in stale_keys:
+                        self._checksum_cache.pop(stale_key, None)
+                    self._checksum_cache[key] = checksum
+                    self._checksum_cache.move_to_end(key)
+                    while (
+                        len(self._checksum_cache)
+                        > BOOK_CHECKSUM_CACHE_MAX_OBJECTS
+                    ):
+                        self._checksum_cache.popitem(last=False)
             if checksum != str(row["checksum_sha256"]):
                 raise ValueError("historical book local object checksum changed")
         return path

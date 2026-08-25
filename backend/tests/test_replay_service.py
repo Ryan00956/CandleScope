@@ -112,6 +112,54 @@ async def test_service_create_command_idempotency_fork_and_shutdown(
         )
 
 
+async def test_actor_mutation_preserves_unchanged_journal_projection_row(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "component-delta-service.db"
+    service = await _service(path)
+    try:
+        created = await service.create_session(replay_config())
+        session_id = str(created["session_id"])
+        await service.command(
+            session_id,
+            _command("acquire-delta", CommandType.ACQUIRE_CONTROLLER, revision=0),
+        )
+        await service.command(
+            session_id,
+            _command(
+                "note-delta",
+                CommandType.ADD_JOURNAL_NOTE,
+                revision=1,
+                payload={"text": "preserve this row"},
+            ),
+        )
+        with sqlite3.connect(path) as connection:
+            before = connection.execute(
+                "SELECT rowid, payload_json, created_at_ms "
+                "FROM replay_journal_entry WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        service.store._now_ms = lambda: NOW_MS + 1  # noqa: SLF001
+        await service.command(
+            session_id,
+            _command(
+                "step-after-note",
+                CommandType.STEP,
+                revision=2,
+                payload={"count": 1},
+            ),
+        )
+        with sqlite3.connect(path) as connection:
+            after = connection.execute(
+                "SELECT rowid, payload_json, created_at_ms "
+                "FROM replay_journal_entry WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        assert after == before
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
 async def test_ended_command_ack_survives_derived_report_persistence_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

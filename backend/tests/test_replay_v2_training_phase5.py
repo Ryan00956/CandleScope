@@ -119,6 +119,8 @@ async def _service(
 def _multi_trade_sources(
     root: Path,
     symbols: tuple[str, ...],
+    *,
+    coalesce_trade_timestamps: bool = False,
 ) -> tuple[FakeKlinesRepo, ParquetRawAggTradeArchive]:
     repository = replay_repository()
     archive = ParquetRawAggTradeArchive(
@@ -159,7 +161,10 @@ def _multi_trade_sources(
             for within in range(2):
                 index = minute * 2 + within
                 timestamp = (
-                    TRADE_REPLAY_START_MS + minute * INTERVAL_MS + 1_000 + within
+                    TRADE_REPLAY_START_MS
+                    + minute * INTERVAL_MS
+                    + 1_000
+                    + (0 if coalesce_trade_timestamps else within)
                 )
                 trades.append(
                     {
@@ -877,6 +882,41 @@ async def test_market_track_projection_subscription_is_gap_free_and_coalescing(
         assert queue.qsize() == 1
         service.training.unsubscribe_market_tracks(run_id, queue)  # type: ignore[union-attr]
         assert run_id not in service.training._market_track_subscribers  # type: ignore[union-attr]
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_market_track_projection_materializes_each_track_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = await _service(tmp_path / "market-track-projection-once.db")
+    try:
+        created = await service.training.create_run(await _request(service))  # type: ignore[union-attr]
+        run_id = str(created["run"]["run_id"])
+        primary_session = str(created["run"]["adapter_session_id"])
+        await _add_track(
+            service,
+            run_id=run_id,
+            selected_session_id=primary_session,
+            symbol="ETHUSDT",
+            tier="NONE",
+            command_id="projection-once-add-track",
+        )
+        store = service.training.store  # type: ignore[union-attr]
+        original = store._market_track_from_row
+        materializations = 0
+
+        def observed(row: sqlite3.Row) -> dict[str, object]:
+            nonlocal materializations
+            materializations += 1
+            return original(row)
+
+        monkeypatch.setattr(store, "_market_track_from_row", observed)
+        projection = await service.training.get_market_tracks(run_id)  # type: ignore[union-attr]
+
+        assert len(projection["tracks"]) == 2
+        assert materializations == 2
     finally:
         await service.shutdown(step_timeout=1.0)
 

@@ -879,14 +879,18 @@ export function useReplayViewerRuntime(
       const result = await defaultReplayV2Api.commandRun(command.run_id, command);
       publishViewerState(result.viewer_state);
       setProgress(progressFromResult(result));
-      const displayAdvance = type === "advance"
-        && boundPayload.basis === "DISPLAY_BAR";
-      if (displayAdvance) {
+      const cursorAdvance = type === "advance"
+        || type === "advance_by"
+        || type === "advance_to"
+        || type === "step_base"
+        || type === "step_display"
+        || type === "step_event";
+      if (cursorAdvance) {
         const converged = await waitForReplayStoreRevision(
           runtime.replayStore,
           result.revision,
         );
-        if (!converged) runtime.actions.requestResync("v2-display-advance-ack-timeout");
+        if (!converged) runtime.actions.requestResync("v2-cursor-advance-ack-timeout");
         void refreshMarketTracks(command.run_id).catch((cause: unknown) => {
           setMarketTracks(null);
           setError(cause instanceof Error ? cause.message : t("replay.rt.tracksRefresh"));

@@ -3259,6 +3259,7 @@ class ReplayService:
                 checkpoint=mutation.checkpoint,
                 source_events=mutation.source_events,
                 component_state=mutation.component_state,
+                previous_component_state=mutation.previous_component_state,
             )
             return
         if mutation.kind == "source_event":
@@ -3273,6 +3274,7 @@ class ReplayService:
                 session_state=mutation.session_state,
                 checkpoint=mutation.checkpoint,
                 component_state=mutation.component_state,
+                previous_component_state=mutation.previous_component_state,
             )
             return
         if mutation.checkpoint is None:
@@ -3287,6 +3289,7 @@ class ReplayService:
             session_state=mutation.session_state,
             checkpoint=mutation.checkpoint,
             component_state=mutation.component_state,
+            previous_component_state=mutation.previous_component_state,
         )
 
     @asynccontextmanager

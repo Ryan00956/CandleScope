@@ -250,6 +250,51 @@ test("order-size capacity is independent from draft preview failures", () => {
   assert.match(rail, /notice\?\.message \?\? reduceOnlyUnavailableMessage/);
 });
 
+test("cursor commits do not fan out invariant and order-advisory HTTP work", () => {
+  const integrity = source("src/features/replay/useReplayIntegrityRuntime.ts");
+  const viewer = source("src/features/replay/useReplayViewerRuntime.ts");
+  const rail = source("src/features/replay/components/ReplayRightRail.tsx");
+  const previewKey = rail.slice(
+    rail.indexOf("const previewKey"),
+    rail.indexOf("const maxQuantityContextKey"),
+  );
+  const capacityKey = rail.slice(
+    rail.indexOf("const maxQuantityContextKey"),
+    rail.indexOf("useEffect(() =>", rail.indexOf("const maxQuantityContextKey")),
+  );
+  const capacityEffect = rail.slice(
+    rail.indexOf("useEffect(() =>", rail.indexOf("const maxQuantityContextKey")),
+    rail.indexOf("const currentCapacityState"),
+  );
+  const previewEffects = rail.slice(
+    rail.indexOf("const sizingAvailability"),
+    rail.indexOf("const currentPreviewState"),
+  );
+
+  assert.doesNotMatch(integrity, /setInterval\(\(\) => \{ void refresh\(\); \}, 750\)/);
+  assert.match(integrity, /void refreshEquity\(\)/);
+  assert.match(integrity, /void refreshReport\(\)/);
+  assert.match(viewer, /const cursorAdvance = type === "advance"/);
+  assert.match(viewer, /v2-cursor-advance-ack-timeout/);
+  assert.doesNotMatch(previewKey, /store\.(revision|sourceSequence|virtualTimeMs)/);
+  assert.doesNotMatch(previewKey, /\bquantity\b/);
+  assert.match(previewKey, /sizeMode,[\s\S]*sizeInput,[\s\S]*sizeShareIntent/);
+  assert.doesNotMatch(capacityKey, /store\.(revision|sourceSequence|virtualTimeMs)/);
+  assert.doesNotMatch(capacityEffect, /store\.(revision|sourceSequence|virtualTimeMs)/);
+  assert.doesNotMatch(previewEffects, /store\.(revision|sourceSequence|virtualTimeMs)/);
+  assert.match(previewEffects, /setPreviewState\(\(current\) => current === null \? current : null\)/);
+  assert.match(capacityEffect, /const scheduled = capacityScheduler\.schedule/);
+  assert.match(capacityEffect, /if \(scheduled && !settled\) capacityScheduler\.forget/);
+  assert.match(previewEffects, /const scheduled = previewScheduler\.schedule/);
+  assert.match(previewEffects, /if \(scheduled && !settled\) previewScheduler\.forget/);
+});
+
+test("right rail commits resized layout outside React state updater callbacks", () => {
+  const frame = source("src/app/MarketRightRailFrame.tsx");
+  assert.match(frame, /transientHeightsRef\.current = nextHeights/);
+  assert.doesNotMatch(frame, /setTransientHeights\(\(current\) =>/);
+});
+
 test("right-rail trading workstation keeps positions and account history out of the chart stack", () => {
   const rail = source("src/features/replay/components/ReplayRightRail.tsx");
   const marketRail = source("src/features/replay/components/ReplayRightMarketRail.tsx");
@@ -686,6 +731,19 @@ test("toolbar keeps idle time visible and scopes progress to an active cancelabl
   assert.match(controls, /advanceProgress === null \? t\("replay\.control\.preparing"\)/);
   assert.doesNotMatch(controls, /aria-label="回放进度"|持续训练|domainProgress/);
   assert.match(styles, /\.replay-advance-progress \{/);
+});
+
+test("toolbar time follows the authoritative live cursor after an advance", () => {
+  const workspace = source("src/features/replay/ReplayTrainingPageShell.tsx");
+
+  assert.match(
+    workspace,
+    /const publicTime = runtime\.store\.virtualTimeMs === null\s*\? \(integrityRuntime\.integrity\?\.public_time\.label \?\? "--"\)\s*:\s*publicTimeRuntime\.formatTime\(runtime\.store\.virtualTimeMs\)/,
+  );
+  assert.doesNotMatch(
+    workspace,
+    /integrityRuntime\.integrity\?\.public_time\.label\s*\?\?\s*\(runtime\.store\.virtualTimeMs/,
+  );
 });
 
 test("toolbar bounds exact source-event advances to one interruptible batch", () => {

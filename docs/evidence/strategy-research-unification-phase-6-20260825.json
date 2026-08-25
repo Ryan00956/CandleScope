@@ -3,7 +3,7 @@
   "generatedAt": "2026-08-25T18:10:00+08:00",
   "status": "PHASE6_ENGINEERING_COMPLETE",
   "baselineSha": "56867f4bec9803fdcccf6aa3d35e9134e3a2c252",
-  "candidateSha": "PENDING_PHASE6_COMMIT",
+  "candidateSha": "3eb4d7899d8d77a99d3cdac1fb27a9d570aa3751",
   "dirtyPathsBefore": ["?? docs/LOCAL_DATA_STRATEGY_RESEARCH_UNIFICATION_EXECUTION_zh.md"],
   "dirtyPathsAfterOriginalTree": ["?? docs/LOCAL_DATA_STRATEGY_RESEARCH_UNIFICATION_EXECUTION_zh.md"],
   "commands": [

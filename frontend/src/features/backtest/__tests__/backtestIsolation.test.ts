@@ -20,11 +20,12 @@ function walk(dir: string): string[] {
   });
 }
 
-test("backtest entry is closed unless the frontend flag is explicitly on", () => {
+test("backtest and research entries default on with explicit rollback flags", () => {
   assert.equal(isBacktestEntryEnabled({ VITE_BACKTEST_ENTRY_ENABLED: "0" }), false);
-  assert.equal(isBacktestEntryEnabled({}), false);
+  assert.equal(isBacktestEntryEnabled({}), true);
   assert.equal(isBacktestEntryEnabled({ VITE_BACKTEST_ENTRY_ENABLED: "1" }), true);
-  assert.equal(isBacktestResearchEnabled({}), false);
+  assert.equal(isBacktestResearchEnabled({}), true);
+  assert.equal(isBacktestResearchEnabled({ VITE_BACKTEST_RESEARCH_ENABLED: "0" }), false);
   assert.equal(isBacktestResearchEnabled({ VITE_BACKTEST_RESEARCH_ENABLED: "1" }), true);
   assert.equal(isBacktestLegacyWorkbenchEnabled({}), true);
   assert.equal(

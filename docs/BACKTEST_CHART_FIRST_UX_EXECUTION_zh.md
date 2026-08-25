@@ -1801,21 +1801,23 @@ provider 未提供结构化 explain payload 时，显示“该策略没有提供
 新增旗标：
 
 ```text
-BACKTEST_CHART_CONTEXT_ENABLED=0
+BACKTEST_CHART_CONTEXT_ENABLED=1
 BACKTEST_TRADE_EXPLANATION_ENABLED=0
-VITE_CHART_STRATEGY_TESTER_ENABLED=0
-VITE_CHART_STRATEGY_AUTO_RUN_ENABLED=0
+VITE_BACKTEST_ENTRY_ENABLED=1
+VITE_CHART_STRATEGY_TESTER_ENABLED=1
+VITE_CHART_STRATEGY_AUTO_RUN_ENABLED=1
 VITE_CHART_TRADE_EXPLANATION_ENABLED=0
-VITE_CHART_RUN_COMPARE_ENABLED=0
-VITE_BACKTEST_RESEARCH_ENABLED=0
+VITE_CHART_RUN_COMPARE_ENABLED=1
+VITE_BACKTEST_RESEARCH_ENABLED=1
+VITE_BACKTEST_RESEARCH_ADVANCED_ENABLED=1
 VITE_BACKTEST_LEGACY_WORKBENCH_ENABLED=1
 ```
 
 规则：
 
-- 新增产品能力和生产示例继续默认关闭；legacy workbench 在迁移期默认开启；
-- 本地开发可以在 `.env` 覆盖打开；
-- “本机已打开用于测试”不能当作生产成熟度证据；
+- Phase 12 已验证的 Chart-first 能力默认开启；任一 flag 显式设为 `0` 都可做有界回滚；
+- legacy workbench 在迁移期继续默认开启，research 显式关闭时承担回退；
+- Run 绑定交易解释、更高精度、外部 provider、在线学习和可信 Python 等独立能力不随本次默认开启；
 - 每个 flag 有独立测试和回滚记录；
 - 后端 resolver 关闭时，普通入口显示不可用，不降级为前端猜 dataset；
 - explanation 关闭时，交易仍可查看，但明确显示“交易原因功能未启用”；

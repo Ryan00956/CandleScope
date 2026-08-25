@@ -374,7 +374,11 @@ def load_backtest_settings(
     klines_db_path: Path,
     replay_db_path: Path,
 ) -> BacktestSettings:
-    """Load fail-closed backtest flags and ceilings. All gates default off."""
+    """Load backtest flags and fail-closed ceilings.
+
+    The validated chart-first BAR workflow defaults on. Higher-fidelity,
+    external-provider, online-learning, and trusted-Python gates remain off.
+    """
 
     backtest_db_path = Path(
         environment.get("BACKTEST_DB_PATH", str(data_dir / "backtest.db"))
@@ -394,10 +398,10 @@ def load_backtest_settings(
         )
         values[name] = _bounded_backtest_int(environment, name, hard_ceiling=hard)
     return BacktestSettings(
-        enabled=_strict_replay_bool(environment, "BACKTEST_ENABLED", "0"),
-        bar_enabled=_strict_replay_bool(environment, "BACKTEST_BAR_ENABLED", "0"),
+        enabled=_strict_replay_bool(environment, "BACKTEST_ENABLED", "1"),
+        bar_enabled=_strict_replay_bool(environment, "BACKTEST_BAR_ENABLED", "1"),
         chart_context_enabled=_strict_replay_bool(
-            environment, "BACKTEST_CHART_CONTEXT_ENABLED", "0"
+            environment, "BACKTEST_CHART_CONTEXT_ENABLED", "1"
         ),
         trade_explanation_enabled=_strict_replay_bool(
             environment, "BACKTEST_TRADE_EXPLANATION_ENABLED", "0"
@@ -408,7 +412,7 @@ def load_backtest_settings(
         book_assisted_enabled=_strict_replay_bool(
             environment, "BACKTEST_BOOK_ASSISTED_ENABLED", "0"
         ),
-        study_enabled=_strict_replay_bool(environment, "BACKTEST_STUDY_ENABLED", "0"),
+        study_enabled=_strict_replay_bool(environment, "BACKTEST_STUDY_ENABLED", "1"),
         external_provider_enabled=_strict_replay_bool(
             environment, "BACKTEST_EXTERNAL_PROVIDER_ENABLED", "0"
         ),
@@ -419,7 +423,7 @@ def load_backtest_settings(
             environment, "BACKTEST_MULTI_MARKET_ENABLED", "0"
         ),
         replay_review_bridge_enabled=_strict_replay_bool(
-            environment, "BACKTEST_REPLAY_REVIEW_BRIDGE_ENABLED", "0"
+            environment, "BACKTEST_REPLAY_REVIEW_BRIDGE_ENABLED", "1"
         ),
         db_path=backtest_db_path,
         max_active_runs=values["BACKTEST_MAX_ACTIVE_RUNS"],

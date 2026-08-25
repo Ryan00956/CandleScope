@@ -195,9 +195,9 @@ test("refresh after disconnect keeps the last known run", () => {
   assert.equal(store.getState().lastSequence, 9);
 });
 
-test("entry stays closed unless the frontend flag is on", () => {
+test("entry defaults on and accepts an explicit rollback flag", () => {
   assert.equal(isBacktestEntryEnabled({ VITE_BACKTEST_ENTRY_ENABLED: "0" }), false);
-  assert.equal(isBacktestEntryEnabled({}), false);
+  assert.equal(isBacktestEntryEnabled({}), true);
 });
 
 test("Study V2 holdout reveal uses the dedicated one-shot endpoint", async () => {

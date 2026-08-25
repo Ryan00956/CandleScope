@@ -9,10 +9,14 @@ function strictEnabled(value: unknown): boolean {
   return value === true || value === 1 || value === "1";
 }
 
+function enabledByDefault(value: unknown): boolean {
+  return value === undefined ? true : strictEnabled(value);
+}
+
 export function resolveChartStrategyTesterEnabled(
   environment: ChartStrategyTesterFlagEnvironment = {},
 ): boolean {
-  return strictEnabled(environment.VITE_CHART_STRATEGY_TESTER_ENABLED);
+  return enabledByDefault(environment.VITE_CHART_STRATEGY_TESTER_ENABLED);
 }
 
 export function resolveChartTradeExplanationEnabled(
@@ -24,13 +28,13 @@ export function resolveChartTradeExplanationEnabled(
 export function resolveChartRunCompareEnabled(
   environment: ChartStrategyTesterFlagEnvironment = {},
 ): boolean {
-  return strictEnabled(environment.VITE_CHART_RUN_COMPARE_ENABLED);
+  return enabledByDefault(environment.VITE_CHART_RUN_COMPARE_ENABLED);
 }
 
 export function resolveChartStrategyAutoRunEnabled(
   environment: ChartStrategyTesterFlagEnvironment = {},
 ): boolean {
-  return strictEnabled(environment.VITE_CHART_STRATEGY_AUTO_RUN_ENABLED);
+  return enabledByDefault(environment.VITE_CHART_STRATEGY_AUTO_RUN_ENABLED);
 }
 
 function viteEnvironment(): ChartStrategyTesterFlagEnvironment {

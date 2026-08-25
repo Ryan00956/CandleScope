@@ -10,24 +10,26 @@ import {
   resolveChartTradeExplanationEnabled,
 } from "../chartStrategyTesterFeature.js";
 
-test("chart strategy tester flag is default off and strict", () => {
-  assert.equal(resolveChartStrategyTesterEnabled(), false);
+test("chart strategy tester flag defaults on and remains strict", () => {
+  assert.equal(resolveChartStrategyTesterEnabled(), true);
   assert.equal(resolveChartStrategyTesterEnabled({ VITE_CHART_STRATEGY_TESTER_ENABLED: "0" }), false);
   assert.equal(resolveChartStrategyTesterEnabled({ VITE_CHART_STRATEGY_TESTER_ENABLED: "true" }), false);
   assert.equal(resolveChartStrategyTesterEnabled({ VITE_CHART_STRATEGY_TESTER_ENABLED: "1" }), true);
   assert.equal(resolveChartStrategyTesterEnabled({ VITE_CHART_STRATEGY_TESTER_ENABLED: true }), true);
 });
 
-test("trade explanation and recent Run comparison flags are default off and strict", () => {
+test("trade explanation stays opt-in while recent Run comparison defaults on", () => {
   assert.equal(resolveChartTradeExplanationEnabled(), false);
   assert.equal(resolveChartTradeExplanationEnabled({ VITE_CHART_TRADE_EXPLANATION_ENABLED: "true" }), false);
   assert.equal(resolveChartTradeExplanationEnabled({ VITE_CHART_TRADE_EXPLANATION_ENABLED: "1" }), true);
-  assert.equal(resolveChartRunCompareEnabled(), false);
+  assert.equal(resolveChartRunCompareEnabled(), true);
+  assert.equal(resolveChartRunCompareEnabled({ VITE_CHART_RUN_COMPARE_ENABLED: "0" }), false);
   assert.equal(resolveChartRunCompareEnabled({ VITE_CHART_RUN_COMPARE_ENABLED: 1 }), true);
 });
 
-test("chart strategy auto-run is default off and strict", () => {
-  assert.equal(resolveChartStrategyAutoRunEnabled(), false);
+test("chart strategy auto-run defaults on and remains strict", () => {
+  assert.equal(resolveChartStrategyAutoRunEnabled(), true);
+  assert.equal(resolveChartStrategyAutoRunEnabled({ VITE_CHART_STRATEGY_AUTO_RUN_ENABLED: "0" }), false);
   assert.equal(resolveChartStrategyAutoRunEnabled({ VITE_CHART_STRATEGY_AUTO_RUN_ENABLED: "true" }), false);
   assert.equal(resolveChartStrategyAutoRunEnabled({ VITE_CHART_STRATEGY_AUTO_RUN_ENABLED: "1" }), true);
 });
@@ -67,10 +69,10 @@ test("phase 4 keeps runtime, draft storage, and Monaco behind lazy boundaries", 
   assert.match(workspace, /chart-strategy-tester\.run/);
   assert.match(workspace, /run:\s*\(\)\s*=>\s*onRunRef\.current\(\)/);
   assert.doesNotMatch(workspace, /onKeyDownCapture/);
-  assert.match(exampleEnvironment, /^VITE_CHART_STRATEGY_TESTER_ENABLED=0$/m);
+  assert.match(exampleEnvironment, /^VITE_CHART_STRATEGY_TESTER_ENABLED=1$/m);
   assert.match(exampleEnvironment, /^VITE_CHART_TRADE_EXPLANATION_ENABLED=0$/m);
-  assert.match(exampleEnvironment, /^VITE_CHART_RUN_COMPARE_ENABLED=0$/m);
-  assert.match(exampleEnvironment, /^VITE_CHART_STRATEGY_AUTO_RUN_ENABLED=0$/m);
+  assert.match(exampleEnvironment, /^VITE_CHART_RUN_COMPARE_ENABLED=1$/m);
+  assert.match(exampleEnvironment, /^VITE_CHART_STRATEGY_AUTO_RUN_ENABLED=1$/m);
   assert.match(bridge, /CHART_STRATEGY_AUTO_RUN_DEBOUNCE_MS/);
   assert.match(bridge, /chartStrategyAutoRunCoordinator\.enqueue/);
   assert.match(bridge, /currentRuntime\.snapshot\(\)\.generation !== intent\.generation/);

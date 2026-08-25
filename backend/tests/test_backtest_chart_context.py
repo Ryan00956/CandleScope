@@ -520,11 +520,12 @@ def test_chart_context_http_contract_and_confirmation_gate(tmp_path: Path) -> No
         runtime.shutdown()
 
 
-def test_chart_context_http_routes_are_default_off(tmp_path: Path) -> None:
+def test_chart_context_http_routes_accept_explicit_rollback(tmp_path: Path) -> None:
     settings = load_backtest_settings(
         {
             "BACKTEST_ENABLED": "1",
             "BACKTEST_BAR_ENABLED": "1",
+            "BACKTEST_CHART_CONTEXT_ENABLED": "0",
         },
         data_dir=tmp_path,
         klines_db_path=tmp_path / "candlescope.db",

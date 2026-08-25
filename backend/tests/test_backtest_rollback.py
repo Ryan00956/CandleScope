@@ -43,7 +43,7 @@ def test_flag_off_ignores_existing_backtest_database(tmp_path: Path) -> None:
     with pytest.raises(BacktestError, match="FLAG_DISABLED"):
         BacktestService.start(
             load_backtest_settings(
-                {},
+                {"BACKTEST_ENABLED": "0"},
                 data_dir=tmp_path,
                 klines_db_path=tmp_path / "candlescope.db",
                 replay_db_path=tmp_path / "replay.db",
@@ -51,6 +51,6 @@ def test_flag_off_ignores_existing_backtest_database(tmp_path: Path) -> None:
             now_ms=2,
         )
     assert db_path.is_file()
-    assert not any(
+    assert any(
         getattr(route, "path", "").startswith("/api/v1/backtests") for route in app.routes
     )

@@ -35,8 +35,9 @@ const snapshot: BacktestSnapshot = {
   fidelity_capabilities: ["BAR_APPROX"],
 };
 
-test("advanced research flag remains default-off and accepts explicit enablement", () => {
-  assert.equal(isBacktestResearchAdvancedEnabled({}), false);
+test("advanced research defaults on and accepts explicit rollback", () => {
+  assert.equal(isBacktestResearchAdvancedEnabled({}), true);
+  assert.equal(isBacktestResearchAdvancedEnabled({ VITE_BACKTEST_RESEARCH_ADVANCED_ENABLED: "0" }), false);
   assert.equal(isBacktestResearchAdvancedEnabled({ VITE_BACKTEST_RESEARCH_ADVANCED_ENABLED: "1" }), true);
 });
 

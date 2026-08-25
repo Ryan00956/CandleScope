@@ -12,7 +12,7 @@ from app.backtest.python_first_n10 import (
     default_app_exposes_backtest,
     default_flag_values,
     enabled_production_flags,
-    frontend_flag_defaults_off,
+    frontend_flag_defaults_match_policy,
     n10_status,
     publication_locks,
     python_identities,
@@ -33,17 +33,17 @@ from candlescope_backtest_sdk.contract import (
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_production_and_python_flags_default_off(tmp_path: Path) -> None:
+def test_chart_first_defaults_on_while_python_gates_stay_off(tmp_path: Path) -> None:
     settings = load_backtest_settings(
         {},
         data_dir=tmp_path,
         klines_db_path=tmp_path / "k.db",
         replay_db_path=tmp_path / "r.db",
     )
-    assert settings.enabled is False
-    assert settings.bar_enabled is False
+    assert settings.enabled is True
+    assert settings.bar_enabled is True
     assert settings.trade_tape_enabled is False
-    assert settings.study_enabled is False
+    assert settings.study_enabled is True
     assert settings.multi_market_enabled is False
     flags = default_flag_values({})
     assert set(flags) == set(PRODUCTION_FLAGS)
@@ -52,16 +52,16 @@ def test_production_and_python_flags_default_off(tmp_path: Path) -> None:
     frontend = (
         ROOT / "frontend" / "src" / "features" / "backtest" / "backtestFlags.ts"
     ).read_text(encoding="utf-8")
-    assert frontend_flag_defaults_off(frontend)
+    assert frontend_flag_defaults_match_policy(frontend)
     for name in FRONTEND_FLAGS:
-        assert f'{name} ?? "0"' in frontend
+        expected = "1" if name == "VITE_BACKTEST_ENTRY_ENABLED" else "0"
+        assert f'{name} ?? "{expected}"' in frontend
 
 
-def test_disabled_boot_has_no_python_or_backtest_routes() -> None:
+def test_default_boot_exposes_backtest_while_python_flags_remain_off() -> None:
     paths = [str(getattr(route, "path", "")) for route in app.routes]
-    assert default_app_exposes_backtest(paths) is False
-    assert not any("/python" in path.lower() for path in paths)
-    assert not any(path.startswith("/api/v1/backtests") for path in paths)
+    assert default_app_exposes_backtest(paths) is True
+    assert enabled_production_flags({}) == []
 
 
 def test_python_runner_does_not_import_host_or_database() -> None:

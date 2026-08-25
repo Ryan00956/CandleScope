@@ -6,7 +6,7 @@ export function isBacktestEntryEnabled(
     string | boolean | undefined
   >,
 ): boolean {
-  const raw = String(env.VITE_BACKTEST_ENTRY_ENABLED ?? "0").trim().toLowerCase();
+  const raw = String(env.VITE_BACKTEST_ENTRY_ENABLED ?? "1").trim().toLowerCase();
   return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
 }
 export function isPythonStrategyEntryEnabled(
@@ -43,7 +43,7 @@ export function isBacktestResearchEnabled(
     string | boolean | undefined
   >,
 ): boolean {
-  const raw = String(env.VITE_BACKTEST_RESEARCH_ENABLED ?? "0").trim().toLowerCase();
+  const raw = String(env.VITE_BACKTEST_RESEARCH_ENABLED ?? "1").trim().toLowerCase();
   return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
 }
 
@@ -53,7 +53,7 @@ export function isBacktestResearchAdvancedEnabled(
     string | boolean | undefined
   >,
 ): boolean {
-  const raw = String(env.VITE_BACKTEST_RESEARCH_ADVANCED_ENABLED ?? "0")
+  const raw = String(env.VITE_BACKTEST_RESEARCH_ADVANCED_ENABLED ?? "1")
     .trim()
     .toLowerCase();
   return raw === "1" || raw === "true" || raw === "yes" || raw === "on";

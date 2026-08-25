@@ -1426,25 +1426,29 @@ Provider conformance。命令以各包现有 release 脚本为准，不在本文
 建议独立 flags：
 
 ```text
-BACKTEST_ENABLED=0
-VITE_BACKTEST_ENTRY_ENABLED=0
-BACKTEST_BAR_ENABLED=0
+BACKTEST_ENABLED=1
+VITE_BACKTEST_ENTRY_ENABLED=1
+BACKTEST_BAR_ENABLED=1
+BACKTEST_CHART_CONTEXT_ENABLED=1
+BACKTEST_TRADE_EXPLANATION_ENABLED=0
 BACKTEST_TRADE_TAPE_ENABLED=0
 BACKTEST_BOOK_ASSISTED_ENABLED=0
-BACKTEST_STUDY_ENABLED=0
+BACKTEST_STUDY_ENABLED=1
 BACKTEST_EXTERNAL_PROVIDER_ENABLED=0
 BACKTEST_ONLINE_LEARNING_ENABLED=0
 BACKTEST_MULTI_MARKET_ENABLED=0
-BACKTEST_REPLAY_REVIEW_BRIDGE_ENABLED=0
+BACKTEST_REPLAY_REVIEW_BRIDGE_ENABLED=1
 ```
 
 规则：
 
-- `BACKTEST_ENABLED=0` 时不注册 API、不创建 DB、不启动 worker；
+- Chart-first BAR、图表上下文、Study、独立 Run 比较和回放只读桥默认开启；
+- Run 绑定交易解释继续独立 opt-in，避免改变默认报告哈希合同；
+- `BACKTEST_ENABLED=0` 仍是总回滚开关：不注册 API、不创建 DB、不启动 worker；
 - 前端 flag 只控制入口，不是安全边界；后端仍需拒绝；
 - 子功能必须同时要求总 flag 和子 flag；
 - 未知/非法布尔值启动失败，不能 truthy 猜测；
-- 生产启用需要单独授权、观测窗口和回滚负责人；
+- 更高精度、外部 provider、在线学习和可信 Python 的生产启用仍需要单独授权、观测窗口和回滚负责人；
 - 回滚后所有 backtest flags 归零，不改变 replay/local/plugin flags。
 
 ## 22. Release manifest 与证据

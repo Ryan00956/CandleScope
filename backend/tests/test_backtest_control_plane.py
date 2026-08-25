@@ -44,8 +44,8 @@ def _payload(**overrides: object) -> dict[str, object]:
     return body
 
 
-def test_flags_off_register_no_routes_and_create_no_database(tmp_path: Path) -> None:
-    assert not any(
+def test_default_boot_registers_routes_without_using_test_database(tmp_path: Path) -> None:
+    assert any(
         getattr(route, "path", "").startswith("/api/v1/backtests")
         for route in app.routes
     )

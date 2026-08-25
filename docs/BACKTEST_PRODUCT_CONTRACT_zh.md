@@ -393,20 +393,23 @@ Provider **不得**：
 
 ## 12. Feature flags 与资源上限
 
-所有生产入口默认关闭。非法布尔值必须启动失败。
+已通过 Phase 12 的 Chart-first BAR 工作流默认开启，并可用显式 `0` 逐项回滚。
+更高精度数据、外部执行器、在线学习和可信 Python 仍默认关闭。非法布尔值必须启动失败。
 
 | Flag | 默认 | 作用 |
 | --- | --- | --- |
-| `BACKTEST_ENABLED` | `0` | 总开关；为 0 时不注册 API、不创建 DB、不启动 worker |
-| `VITE_BACKTEST_ENTRY_ENABLED` | `0` | 前端入口，不是安全边界 |
-| `BACKTEST_BAR_ENABLED` | `0` | BAR 回测 |
+| `BACKTEST_ENABLED` | `1` | 总开关；显式为 0 时不注册 API、不创建 DB、不启动 worker |
+| `VITE_BACKTEST_ENTRY_ENABLED` | `1` | 前端入口，不是安全边界 |
+| `BACKTEST_BAR_ENABLED` | `1` | BAR 回测 |
+| `BACKTEST_CHART_CONTEXT_ENABLED` | `1` | 图表上下文解析与本地数据物化确认 |
+| `BACKTEST_TRADE_EXPLANATION_ENABLED` | `0` | Run 绑定交易原因与证据链；不进入默认确定性报告合同 |
 | `BACKTEST_TRADE_TAPE_ENABLED` | `0` | 成交回测 |
 | `BACKTEST_BOOK_ASSISTED_ENABLED` | `0` | 盘口辅助 |
-| `BACKTEST_STUDY_ENABLED` | `0` | Study / 参数搜索 |
+| `BACKTEST_STUDY_ENABLED` | `1` | Study / 参数搜索 |
 | `BACKTEST_EXTERNAL_PROVIDER_ENABLED` | `0` | ONNX / 本地 Python / gRPC |
 | `BACKTEST_ONLINE_LEARNING_ENABLED` | `0` | 在线学习 |
-| `BACKTEST_MULTI_MARKET_ENABLED` | `0` | 多市场 |
-| `BACKTEST_REPLAY_REVIEW_BRIDGE_ENABLED` | `0` | 回放对照桥 |
+| `BACKTEST_MULTI_MARKET_ENABLED` | `0` | 共享资本多市场执行；独立 Run 证据比较不依赖此开关 |
+| `BACKTEST_REPLAY_REVIEW_BRIDGE_ENABLED` | `1` | 回放只读对照桥 |
 
 资源上限是冻结安全天花板，环境变量只能收紧，不能放大：
 

@@ -133,8 +133,12 @@ def publication_locks() -> dict[str, bool]:
     return {"merged": False, "pushed": False, "productionEnabled": False}
 
 
-def frontend_flag_defaults_off(text: str) -> bool:
-    return all(f'{name} ?? "0"' in text for name in FRONTEND_FLAGS)
+def frontend_flag_defaults_match_policy(text: str) -> bool:
+    return (
+        'VITE_BACKTEST_ENTRY_ENABLED ?? "1"' in text
+        and 'VITE_BACKTEST_PYTHON_STRATEGY_ENABLED ?? "0"' in text
+        and 'VITE_BACKTEST_PYTHON_TRUSTED_LOCAL_ENABLED ?? "0"' in text
+    )
 
 
 def repository_root() -> Path:

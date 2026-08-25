@@ -6,7 +6,7 @@ from app.backtest.runtime import BacktestRuntime
 from app.core.config import load_backtest_settings
 
 
-def test_capabilities_expose_versioned_quick_presets_and_default_off_flag(
+def test_capabilities_expose_versioned_quick_presets_and_default_on_flag(
     tmp_path: Path,
 ) -> None:
     settings = load_backtest_settings(
@@ -18,10 +18,10 @@ def test_capabilities_expose_versioned_quick_presets_and_default_off_flag(
     runtime = BacktestRuntime.start(settings, local_data_dir=tmp_path / "local")
     try:
         capabilities = runtime.service.capabilities()
-        assert capabilities["flags"]["BACKTEST_CHART_CONTEXT_ENABLED"] is False
+        assert capabilities["flags"]["BACKTEST_CHART_CONTEXT_ENABLED"] is True
         assert capabilities["chart_context"] == {
             "schema_version": "candlescope.backtest-chart-context/1",
-            "enabled": False,
+            "enabled": True,
             "resolve_is_local_only": True,
             "materialize_requires_confirmation": True,
         }

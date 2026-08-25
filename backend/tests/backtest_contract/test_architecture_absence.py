@@ -37,7 +37,7 @@ def test_main_registers_backtest_routes_only_behind_the_master_flag() -> None:
     assert "stream_backtests" not in main_text
     from app.main import app
 
-    assert not any(
+    assert any(
         getattr(route, "path", "").startswith("/api/v1/backtests")
         for route in app.routes
     )

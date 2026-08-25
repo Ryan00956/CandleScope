@@ -3,7 +3,7 @@
   "generatedAt": "2026-08-25T15:10:00+08:00",
   "status": "PHASE0_ENGINEERING_COMPLETE",
   "baselineSha": "144e748cc881220565cd5aa07fc494cba9a4133c",
-  "candidateSha": "9d598b17b428a6b0afc90d2aae18e7888ec0e467",
+  "candidateSha": "0522ba90ee23d4b897ec6714bbd3086b3e3a9c8b",
   "dirtyPathsBefore": [
     "?? docs/LOCAL_DATA_STRATEGY_RESEARCH_UNIFICATION_EXECUTION_zh.md"
   ],

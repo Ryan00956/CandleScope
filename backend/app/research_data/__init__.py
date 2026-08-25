@@ -7,6 +7,7 @@ from .capabilities import (
     is_capability_available,
     project_capabilities,
 )
+from .runtime import ResearchDataRuntime
 from .contracts import (
     SOURCE_KINDS,
     FrozenResearchContext,
@@ -35,5 +36,6 @@ __all__ = [
     "parse_frozen_research_context",
     "parse_research_source_ref",
     "project_capabilities",
+    "ResearchDataRuntime",
     "source_ref_wire",
 ]

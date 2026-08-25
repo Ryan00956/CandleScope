@@ -65,19 +65,59 @@ class LocalOfflineProfileMiddleware:
         await self.app(scope, receive, send)
 
 
-class LocalOfflineRuntime:
+class LocalDataRuntime:
+    """Unique writable owner of LocalDatasetService and import jobs."""
+
     def __init__(self, root: Path) -> None:
         self.service = LocalDatasetService(root)
         self.jobs = LocalImportJobManager(self.service)
-        self.network_guard = OfflineNetworkGuard()
+        self._started = False
+        self._shutdown = False
 
     def start(self) -> None:
+        if self._started:
+            return
         self.service.start()
-        self.network_guard.install()
+        self._started = True
 
     def shutdown(self) -> None:
+        if self._shutdown:
+            return
+        self._shutdown = True
         self.jobs.shutdown()
+
+
+class LocalOfflineBoundary:
+    """Process-level LOCAL_OFFLINE network guard. Not a page toggle."""
+
+    def __init__(self) -> None:
+        self.network_guard = OfflineNetworkGuard()
+
+    def install(self) -> None:
+        self.network_guard.install()
+
+    def uninstall(self) -> None:
         self.network_guard.uninstall()
+
+    def snapshot(self) -> dict[str, Any]:
+        return self.network_guard.snapshot()
+
+
+class LocalOfflineRuntime:
+    def __init__(self, root: Path) -> None:
+        self.data = LocalDataRuntime(root)
+        self.boundary = LocalOfflineBoundary()
+        self.service = self.data.service
+        self.jobs = self.data.jobs
+        self.network_guard = self.boundary.network_guard
+
+    def start(self) -> None:
+        self.data.start()
+        self.boundary.install()
+
+    def shutdown(self) -> None:
+        self.data.shutdown()
+        self.boundary.uninstall()
 
     def diagnostics(self) -> dict[str, Any]:
         return {

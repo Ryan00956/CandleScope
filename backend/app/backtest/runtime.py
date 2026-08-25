@@ -72,13 +72,19 @@ class BacktestRuntime:
         self,
         *,
         settings: BacktestSettings,
-        local_data_dir: Path,
         service: BacktestService,
+        local_data_dir: Path | None = None,
+        local_data_service: LocalDatasetService | None = None,
         trade_archive_dir: Path | None = None,
     ) -> None:
+        if local_data_service is None:
+            if local_data_dir is None:
+                raise TypeError("BacktestRuntime requires local_data_service or local_data_dir")
+            local_data_service = LocalDatasetService(local_data_dir)
+            local_data_service.start()
         self.settings = settings
         self.service = service
-        self.local_data = LocalDatasetService(local_data_dir)
+        self.local_data = local_data_service
         self.snapshots = LocalBarSnapshotProvider(
             self.local_data,
             max_rows=settings.max_bar_rows,
@@ -94,17 +100,19 @@ class BacktestRuntime:
         )
         self.worker = BacktestWorker(
             settings=settings,
-            local_data_dir=local_data_dir,
+            local_data=local_data_service,
             trade_archive_dir=trade_archive_dir,
         )
         self.chart_context = ChartBacktestContextResolver(self)
+        self._shutdown = False
 
     @classmethod
     def start(
         cls,
         settings: BacktestSettings,
         *,
-        local_data_dir: Path,
+        local_data_dir: Path | None = None,
+        local_data_service: LocalDatasetService | None = None,
         trade_archive_dir: Path | None = None,
     ) -> BacktestRuntime:
         service = BacktestService.start(
@@ -115,17 +123,22 @@ class BacktestRuntime:
         runtime = cls(
             settings=settings,
             local_data_dir=local_data_dir,
+            local_data_service=local_data_service,
             service=service,
             trade_archive_dir=trade_archive_dir,
         )
         try:
             runtime.worker.start()
         except BaseException:
+            runtime.worker.shutdown()
             service.shutdown()
             raise
         return runtime
 
     def shutdown(self) -> None:
+        if self._shutdown:
+            return
+        self._shutdown = True
         self.worker.shutdown()
         self.service.shutdown()
 
@@ -514,11 +527,11 @@ class BacktestWorker:
         self,
         *,
         settings: BacktestSettings,
-        local_data_dir: Path,
+        local_data: LocalDatasetService,
         trade_archive_dir: Path | None = None,
     ) -> None:
         self.settings = settings
-        self.local_data = LocalDatasetService(local_data_dir)
+        self.local_data = local_data
         self.snapshots = LocalBarSnapshotProvider(
             self.local_data,
             max_rows=settings.max_bar_rows,

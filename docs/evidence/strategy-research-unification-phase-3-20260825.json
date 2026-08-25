@@ -1,0 +1,20 @@
+{
+  "schemaVersion": "candlescope.strategy-research-unification.phase3/1",
+  "generatedAt": "2026-08-25T16:40:00+08:00",
+  "status": "PHASE3_ENGINEERING_COMPLETE",
+  "baselineSha": "19a9b7e33bd91ecc73fcabb2dff3e26c1a664806",
+  "candidateSha": "PENDING_PHASE3_COMMIT",
+  "dirtyPathsBefore": ["?? docs/LOCAL_DATA_STRATEGY_RESEARCH_UNIFICATION_EXECUTION_zh.md"],
+  "dirtyPathsAfterOriginalTree": ["?? docs/LOCAL_DATA_STRATEGY_RESEARCH_UNIFICATION_EXECUTION_zh.md"],
+  "commands": [
+    "D:\\anaconda\\python.exe -m pytest -q tests/test_research_data_runtime.py tests/test_backtest_runtime.py tests/test_backtest_chart_context.py tests/test_backtest_quick_presets.py tests/test_local_offline_main_profile.py tests/test_local_offline_network_guard.py tests/test_local_data_service.py tests/test_local_data_api.py tests/test_local_data_jobs.py"
+  ],
+  "exitCodes": { "pytestRuntime": 0 },
+  "scopedTests": { "pytestRuntime": { "result": "PASS", "passed": 51 } },
+  "fullTests": { "result": "NOT_REQUIRED_THIS_PHASE" },
+  "browserScenarios": ["n/a backend lifecycle"],
+  "runtimeMode": "LIVE_and_LOCAL_OFFLINE",
+  "effectiveFlags": {},
+  "rollbackResult": "revert runtime ownership commit; no user data migration",
+  "unresolvedFindings": []
+}

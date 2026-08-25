@@ -487,12 +487,13 @@ async def startup_event() -> None:
             app.state.local_data_service = local_runtime.service
             app.state.local_import_jobs = local_runtime.jobs
             app.state.data_manager = None
+            app.state.local_data_runtime = local_runtime.data
             if BACKTEST_SETTINGS.enabled:
                 from app.backtest.runtime import BacktestRuntime
 
                 backtest_runtime = BacktestRuntime.start(
                     BACKTEST_SETTINGS,
-                    local_data_dir=LOCAL_DATA_DIR,
+                    local_data_service=local_runtime.service,
                     trade_archive_dir=REPLAY_AGG_TRADE_ARCHIVE_DIR,
                 )
                 app.state.backtest_runtime = backtest_runtime
@@ -535,10 +536,15 @@ async def startup_event() -> None:
     try:
         if BACKTEST_SETTINGS.enabled:
             from app.backtest.runtime import BacktestRuntime
+            from app.local_data.runtime import LocalDataRuntime
 
+            data_runtime = LocalDataRuntime(LOCAL_DATA_DIR)
+            data_runtime.start()
+            app.state.local_data_runtime = data_runtime
+            app.state.local_data_service = data_runtime.service
             backtest_runtime = BacktestRuntime.start(
                 BACKTEST_SETTINGS,
-                local_data_dir=LOCAL_DATA_DIR,
+                local_data_service=data_runtime.service,
                 trade_archive_dir=REPLAY_AGG_TRADE_ARCHIVE_DIR,
             )
             app.state.backtest_runtime = backtest_runtime
@@ -552,6 +558,9 @@ async def startup_event() -> None:
         backtest_runtime = getattr(app.state, "backtest_runtime", None)
         if backtest_runtime is not None:
             backtest_runtime.shutdown()
+        data_runtime = getattr(app.state, "local_data_runtime", None)
+        if data_runtime is not None:
+            data_runtime.shutdown()
         await _stop_plugin_owner(getattr(app.state, "plugin_platform_v2", None))
         await _stop_plugin_owner(getattr(app.state, "indicator_runtime_service", None))
         await _stop_plugin_owner(getattr(app.state, "plugin_runtime_host", None))
@@ -712,6 +721,9 @@ async def shutdown_event() -> None:
         backtest_service = getattr(app.state, "backtest_service", None)
         if backtest_service is not None:
             backtest_service.shutdown()
+    data_runtime = getattr(app.state, "local_data_runtime", None)
+    if data_runtime is not None:
+        data_runtime.shutdown()
 
     symbol_catalog_task = getattr(app.state, "symbol_catalog_refresh_task", None)
     if symbol_catalog_task is not None and not symbol_catalog_task.done():

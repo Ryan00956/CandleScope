@@ -25,7 +25,9 @@ export type ChartStrategyTesterStaleReason =
   | "PARAMETERS_CHANGED"
   | "RANGE_CHANGED"
   | "FIDELITY_CHANGED"
-  | "QUICK_PRESET_CHANGED";
+  | "QUICK_PRESET_CHANGED"
+  | "SOURCE_CHANGED"
+  | "DATA_REVISION_CHANGED";
 
 export interface ResultProjectionIdentity {
   cellScope: string;
@@ -35,6 +37,7 @@ export interface ResultProjectionIdentity {
   datasetId: string;
   dataEpoch: string;
   snapshotHash: string;
+  frozenContextHash: string;
   startTimeMs: number;
   endTimeMs: number;
   executionProfileRevision: string;
@@ -45,6 +48,9 @@ export interface ChartStrategyTesterInputs {
   session: ChartSession;
   attachment: ChartStrategyAttachmentRecord;
   draftContentRevision: number | null;
+  sourceKind?: "CURRENT_CHART" | "IMPORTED_DATASET" | "COMPLETED_RUN";
+  datasetId?: string;
+  dataEpoch?: string;
 }
 
 export interface ChartStrategyTesterError {
@@ -125,6 +131,9 @@ function cloneInputs(inputs: ChartStrategyTesterInputs): ChartStrategyTesterInpu
         : null,
     },
     draftContentRevision: inputs.draftContentRevision,
+    ...(inputs.sourceKind === undefined ? {} : { sourceKind: inputs.sourceKind }),
+    ...(inputs.datasetId === undefined ? {} : { datasetId: inputs.datasetId }),
+    ...(inputs.dataEpoch === undefined ? {} : { dataEpoch: inputs.dataEpoch }),
   };
 }
 
@@ -158,6 +167,10 @@ export function chartStrategyTesterStaleReasons(
     reasons.push("FIDELITY_CHANGED");
   }
   if (left.quickPresetId !== right.quickPresetId) reasons.push("QUICK_PRESET_CHANGED");
+  if (previous.sourceKind !== next.sourceKind || previous.datasetId !== next.datasetId) {
+    reasons.push("SOURCE_CHANGED");
+  }
+  if (previous.dataEpoch !== next.dataEpoch) reasons.push("DATA_REVISION_CHANGED");
   return reasons;
 }
 

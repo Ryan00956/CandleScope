@@ -8,7 +8,9 @@ import {
   chartStrategyQuickPresetIdForMarket,
   chartStrategyRunDiagnostics,
   freezeChartStrategyRunRequest,
+  qualitySummaryFromImportedManifest,
   runChartStrategyBacktest,
+  runResearchBacktest,
   type ChartStrategyRunApi,
 } from "../chartStrategyRunRequest.js";
 import type { ChartStrategyRunRequest } from "../chartStrategyTesterUiModel.js";
@@ -334,4 +336,104 @@ test("backend Run capacity is actionable and never hidden behind generic retry",
   assert.equal(diagnostics.action, "wait-and-retry");
   assert.equal(diagnostics.details.retryable, true);
   assert.equal(diagnostics.details.retry_after_ms, 1000);
+});
+
+const importedSource = {
+  kind: "IMPORTED_DATASET" as const,
+  datasetId: "local-0123456789abcdef0123456789abcdef",
+  dataEpoch: "sha256:" + "a".repeat(64),
+  interval: "15m",
+  symbol: "BTC-USDT",
+  startTimeMs: 1_704_067_200_000,
+  endTimeMs: 1_704_076_800_000,
+  quality: qualitySummaryFromImportedManifest({
+    rows: 96,
+    excludedRangeCount: 0,
+    volumeAvailable: true,
+  }),
+};
+
+function importedPreview(epoch = importedSource.dataEpoch) {
+  return {
+    data_epoch: epoch,
+    snapshot_hash: "sha256:" + "c".repeat(64),
+    coverage_start_ms: importedSource.startTimeMs,
+    coverage_end_ms: importedSource.endTimeMs,
+    row_count: 96,
+    fidelity_capabilities: ["BAR_APPROX"],
+    quality: { status: "ok", gap_count: 0, volume_available: true },
+  };
+}
+
+function importedApi(calls: string[], epoch = importedSource.dataEpoch): ChartStrategyRunApi {
+  return {
+    ...apiWithResolutions([], calls),
+    async previewSnapshot() {
+      calls.push("preview");
+      return importedPreview(epoch);
+    },
+  };
+}
+
+test("imported dataset previews and freezes without materialize or online resolve", async () => {
+  const calls: string[] = [];
+  const outcome = await runResearchBacktest({
+    api: importedApi(calls),
+    request: { ...request, session: { ...request.session, marketType: "spot", symbol: "BTC-USDT", interval: "15m" } },
+    source: importedSource,
+    pollIntervalMs: 0,
+  });
+  assert.equal(outcome.kind, "TERMINAL");
+  assert.equal(outcome.frozenContext?.sourceKind, "IMPORTED_DATASET");
+  assert.equal(outcome.frozenContext?.snapshotHash, importedPreview().snapshot_hash);
+  assert.equal(outcome.frozenContext?.datasetId, importedSource.datasetId);
+  assert.equal(outcome.kind === "TERMINAL" ? outcome.identity.frozenContextHash : "", outcome.frozenContext?.contextHash);
+  assert.equal(outcome.resolution.fidelity.mode, "BAR_APPROX");
+  assert.equal(outcome.resolution.materialize.required, false);
+  assert.deepEqual(calls, [
+    "revision:PYNE_CHART_V1",
+    "preview",
+    "smoke",
+    "validate",
+    "preview",
+    "create",
+    "get",
+  ]);
+  assert.equal(calls.includes("resolve"), false);
+  assert.equal(calls.includes("materialize:true"), false);
+});
+
+test("imported data epoch change after preview fails before create", async () => {
+  const calls: string[] = [];
+  let previews = 0;
+  const api = importedApi(calls);
+  api.previewSnapshot = async () => {
+    previews += 1;
+    calls.push("preview");
+    return importedPreview(previews === 1 ? importedSource.dataEpoch : `sha256:${"d".repeat(64)}`);
+  };
+  await assert.rejects(
+    () => runResearchBacktest({
+      api,
+      request,
+      source: importedSource,
+      pollIntervalMs: 0,
+    }),
+    (error: unknown) => error instanceof Error && "code" in error && error.code === "DATA_SNAPSHOT_MISMATCH",
+  );
+  assert.equal(calls.includes("create"), false);
+});
+
+test("imported precise fidelity is rejected as BAR_ONLY", async () => {
+  await assert.rejects(
+    () => runResearchBacktest({
+      api: importedApi([]),
+      request: {
+        ...request,
+        attachment: { ...request.attachment, fidelityPreference: "PRECISE" },
+      },
+      source: importedSource,
+    }),
+    (error: unknown) => error instanceof Error && "code" in error && error.code === "FIDELITY_UNSUPPORTED",
+  );
 });

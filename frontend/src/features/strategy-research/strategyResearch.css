@@ -3,8 +3,7 @@
 }
 
 .strategy-research-shell[data-visual-state="first"] .strategy-research-script,
-.strategy-research-shell[data-visual-state="import"] .strategy-research-script,
-.strategy-research-shell[data-visual-state="chart"] .strategy-research-script {
+.strategy-research-shell[data-visual-state="import"] .strategy-research-script {
   max-height: 0;
   overflow: hidden;
 }

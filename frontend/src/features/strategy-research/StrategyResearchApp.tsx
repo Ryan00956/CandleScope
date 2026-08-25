@@ -38,7 +38,10 @@ import {
 } from "./StrategyResearchChart.js";
 import { importedDatasetSourceFromManifest } from "./importedDatasetSource.js";
 import { StrategyResearchRuntime } from "./StrategyResearchRuntime.js";
+import { StrategyResearchResultPanel } from "./StrategyResearchResultPanel.js";
+import { StrategyResearchScriptPanel } from "./StrategyResearchScriptPanel.js";
 import { StrategyResearchShell } from "./StrategyResearchShell.js";
+import { useStrategyResearchRun } from "./useStrategyResearchRun.js";
 import {
   parseStrategyResearchLaunch,
   strategyResearchLaunchActions,
@@ -227,6 +230,12 @@ export default function StrategyResearchApp({
 
   const scriptDraft = state.script.draftId;
   const analysisEvents = importedManifest === null ? [] : analysisSnapshot.events;
+  const researchRun = useStrategyResearchRun({
+    source,
+    imported: importedManifest,
+    interval: selectedInterval,
+    onRunId: (runId) => dispatch({ type: "result/setRun", runId }),
+  });
 
   const drawer = (
     <StrategyResearchDrawerBoundary
@@ -247,8 +256,31 @@ export default function StrategyResearchApp({
     </StrategyResearchDrawerBoundary>
   );
 
-  const script = <p data-strategy-draft={scriptDraft ?? ""}>{t("strategy.scriptSlot")}</p>;
-  const result = <p>{state.result.runId ?? t("strategy.resultSlot")}</p>;
+  const script = (
+    <div data-strategy-draft={scriptDraft ?? ""}>
+      <StrategyResearchScriptPanel
+        cellScope="strategy-research"
+        session={researchRun.session}
+        sourceKind={source?.kind ?? null}
+        barOnly={researchRun.barOnly}
+        runStatus={researchRun.runStatus}
+        needsData={researchRun.needsData}
+        onDraftId={(draftId) => dispatch({ type: "script/setDraft", draftId })}
+        onRun={researchRun.onRun}
+        onConfirmNeedsData={researchRun.onConfirmNeedsData}
+      />
+    </div>
+  );
+  const result = (
+    <StrategyResearchResultPanel
+      result={researchRun.result}
+      stale={researchRun.stale || state.result.stale}
+      staleReasons={researchRun.staleReasons}
+      barOnly={researchRun.barOnly}
+      error={researchRun.error}
+      runStatus={researchRun.runStatus}
+    />
+  );
   const controls = (
     <>
       <button

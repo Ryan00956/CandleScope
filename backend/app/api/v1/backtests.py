@@ -320,6 +320,25 @@ def _require_contract_snapshot(
         )
 
 
+def _require_declared_snapshot(preview: dict[str, Any], payload: RunCreateRequest) -> None:
+    if (
+        preview["snapshot_hash"] != payload.snapshot_hash
+        or preview.get("data_epoch") != payload.data_epoch
+    ):
+        raise BacktestError(
+            "DATA_SNAPSHOT_MISMATCH",
+            "declared snapshot identity does not match the selected window",
+        )
+    if payload.fidelity_mode == "BAR_APPROX":
+        return
+    capabilities = preview.get("fidelity_capabilities") or []
+    if payload.fidelity_mode not in capabilities and "AGG_TRADE_TAPE" not in capabilities:
+        raise BacktestError(
+            "FIDELITY_UNSUPPORTED",
+            "this data only supports bar estimate",
+        )
+
+
 def _service(request: Request) -> BacktestService:
     service = getattr(request.app.state, "backtest_service", None)
     if service is None:
@@ -580,14 +599,7 @@ def validate_run(request: Request, payload: RunCreateRequest) -> dict[str, Any]:
                 funding_mode=payload.funding_mode,
             )
             _require_contract_snapshot(preview, payload.contract_data_mode)
-            if (
-                preview["snapshot_hash"] != payload.snapshot_hash
-                or preview.get("data_epoch") != payload.data_epoch
-            ):
-                raise BacktestError(
-                    "DATA_SNAPSHOT_MISMATCH",
-                    "declared snapshot identity does not match the selected window",
-                )
+            _require_declared_snapshot(preview, payload)
             validated["snapshot"] = preview
         return validated
     except BacktestError as exc:
@@ -617,14 +629,7 @@ def create_run(
                 funding_mode=payload.funding_mode,
             )
             _require_contract_snapshot(preview, payload.contract_data_mode)
-            if (
-                preview["snapshot_hash"] != payload.snapshot_hash
-                or preview.get("data_epoch") != payload.data_epoch
-            ):
-                raise BacktestError(
-                    "DATA_SNAPSHOT_MISMATCH",
-                    "declared snapshot identity does not match the selected window",
-                )
+            _require_declared_snapshot(preview, payload)
         return _service(request).create_run(
             payload.model_dump(),
             idempotency_key=x_idempotency_key,

@@ -100,8 +100,11 @@ async function buildBundle(
     "chart hash",
   );
   const sanitized = await sanitizeBacktestEvidence(report, chart);
+  const datasetId = typeof run.dataset_id === "string" ? run.dataset_id.trim() : "";
+  const dataEpoch = typeof run.data_epoch === "string" ? run.data_epoch.trim() : "";
+  const snapshotHash = typeof run.snapshot_hash === "string" ? run.snapshot_hash.trim() : "";
   return Object.freeze({
-    cacheKey: `${run.run_id}|${reportHash}|${chartHash}`,
+    cacheKey: `${run.run_id}|${datasetId}|${dataEpoch}|${snapshotHash}|${reportHash}|${chartHash}`,
     run: Object.freeze({ ...run }),
     report: sanitized.report,
     chart: sanitized.chart,

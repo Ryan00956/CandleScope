@@ -287,6 +287,67 @@ class BacktestRuntime:
         finally:
             snapshot.close()
 
+    def freeze_imported_research_context(
+        self,
+        *,
+        dataset_id: str,
+        data_epoch: str,
+        interval: str,
+        start_time_ms: int,
+        end_time_ms: int,
+        symbol: str,
+    ) -> object:
+        from app.research_data.capabilities import project_capabilities
+        from app.research_data.contracts import (
+            QualitySummary,
+            assemble_frozen_research_context,
+        )
+        manifest = self._manifest(dataset_id)
+        if str(manifest["data_epoch"]) != data_epoch:
+            raise BacktestError(
+                "DATA_SNAPSHOT_MISMATCH",
+                "declared data version does not match the library",
+            )
+        preview = self.preview_snapshot(
+            dataset_id=dataset_id,
+            data_epoch=data_epoch,
+            start_time_ms=start_time_ms,
+            end_time_ms=end_time_ms,
+            interval=interval,
+            fidelity_mode="BAR_APPROX",
+            exchange="local",
+            market_type="spot",
+        )
+        if str(preview.get("data_epoch") or "") != data_epoch:
+            raise BacktestError(
+                "DATA_SNAPSHOT_MISMATCH",
+                "data version changed during preview",
+            )
+        quality_payload = preview.get("quality") if isinstance(preview.get("quality"), dict) else {}
+        gap_count = int(quality_payload.get("gap_count") or manifest.get("excluded_range_count") or 0)
+        quality = QualitySummary(
+            status="gap" if gap_count > 0 else "ok",
+            rows=int(preview.get("row_count") or 0),
+            excluded_range_count=gap_count,
+            volume_available=bool(quality_payload.get("volume_available", False)),
+        )
+        capabilities = project_capabilities("IMPORTED_DATASET", quality=quality).wire()
+        return assemble_frozen_research_context(
+            {
+                "schemaVersion": "candlescope.frozen-research-context/1",
+                "sourceKind": "IMPORTED_DATASET",
+                "datasetId": dataset_id,
+                "dataEpoch": data_epoch,
+                "interval": interval,
+                "startTimeMs": start_time_ms,
+                "endTimeMs": end_time_ms,
+                "symbol": symbol,
+                "qualitySummary": quality.wire(),
+            },
+            capability_summary=capabilities,
+            snapshot_hash=str(preview["snapshot_hash"]),
+        )
+
     def chart_data(self, run_id: str, *, max_bars: int = 50_000) -> dict[str, Any]:
         record = self.service.get_run(run_id)
         if record["state"] != "COMPLETED":

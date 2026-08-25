@@ -2,12 +2,22 @@ import {
   BacktestApiError,
   type BacktestApiClient,
   type BacktestQuickPreset,
+  type BacktestSnapshot,
   type ChartContextResolution,
   type ChartContextResolveRequest,
   type StrategyRevisionRecord,
 } from "../backtestApi.js";
 import { pollBacktestRunToTerminal, type waitForBacktestPoll } from "../backtestRunClient.js";
 import type { BacktestRunRecord } from "../backtestTypes.js";
+import {
+  FROZEN_RESEARCH_CONTEXT_SCHEMA,
+  type FrozenResearchContextV1,
+  type ResearchQualitySummaryV1,
+} from "../../research-data/researchDataTypes.js";
+import {
+  assembleFrozenResearchContext,
+  projectResearchCapabilities,
+} from "../../research-data/researchDataSourceModel.js";
 import type { ResultProjectionIdentity } from "./chartStrategyTesterState.js";
 import type { ChartStrategyRunRequest } from "./chartStrategyTesterUiModel.js";
 
@@ -19,7 +29,20 @@ export type ChartStrategyRunApi = Pick<BacktestApiClient,
   | "validate"
   | "createRun"
   | "getRun"
->;
+> & Partial<Pick<BacktestApiClient, "previewSnapshot">>;
+
+export type ResearchRunSource =
+  | { kind: "CURRENT_CHART"; materializeResolution?: ChartContextResolution | null }
+  | {
+    kind: "IMPORTED_DATASET";
+    datasetId: string;
+    dataEpoch: string;
+    interval: string;
+    symbol: string;
+    startTimeMs: number;
+    endTimeMs: number;
+    quality: ResearchQualitySummaryV1;
+  };
 
 export type ChartStrategyRunStage =
   | "COMPILING"
@@ -47,12 +70,14 @@ export type ChartStrategyRunOutcome =
     frozen: ChartStrategyFrozenRunRequest;
     revision: StrategyRevisionRecord;
     resolution: ChartContextResolution;
+    frozenContext: FrozenResearchContextV1 | null;
   }
   | {
     kind: "UNSUPPORTED";
     frozen: ChartStrategyFrozenRunRequest;
     revision: StrategyRevisionRecord;
     resolution: ChartContextResolution;
+    frozenContext: FrozenResearchContextV1 | null;
   }
   | {
     kind: "TERMINAL";
@@ -61,6 +86,7 @@ export type ChartStrategyRunOutcome =
     resolution: ChartContextResolution;
     run: BacktestRunRecord;
     identity: ResultProjectionIdentity;
+    frozenContext: FrozenResearchContextV1;
   };
 
 export class ChartStrategyRunError extends Error {
@@ -317,6 +343,7 @@ function resultIdentity(input: {
   resolution: ChartContextResolution;
   body: Record<string, unknown>;
   runId: string;
+  frozenContext: FrozenResearchContextV1;
 }): ResultProjectionIdentity {
   const immutable = requireReadyIdentity(input.resolution);
   const range = readyRange(input.resolution);
@@ -328,11 +355,355 @@ function resultIdentity(input: {
     datasetId: immutable.datasetId,
     dataEpoch: immutable.dataEpoch,
     snapshotHash: immutable.snapshotHash,
+    frozenContextHash: input.frozenContext.contextHash,
     startTimeMs: range.startTimeMs,
     endTimeMs: range.endTimeMs,
     executionProfileRevision: String(input.body.execution_model_revision ?? ""),
     runId: input.runId,
   };
+}
+
+function importedSpotExecutionPresets(): {
+  quick_preset_id: string;
+  cost_preset: Record<string, string>;
+  account_execution_preset: Record<string, string>;
+} {
+  return {
+    quick_preset_id: "CRYPTO_SPOT_STANDARD_V1",
+    cost_preset: {
+      preset_id: "CRYPTO_SPOT_STANDARD_V1",
+      preset_revision: "1",
+      fee_source: "exchange-market-preset",
+      fee_bps: "10",
+      slippage_bps: "1",
+    },
+    account_execution_preset: {
+      account_model: "LINEAR_PERP_ONE_WAY_V1",
+      sizing_policy: "EQUITY_PERCENT_V1",
+      equity_percent: "10",
+      initial_cash: "10000",
+      leverage: "1",
+      execution_model_revision: "EXECUTION_REALISM_V2",
+      contract_data_mode: "LEGACY_FIXED_V1",
+      funding_mode: "OFF",
+    },
+  };
+}
+
+export function qualitySummaryFromImportedManifest(input: {
+  rows: number;
+  excludedRangeCount: number;
+  volumeAvailable: boolean;
+}): ResearchQualitySummaryV1 {
+  return {
+    status: input.excludedRangeCount > 0 ? "gap" : "ok",
+    rows: input.rows,
+    excludedRangeCount: input.excludedRangeCount,
+    volumeAvailable: input.volumeAvailable,
+  };
+}
+
+export async function assembleFrozenContextFromResolution(
+  sourceKind: "CURRENT_CHART" | "IMPORTED_DATASET",
+  resolution: ChartContextResolution,
+  quality: ResearchQualitySummaryV1,
+): Promise<FrozenResearchContextV1> {
+  const identity = requireReadyIdentity(resolution);
+  const range = readyRange(resolution);
+  return assembleFrozenResearchContext(
+    {
+      schemaVersion: FROZEN_RESEARCH_CONTEXT_SCHEMA,
+      sourceKind,
+      datasetId: identity.datasetId,
+      dataEpoch: identity.dataEpoch,
+      snapshotHash: identity.snapshotHash,
+      interval: resolution.request.interval,
+      startTimeMs: range.startTimeMs,
+      endTimeMs: range.endTimeMs,
+      symbol: resolution.request.symbol,
+      qualitySummary: quality,
+    },
+    projectResearchCapabilities({ sourceKind, quality }),
+    identity.snapshotHash,
+  );
+}
+
+function resolutionFromImportedPreview(input: {
+  source: Extract<ResearchRunSource, { kind: "IMPORTED_DATASET" }>;
+  frozen: ChartStrategyFrozenRunRequest;
+  preview: BacktestSnapshot;
+}): ChartContextResolution {
+  const presets = importedSpotExecutionPresets();
+  const capabilities = (input.preview.fidelity_capabilities ?? []).includes("BAR_APPROX")
+    ? ["BAR_APPROX"]
+    : ["BAR_APPROX"];
+  return {
+    schema_version: "candlescope.backtest-chart-context/1",
+    status: "READY",
+    resolution_token: `imported-${input.source.datasetId}`.padEnd(16, "0"),
+    chart_context_hash: input.preview.snapshot_hash,
+    expires_at_ms: Date.now() + 3_600_000,
+    request: {
+      exchange: "local",
+      market_type: "spot",
+      symbol: input.source.symbol,
+      interval: input.source.interval,
+      range_mode: input.frozen.attachment.rangeMode,
+      start_time_ms: input.source.startTimeMs,
+      end_time_ms: input.source.endTimeMs,
+      fidelity_preference: "FAST",
+    },
+    dataset_id: input.source.datasetId,
+    data_epoch: input.source.dataEpoch,
+    snapshot_hash: input.preview.snapshot_hash,
+    coverage: {
+      requested_start_ms: input.source.startTimeMs,
+      requested_end_ms: input.source.endTimeMs,
+      available_start_ms: input.preview.coverage_start_ms,
+      available_end_ms: input.preview.coverage_end_ms,
+      row_count: input.preview.row_count,
+      missing_ranges: [],
+      complete: true,
+    },
+    fidelity: {
+      preference: "FAST",
+      mode: "BAR_APPROX",
+      capabilities,
+    },
+    quality_warnings: input.source.quality.status === "gap"
+      ? [{ code: "DATA_GAP", message: "imported data has gaps" }]
+      : [],
+    quick_preset_id: presets.quick_preset_id,
+    cost_preset: presets.cost_preset,
+    account_execution_preset: presets.account_execution_preset,
+    materialize: { required: false },
+  };
+}
+
+async function previewImportedSnapshot(
+  api: ChartStrategyRunApi,
+  source: Extract<ResearchRunSource, { kind: "IMPORTED_DATASET" }>,
+  signal?: AbortSignal,
+): Promise<BacktestSnapshot> {
+  if (typeof api.previewSnapshot !== "function") {
+    throw new ChartStrategyRunError(
+      "SNAPSHOT_PREVIEW_UNAVAILABLE",
+      "imported data requires a backend snapshot preview",
+      { next_step: "use the local library preview and run again" },
+    );
+  }
+  const preview = await api.previewSnapshot({
+    dataset_id: source.datasetId,
+    data_epoch: source.dataEpoch,
+    start_time_ms: source.startTimeMs,
+    end_time_ms: source.endTimeMs,
+    interval: source.interval,
+    fidelity_mode: "BAR_APPROX",
+    exchange: "local",
+    market_type: "spot",
+    contract_data_mode: "LEGACY_FIXED_V1",
+    account_model: "LINEAR_PERP_ONE_WAY_V1",
+    funding_mode: "OFF",
+  }, signal);
+  if (preview.data_epoch !== source.dataEpoch) {
+    throw new ChartStrategyRunError(
+      "DATA_SNAPSHOT_MISMATCH",
+      "data version changed after preview",
+      { next_step: "select the current data version and run again" },
+    );
+  }
+  if (!preview.snapshot_hash) {
+    throw new ChartStrategyRunError(
+      "FRONTEND_MUST_NOT_INVENT_SNAPSHOT",
+      "snapshot hash must come from the backend freeze step",
+    );
+  }
+  const tradeTape = (preview.fidelity_capabilities ?? []).some((item) => (
+    item === "AGG_TRADE_EXECUTION" || item === "AGG_TRADE_TAPE" || item === "TRADE_TAPE"
+  ));
+  if (tradeTape) {
+    // Imported CSV remains BAR_ONLY even if a preview lists unused tape capabilities.
+  }
+  return preview;
+}
+
+export async function runResearchBacktest(options: {
+  api: ChartStrategyRunApi;
+  request: ChartStrategyRunRequest;
+  source: ResearchRunSource;
+  signal?: AbortSignal;
+  pollIntervalMs?: number;
+  wait?: typeof waitForBacktestPoll;
+  onStage?(stage: ChartStrategyRunStage): void;
+  onRevision?(revision: StrategyRevisionRecord): void;
+  onResolution?(resolution: ChartContextResolution): void;
+  onRunCreated?(run: BacktestRunRecord, identity: ResultProjectionIdentity): void;
+  onRunUpdate?(run: BacktestRunRecord): void;
+}): Promise<ChartStrategyRunOutcome> {
+  const request = options.source.kind === "IMPORTED_DATASET"
+    ? {
+      ...options.request,
+      session: {
+        exchange: "local",
+        marketType: "spot",
+        symbol: options.source.symbol,
+        interval: options.source.interval,
+      },
+    }
+    : options.request;
+  const frozen = await freezeChartStrategyRunRequest(request);
+  options.onStage?.("COMPILING");
+  const revision = await options.api.createStrategyRevision({
+    name: frozen.displayName,
+    language: revisionLanguage(frozen.language),
+    base_revision_id: null,
+    source_text: frozen.source,
+    parameter_schema: [],
+  }, options.signal);
+  options.onRevision?.(revision);
+
+  let resolution: ChartContextResolution;
+  let frozenContext: FrozenResearchContextV1 | null = null;
+  if (options.source.kind === "IMPORTED_DATASET") {
+    if (frozen.attachment.fidelityPreference === "PRECISE") {
+      throw new ChartStrategyRunError(
+        "FIDELITY_UNSUPPORTED",
+        "imported data only supports bar estimate",
+        { next_step: "use bar estimate" },
+      );
+    }
+    options.onStage?.("RESOLVING");
+    const preview = await previewImportedSnapshot(options.api, options.source, options.signal);
+    resolution = resolutionFromImportedPreview({ source: options.source, frozen, preview });
+    frozenContext = await assembleFrozenContextFromResolution(
+      "IMPORTED_DATASET",
+      resolution,
+      options.source.quality,
+    );
+    options.onResolution?.(resolution);
+  } else {
+    const contextRequest = chartContextRequestForFrozen(frozen);
+    if (options.source.materializeResolution) {
+      options.onStage?.("MATERIALIZING");
+      await options.api.materializeChartContext({
+        resolution_token: options.source.materializeResolution.resolution_token,
+        user_confirmed: true,
+        idempotency_key: await chartStrategyMaterializeKey(frozen, options.source.materializeResolution),
+        ...(options.source.materializeResolution.dataset_id
+          ? { expected_dataset_id: options.source.materializeResolution.dataset_id }
+          : {}),
+        ...(options.source.materializeResolution.data_epoch
+          ? { expected_data_epoch: options.source.materializeResolution.data_epoch }
+          : {}),
+      }, options.signal);
+    }
+    options.onStage?.("RESOLVING");
+    resolution = await options.api.resolveChartContext(contextRequest, options.signal);
+    options.onResolution?.(resolution);
+    if (resolution.status === "NEEDS_DATA") {
+      return { kind: "NEEDS_DATA", frozen, revision, resolution, frozenContext: null };
+    }
+    if (resolution.status !== "READY") {
+      return { kind: "UNSUPPORTED", frozen, revision, resolution, frozenContext: null };
+    }
+    frozenContext = await assembleFrozenContextFromResolution(
+      "CURRENT_CHART",
+      resolution,
+      {
+        status: resolution.coverage.complete && resolution.coverage.missing_ranges.length === 0 ? "ok" : "gap",
+        rows: resolution.coverage.row_count ?? 0,
+        excludedRangeCount: resolution.coverage.missing_ranges.length,
+        volumeAvailable: true,
+      },
+    );
+  }
+
+  const body = buildChartStrategyRunBody({ frozen, revision, resolution });
+  const range = readyRange(resolution);
+  options.onStage?.("VALIDATING");
+  await options.api.smokeStrategyRevision(revision.revision_id, {
+    dataset_id: resolution.dataset_id,
+    snapshot_hash: resolution.snapshot_hash,
+    start_time_ms: range.startTimeMs,
+    end_time_ms: Math.min(range.endTimeMs, range.startTimeMs + 7 * 86_400_000),
+    parameters: frozen.attachment.parameters,
+  }, options.signal);
+  await options.api.validate(body, options.signal);
+
+  let refreshed = resolution;
+  if (options.source.kind === "IMPORTED_DATASET") {
+    const preview = await previewImportedSnapshot(options.api, options.source, options.signal);
+    refreshed = resolutionFromImportedPreview({ source: options.source, frozen, preview });
+    if (!sameReadyContext(resolution, refreshed)) {
+      throw new ChartStrategyRunError(
+        "DATA_SNAPSHOT_MISMATCH",
+        "imported data version changed between validation and Run creation",
+        { next_step: "select the current data version and run again" },
+      );
+    }
+    frozenContext = await assembleFrozenContextFromResolution(
+      "IMPORTED_DATASET",
+      refreshed,
+      options.source.quality,
+    );
+  } else {
+    const contextRequest = chartContextRequestForFrozen(frozen);
+    refreshed = await options.api.resolveChartContext(contextRequest, options.signal);
+    options.onResolution?.(refreshed);
+    if (!sameReadyContext(resolution, refreshed)) {
+      throw new ChartStrategyRunError(
+        "CHART_CONTEXT_CHANGED",
+        "chart context changed between validation and Run creation",
+        { next_step: "resolve the current chart and run again" },
+      );
+    }
+    frozenContext = await assembleFrozenContextFromResolution(
+      "CURRENT_CHART",
+      refreshed,
+      {
+        status: refreshed.coverage.complete && refreshed.coverage.missing_ranges.length === 0 ? "ok" : "gap",
+        rows: refreshed.coverage.row_count ?? 0,
+        excludedRangeCount: refreshed.coverage.missing_ranges.length,
+        volumeAvailable: true,
+      },
+    );
+  }
+
+  const refreshedBody = buildChartStrategyRunBody({ frozen, revision, resolution: refreshed });
+  const idempotencyKey = await chartStrategyRunIdempotencyKey({
+    revisionId: revision.revision_id,
+    resolution: refreshed,
+    body: {
+      ...refreshedBody,
+      frozen_context_hash: frozenContext.contextHash,
+    },
+  });
+  const created = await options.api.createRun(refreshedBody, idempotencyKey, options.signal);
+  const identity = resultIdentity({
+    frozen,
+    revision,
+    resolution: refreshed,
+    body: refreshedBody,
+    runId: created.run_id,
+    frozenContext,
+  });
+  options.onStage?.(created.state === "QUEUED" ? "QUEUED" : "RUNNING");
+  options.onRunCreated?.(created, identity);
+  if (created.state === "COMPLETED") {
+    return { kind: "TERMINAL", frozen, revision, resolution: refreshed, run: created, identity, frozenContext };
+  }
+  const terminal = await pollBacktestRunToTerminal({
+    api: options.api,
+    runId: created.run_id,
+    ...(options.signal ? { signal: options.signal } : {}),
+    ...(options.pollIntervalMs === undefined ? {} : { intervalMs: options.pollIntervalMs }),
+    ...(options.wait ? { wait: options.wait } : {}),
+    onUpdate(run) {
+      options.onStage?.(run.state === "QUEUED" ? "QUEUED" : "RUNNING");
+      options.onRunUpdate?.(run);
+    },
+  });
+  return { kind: "TERMINAL", frozen, revision, resolution: refreshed, run: terminal, identity, frozenContext };
 }
 
 export async function runChartStrategyBacktest(options: {
@@ -348,91 +719,24 @@ export async function runChartStrategyBacktest(options: {
   onRunCreated?(run: BacktestRunRecord, identity: ResultProjectionIdentity): void;
   onRunUpdate?(run: BacktestRunRecord): void;
 }): Promise<ChartStrategyRunOutcome> {
-  const frozen = await freezeChartStrategyRunRequest(options.request);
-  options.onStage?.("COMPILING");
-  const revision = await options.api.createStrategyRevision({
-    name: frozen.displayName,
-    language: revisionLanguage(frozen.language),
-    base_revision_id: null,
-    source_text: frozen.source,
-    parameter_schema: [],
-  }, options.signal);
-  options.onRevision?.(revision);
-  const contextRequest = chartContextRequestForFrozen(frozen);
-  if (options.materializeResolution) {
-    options.onStage?.("MATERIALIZING");
-    await options.api.materializeChartContext({
-      resolution_token: options.materializeResolution.resolution_token,
-      user_confirmed: true,
-      idempotency_key: await chartStrategyMaterializeKey(frozen, options.materializeResolution),
-      ...(options.materializeResolution.dataset_id
-        ? { expected_dataset_id: options.materializeResolution.dataset_id }
-        : {}),
-      ...(options.materializeResolution.data_epoch
-        ? { expected_data_epoch: options.materializeResolution.data_epoch }
-        : {}),
-    }, options.signal);
-  }
-  options.onStage?.("RESOLVING");
-  const resolution = await options.api.resolveChartContext(contextRequest, options.signal);
-  options.onResolution?.(resolution);
-  if (resolution.status === "NEEDS_DATA") {
-    return { kind: "NEEDS_DATA", frozen, revision, resolution };
-  }
-  if (resolution.status !== "READY") {
-    return { kind: "UNSUPPORTED", frozen, revision, resolution };
-  }
-  const body = buildChartStrategyRunBody({ frozen, revision, resolution });
-  const range = readyRange(resolution);
-  options.onStage?.("VALIDATING");
-  await options.api.smokeStrategyRevision(revision.revision_id, {
-    dataset_id: resolution.dataset_id,
-    snapshot_hash: resolution.snapshot_hash,
-    start_time_ms: range.startTimeMs,
-    end_time_ms: Math.min(range.endTimeMs, range.startTimeMs + 7 * 86_400_000),
-    parameters: frozen.attachment.parameters,
-  }, options.signal);
-  await options.api.validate(body, options.signal);
-  const refreshed = await options.api.resolveChartContext(contextRequest, options.signal);
-  options.onResolution?.(refreshed);
-  if (!sameReadyContext(resolution, refreshed)) {
-    throw new ChartStrategyRunError(
-      "CHART_CONTEXT_CHANGED",
-      "chart context changed between validation and Run creation",
-      { next_step: "resolve the current chart and run again" },
-    );
-  }
-  const refreshedBody = buildChartStrategyRunBody({ frozen, revision, resolution: refreshed });
-  const idempotencyKey = await chartStrategyRunIdempotencyKey({
-    revisionId: revision.revision_id,
-    resolution: refreshed,
-    body: refreshedBody,
-  });
-  const created = await options.api.createRun(refreshedBody, idempotencyKey, options.signal);
-  const identity = resultIdentity({
-    frozen,
-    revision,
-    resolution: refreshed,
-    body: refreshedBody,
-    runId: created.run_id,
-  });
-  options.onStage?.(created.state === "QUEUED" ? "QUEUED" : "RUNNING");
-  options.onRunCreated?.(created, identity);
-  if (created.state === "COMPLETED") {
-    return { kind: "TERMINAL", frozen, revision, resolution: refreshed, run: created, identity };
-  }
-  const terminal = await pollBacktestRunToTerminal({
+  return runResearchBacktest({
     api: options.api,
-    runId: created.run_id,
-    ...(options.signal ? { signal: options.signal } : {}),
-    ...(options.pollIntervalMs === undefined ? {} : { intervalMs: options.pollIntervalMs }),
-    ...(options.wait ? { wait: options.wait } : {}),
-    onUpdate(run) {
-      options.onStage?.(run.state === "QUEUED" ? "QUEUED" : "RUNNING");
-      options.onRunUpdate?.(run);
+    request: options.request,
+    source: {
+      kind: "CURRENT_CHART",
+      ...(options.materializeResolution
+        ? { materializeResolution: options.materializeResolution }
+        : {}),
     },
+    ...(options.signal ? { signal: options.signal } : {}),
+    ...(options.pollIntervalMs === undefined ? {} : { pollIntervalMs: options.pollIntervalMs }),
+    ...(options.wait ? { wait: options.wait } : {}),
+    ...(options.onStage ? { onStage: options.onStage } : {}),
+    ...(options.onRevision ? { onRevision: options.onRevision } : {}),
+    ...(options.onResolution ? { onResolution: options.onResolution } : {}),
+    ...(options.onRunCreated ? { onRunCreated: options.onRunCreated } : {}),
+    ...(options.onRunUpdate ? { onRunUpdate: options.onRunUpdate } : {}),
   });
-  return { kind: "TERMINAL", frozen, revision, resolution: refreshed, run: terminal, identity };
 }
 
 function sourceDiagnostics(message: string): Array<Record<string, unknown>> {

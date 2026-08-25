@@ -53,6 +53,7 @@ const identity = (runId: string): ResultProjectionIdentity => ({
   datasetId: "local-12345678901234567890123456789012",
   dataEpoch: "sha256:epoch",
   snapshotHash: "sha256:snapshot",
+  frozenContextHash: "sha256:frozen",
   startTimeMs: 1,
   endTimeMs: 2,
   executionProfileRevision: "EXECUTION_REALISM_V2",
@@ -78,6 +79,8 @@ test("every chart and strategy identity transition has a typed stale reason", ()
     } }), "RANGE_CHANGED"],
     [inputs({ attachment: { ...attachment, fidelityPreference: "PRECISE" } }), "FIDELITY_CHANGED"],
     [inputs({ attachment: { ...attachment, quickPresetId: "CRYPTO_PERP_LOW_FEE_V1" } }), "QUICK_PRESET_CHANGED"],
+    [inputs({ sourceKind: "IMPORTED_DATASET", datasetId: "local-other" }), "SOURCE_CHANGED"],
+    [inputs({ dataEpoch: "sha256:next-epoch" }), "DATA_REVISION_CHANGED"],
   ];
   for (const [next, expected] of cases) {
     assert.ok(chartStrategyTesterStaleReasons(base, next).includes(

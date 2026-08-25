@@ -148,6 +148,7 @@ test("a chart-context transition clears completed markers before publishing stal
       datasetId: "dataset-1",
       dataEpoch: "epoch-12345678",
       snapshotHash: "sha256:snapshot",
+      frozenContextHash: "sha256:frozen",
       startTimeMs: 1,
       endTimeMs: 2,
       executionProfileRevision: "execution-1",

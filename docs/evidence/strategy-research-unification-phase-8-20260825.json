@@ -1,0 +1,46 @@
+{
+  "schemaVersion": "candlescope.strategy-research-unification.phase8/1",
+  "generatedAt": "2026-08-25T19:40:00+08:00",
+  "status": "PHASE8_ENGINEERING_COMPLETE",
+  "baselineSha": "5761cb6d93e6e00809df28a9820290178ee955ef",
+  "candidateSha": "PENDING_PHASE8_COMMIT",
+  "dirtyPathsBefore": ["?? docs/LOCAL_DATA_STRATEGY_RESEARCH_UNIFICATION_EXECUTION_zh.md"],
+  "dirtyPathsAfterOriginalTree": ["?? docs/LOCAL_DATA_STRATEGY_RESEARCH_UNIFICATION_EXECUTION_zh.md"],
+  "commands": [
+    "npm.cmd run test:research-data",
+    "npm.cmd run test:backtest",
+    "npm.cmd run typecheck",
+    "npm.cmd run check:architecture",
+    "pytest backend/tests/test_backtest_research_source.py backend/tests/test_research_data_contracts.py backend/tests/test_backtest_chart_context.py"
+  ],
+  "exitCodes": {
+    "testResearchData": 0,
+    "testBacktest": 0,
+    "typecheck": 0,
+    "architecture": 0,
+    "pytestResearchSource": 0
+  },
+  "scopedTests": {
+    "testResearchData": { "result": "PASS", "passed": 71 },
+    "testBacktest": { "result": "PASS", "passed": 121 },
+    "pytestResearchSource": { "result": "PASS", "passed": 28 }
+  },
+  "fullTests": { "result": "NOT_REQUIRED_THIS_PHASE" },
+  "browserScenarios": [
+    {
+      "note": "no interactive browser MCP this phase; Frozen Run gated by unit/pytest",
+      "imported": "preview-only, no materialize/resolve",
+      "currentChart": "existing NEEDS_DATA + materialize path unchanged"
+    }
+  ],
+  "runtimeMode": "n/a",
+  "effectiveFlags": {
+    "VITE_RESEARCH_DATA_LIBRARY_ENABLED": "0"
+  },
+  "rollbackResult": "flag=0 restores LocalApp; CURRENT_CHART chart-context path remains",
+  "unresolvedFindings": [
+    "CURRENT_CHART live chart visualization remains a Phase 7 placeholder",
+    "Unified workspace uses manual Run, not the chart-first auto-run coordinator",
+    "Interactive browser capture was not available this phase"
+  ]
+}

@@ -13,6 +13,9 @@ function run(configHash = "sha256:config-1"): BacktestRunRecord {
     state: "COMPLETED",
     fidelity_mode: "BAR_APPROX",
     source_event_kind: "BAR",
+    dataset_id: "local-0123456789abcdef0123456789abcdef",
+    data_epoch: "sha256:epoch",
+    snapshot_hash: "sha256:snapshot",
     config_hash: configHash,
     config_json: JSON.stringify({
       start_time_ms: 1_700_000_000_000,
@@ -75,7 +78,10 @@ test("result cache binds Run, report, and chart hashes and reuses immutable entr
   const first = await cache.load(api, "bt_result_12345678");
   const second = await cache.load(api, "bt_result_12345678");
   assert.strictEqual(second, first);
-  assert.equal(first.cacheKey, "bt_result_12345678|sha256:report-1|sha256:chart-1");
+  assert.equal(
+    first.cacheKey,
+    "bt_result_12345678|local-0123456789abcdef0123456789abcdef|sha256:epoch|sha256:snapshot|sha256:report-1|sha256:chart-1",
+  );
   assert.deepEqual(calls, { run: 2, report: 1, chart: 1 });
   assert.deepEqual(cache.diagnostics().keys, [first.cacheKey]);
 });

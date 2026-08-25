@@ -2,33 +2,49 @@
 
 ## 结论
 
-Phase 12 工程资格完成，**不是生产启用**。生产旗标仍为 0。Verifier、smoke、双旗标 rollback 源码门禁、LOCAL_OFFLINE 60 分钟 API soak、安全矩阵 scoped 测试通过。旧 `codex/local-offline-mode` worktree 只读审计完成，未删除、未归档、未 merge。
+本分支已修复统一入口的关键正确性问题，并达到“工程候选、生产 HOLD”的诚实状态：
 
-未通过或未跑的门禁不得标 PASS：
+- `/strategy.html?source=current` 不再用默认值伪造当前图表；它在没有真实 `ChartSession` 时说明边界并引导回行情页。
+- 行情页 chart-first tester 绑定真实当前图表；导入数据则在同一策略产品内完成导入、看图、运行和报告。
+- 导入来源只持有 `dataset_id + data_epoch`，由后端返回 snapshot；React StrictMode 不再提前销毁 tester runtime。
+- Vite worktree 字体依赖、Pine 前端导入、marketplace 时间依赖测试和发布校验器均已修正。
 
-- 全量后端 pytest：约 58–65% 处出现大量失败/错误后挂起，不能签署 full backend PASS。
-- 全量前端 `npm test`：3473 passed，1 failed（`scripts/pine-language.test.mjs` monaco ESM 导入，既有失败）。
-- `npm run lint`：约 185 个既有 eslint 错误；本阶段仅修复 smoke 脚本未使用变量。
-- LIVE 浏览器 mixed soak：无交互式浏览器、无 LIVE 行情进程，ENV_STOP。
-- `smoke:backtest`：`127.0.0.1:8000` ECONNREFUSED，ENV_STOP。
+生产旗标仍为 0。未 push、未 merge、未 deploy，旧 `codex/local-offline-mode` worktree 未删除。
+
+## 浏览器验收
+
+### LOCAL_OFFLINE
+
+导入 30 根 OHLCV CSV，图表显示 30 根源 K 线；选择 SMA 模板并运行。所有 revision、snapshot、validate、run、report/chart 请求返回 200。Run `bt_f149c500716c425a87e7170ae7ca8f9a` 完成，5 笔已完成交易，净值变化 `-4.52266034 USDT`，精度为 `BAR_APPROX`。console：0 error、2 warning。
+
+### LIVE
+
+策略页的 current 来源显示“当前图表未绑定”及返回行情页动作；行情页加载真实 `BTCUSDT · 1h`、1501 根 K 线和 Binance 连接状态。打开“策略未附着”后，tester 显示“当前图表 · BTCUSDT · 1h”。console：0 error、4 warning。
+
+这两项是短时交互验收，不等于 60 分钟 mixed browser soak。
 
 ## 测试
 
-| 命令 | 退出码 | 结果 |
-| --- | --- | --- |
-| scoped pytest（文档列出 + unification release） | 0 | 89 passed |
-| `npm.cmd run test:research-data` | 0 | 88 passed |
-| `npm.cmd run test:backtest` | 0 | 121 passed |
-| `npm.cmd run typecheck` | 0 | 通过 |
-| `npm.cmd run check:architecture` | 0 | 0 allowlist |
-| `npm.cmd run smoke:strategy-research` | 0 | ok |
-| `npm.cmd run build` | 0 | 通过；BacktestApp chunk 0.72 kB |
-| 60 min LOCAL_OFFLINE soak | 0 | 711 cycles, 3600131 ms |
-| `npm.cmd test` | 1 | 3473 pass / 1 fail pine-language |
-| `npm.cmd run lint` | 1 | 既有 eslint 错误 |
-| full pytest | hung/fail | 58–65% 失败簇后挂起 |
-| `npm.cmd run smoke:backtest` | 1 | 无后端 8000 |
+| 门禁 | 结果 |
+| --- | --- |
+| scoped 后端策略路径 | PASS，91 passed |
+| `npm.cmd run test:research-data` | PASS，93 passed |
+| `npm.cmd run test:backtest` | PASS，122 passed |
+| 前端全量 `npm.cmd test` | PASS，3481 passed / 0 failed |
+| `npm.cmd run typecheck` | PASS |
+| 变更文件 eslint | PASS |
+| 前端全量 `npm.cmd run lint` | FAIL，140 个既有错误 |
+| `npm.cmd run check:architecture` | PASS，0 allowlist |
+| `npm.cmd run check:i18n` | PASS，3962 keys / 669 source files |
+| `npm.cmd run smoke:strategy-research` | PASS |
+| `npm.cmd run smoke:backtest` | PASS（启动 LOCAL_OFFLINE 后端后） |
+| `npm.cmd run build` | PASS，706 modules；StrategyResearchApp 约 28.23 kB |
+| 后端全量 pytest | FAIL，2334 passed 后命中既有 Phase 1 历史契约漂移 |
+| 60 分钟 LOCAL_OFFLINE API soak | PASS，711 cycles / 3600131 ms |
+| 60 分钟 mixed browser soak | ENV_STOP，本轮只做短时双环境浏览器验收 |
 
-## 回滚
+后端第二次排除 Phase 1 契约测试的全量运行在 `test_runtime_materializes_study_beyond_active_run_ceiling` 提前失败；该节点单独运行及与相邻两个用例一起运行均 PASS，说明存在仓库级测试顺序/状态污染，不能据此把候选写成 full backend PASS。
 
-关闭 `VITE_RESEARCH_DATA_LIBRARY_ENABLED` 与 `CANDLESCOPE_RESEARCH_DATA_LIBRARY_ENABLED`。不删除磁盘数据与旧键。未改变生产默认值。
+## 回滚与发布决定
+
+关闭 `VITE_RESEARCH_DATA_LIBRARY_ENABLED` 与 `CANDLESCOPE_RESEARCH_DATA_LIBRARY_ENABLED` 即恢复兼容路径，不删除磁盘数据与旧键。发布状态为 **PRODUCTION_HOLD**，待全量后端、全量 lint 和 60 分钟 mixed browser soak 给出可签署结果后再评估启用。

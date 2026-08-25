@@ -1,22 +1,14 @@
-# Phase 12 全量 pytest 对照 main（2026-08-25）
+# Phase 12 全量 pytest 基线判定（2026-08-25）
 
-## 方法
+## 本轮结果
 
-在 unification 工作树与 `main@144e748c` 上运行同一 plugin 簇：
+- 全量后端：2334 passed 后在 `tests/test_plugin_platform_multi_runtime_phase1.py::test_phase1_contract_rebuilds_exact_v2_and_v3_generations` 失败。
+- 当前分支相对 `main` 没有改动该历史 schema/fixture 路径；fixture 受 byte-stability 保护，不应为让全量测试变绿而重写。
+- marketplace 的“index has expired”时间漂移已通过注入 clock 修复，相关测试 31 passed。
+- 排除 Phase 1 契约测试后，另一次全量运行在 `test_runtime_materializes_study_beyond_active_run_ceiling` 提前失败；该节点单独运行 PASS，与相邻的两个 `test_backtest_runtime` 用例一起运行也为 2 passed。因此它按仓库级 collection/order contamination 记录，而不是统一策略路径回归。
 
-`tests/test_plugin_marketplace_v2.py tests/test_plugin_paper_core_v2.py tests/test_plugin_paper_v2.py tests/test_plugin_platform_backtest_boundary.py tests/test_plugin_platform_historical_contracts.py tests/test_plugin_platform_manager.py tests/test_plugin_platform_multi_runtime_phase0.py tests/test_plugin_platform_multi_runtime_phase1.py tests/test_plugin_security_management_v2.py`
+## 结论
 
-## 结果
+统一策略路径的 scoped 后端测试 91 passed，未发现该路径的新回归；但 full backend gate 仍必须写 **FAIL**，不能用“main 也失败”替代通过。
 
-| 树 | 结果 |
-| --- | --- |
-| unification `4b5b9442` | 10 failed, 48 passed, 1 error |
-| main `144e748c` | 13 failed, 44 passed, 2 errors |
-
-共同失败：`plugin_marketplace_v2`「marketplace index has expired」；Phase 1 contract drift。这些在 main 上同样存在，不是本统一分支引入的回归。
-
-unification 没有比 main 多出的 plugin 簇失败。
-
-全量 suite 在约 65% 处仍会长时间卡住。对照 node 列表，该位置是 `test_plugin_windows_sandbox_v2`（AppContainer/CPU quota）或后续 plugin sidecar。排除 sandbox 后仍会在 65% 附近停住。该挂起同样属于 plugin 平台测试，不是 `local_data` / `research_data` / `backtest` 统一代码路径。
-
-定向统一测试（文档 scoped + `test_strategy_research_unification_release.py`）89 passed。
+Phase 1 的历史契约漂移和测试顺序污染应独立治理，不能在本候选的 evidence-only 提交里修改运行时代码或不可变 fixture。

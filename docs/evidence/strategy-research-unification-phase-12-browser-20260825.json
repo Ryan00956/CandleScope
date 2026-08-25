@@ -1,0 +1,32 @@
+{
+  "schemaVersion": "candlescope.strategy-research-unification-browser-acceptance/1",
+  "status": "PASS",
+  "observedAt": "2026-08-25T22:21:16+08:00",
+  "localOffline": {
+    "csvRows": 30,
+    "renderedSourceBars": 30,
+    "template": "SMA_CROSS",
+    "runId": "bt_f149c500716c425a87e7170ae7ca8f9a",
+    "runStatus": "COMPLETED",
+    "completedTrades": 5,
+    "netPnl": "-4.52266034 USDT",
+    "precision": "BAR_APPROX",
+    "httpFailures": 0,
+    "consoleErrors": 0,
+    "consoleWarnings": 2,
+    "screenshot": "docs/evidence/strategy-research-unification-phase-12/strategy-imported-completed.png"
+  },
+  "live": {
+    "strategyWorkspaceFabricatedSession": false,
+    "unboundRouteToMarket": true,
+    "chartSession": "BTCUSDT · 1h",
+    "loadedBars": 1501,
+    "connection": "Binance connected",
+    "chartFirstTesterBound": true,
+    "consoleErrors": 0,
+    "consoleWarnings": 4,
+    "screenshot": "docs/evidence/strategy-research-unification-phase-12/live-current-chart-tester.png"
+  },
+  "durationQualified": false,
+  "note": "This is short interactive acceptance and does not satisfy the 60-minute mixed browser soak gate."
+}

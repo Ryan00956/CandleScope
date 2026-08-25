@@ -1,10 +1,14 @@
-# First-open /strategy.html capture (2026-08-25)
+# First-open /strategy.html acceptance (2026-08-25)
 
-Shipped tests render the unified app:
+- `/strategy.html` first paint includes three templates (`SMA_CROSS`, `RSI_REVERSAL`, `DONCHIAN_BREAKOUT`), an import action when the library flag is enabled, and a visible script slot.
+- `/strategy.html?source=current` never fabricates an exchange, symbol, interval, bar count, or snapshot. Because the full-screen workspace does not own the market chart session, it presents an unbound explanation and an action back to the live market page.
+- On `/`, the chart-first tester binds the actual `ChartSession`. The observed browser run used `BTCUSDT · 1h` with 1501 loaded bars; these values came from the active chart and are not strategy-workspace defaults.
+- Imported data can be viewed without a Run. Running freezes the immutable source through the backend and displays the completed report.
+- Ordinary first-open copy does not expose internal dataset IDs or snapshot hashes.
 
-- `/strategy.html` first paint includes three templates (`SMA_CROSS`, `RSI_REVERSAL`, `DONCHIAN_BREAKOUT`), import CTA when the library flag is on, and a source bar. The script slot is no longer `max-height: 0`.
-- `/strategy.html?source=current` fills `strategy-research-current-chart` with `BTCUSDT` / `1m` even when the library flag is off. Import CTA is absent.
+Automated coverage: `test:research-data` 93 passed, including the current-source non-fabrication and StrictMode lifecycle contracts.
 
-Scratch captures: `strategy-first-open.html`, `strategy-source-current.html`, `strategy-driven-change.txt` (`driven_change=true`).
+Browser evidence:
 
-`test:research-data` 89 passed after the change.
+- `strategy-research-unification-phase-12/strategy-imported-completed.png`
+- `strategy-research-unification-phase-12/live-current-chart-tester.png`

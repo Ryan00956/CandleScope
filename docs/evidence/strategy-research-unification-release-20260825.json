@@ -1,8 +1,8 @@
 {
   "schemaVersion": "candlescope.strategy-research-unification-release/1",
-  "generatedAt": "2026-08-25T18:27:49+08:00",
-  "status": "ENGINEERING_QUALIFIED_FLAGS_DEFAULT_OFF",
-  "candidateSha": "87af1d9649a3a008ecbcc47ca8ae0880f8732ea9",
+  "generatedAt": "2026-08-25T22:34:24+08:00",
+  "status": "PRODUCTION_HOLD",
+  "candidateSha": "6d267eb25cedc0c0ba8f4df5fab8d5cbc1e8db14",
   "phaseCommits": {
     "phase0": { "sha": "0522ba90ee23d4b897ec6714bbd3086b3e3a9c8b", "subject": "docs(strategy): freeze local-data research unification contract" },
     "phase1": { "sha": "4c1498813649029c3c3bb80258c587fac169a323", "subject": "feat(research): define unified strategy data source contracts" },
@@ -16,29 +16,31 @@
     "phase9": { "sha": "32edf2a44d3015fff5cc40870d782fc27b02ae05", "subject": "feat(strategy): use unified research workspace in offline profile" },
     "phase10": { "sha": "8b680c9dd27a9db59553c554bc9abf1d395efc35", "subject": "feat(strategy): unify quick and advanced research navigation" },
     "phase11": { "sha": "67ac5e46f4790d4a44068416c4466cf5e3ff681e", "subject": "refactor(strategy): retire duplicate local and backtest app orchestration" },
-    "phase12": { "sha": "87af1d9649a3a008ecbcc47ca8ae0880f8732ea9", "subject": "test(strategy): qualify unified local-data research release" }
+    "phase12": { "sha": "6d267eb25cedc0c0ba8f4df5fab8d5cbc1e8db14", "subject": "fix(strategy): complete unified research qualification" }
   },
   "effectiveFlags": {
     "CANDLESCOPE_RESEARCH_DATA_LIBRARY_ENABLED": "0",
     "VITE_RESEARCH_DATA_LIBRARY_ENABLED": "0"
   },
   "gates": {
-    "scopedPytest": { "result": "PASS", "passed": 89 },
-    "testResearchData": { "result": "PASS", "passed": 88 },
-    "testBacktest": { "result": "PASS", "passed": 121 },
+    "scopedPytest": { "result": "PASS", "passed": 91 },
+    "testResearchData": { "result": "PASS", "passed": 93 },
+    "testBacktest": { "result": "PASS", "passed": 122 },
     "typecheck": { "result": "PASS" },
-    "architecture": { "result": "PASS" },
+    "changedFileLint": { "result": "PASS" },
+    "architecture": { "result": "PASS", "allowlist": 0 },
+    "i18n": { "result": "PASS", "keys": 3962, "sourceFiles": 669 },
     "strategyResearchSmoke": { "result": "PASS" },
-    "build": { "result": "PASS" },
-    "localOfflineSoak60m": { "result": "ENV_STOP", "cycles": 711, "elapsedMs": 3600131, "note": "API cycles only; live chart browser false" },
+    "smokeBacktest": { "result": "PASS" },
+    "build": { "result": "PASS", "modules": 706 },
+    "localOfflineSoak60m": { "result": "PASS", "scope": "API_ONLY", "cycles": 711, "elapsedMs": 3600131 },
     "securityMatrix": { "result": "PASS" },
     "dualFlagRollback": { "result": "PASS" },
-    "fullBackendPytest": { "result": "FAIL", "note": "failure cluster near 58-65 percent then hang" },
-    "fullFrontendTest": { "result": "FAIL", "passed": 3473, "failed": 1, "note": "scripts/pine-language.test.mjs monaco ESM import" },
-    "lint": { "result": "FAIL", "note": "pre-existing eslint errors remain" },
-    "browserAcceptance": { "result": "ENV_STOP" },
-    "smokeBacktest": { "result": "ENV_STOP", "note": "ECONNREFUSED 127.0.0.1:8000" },
-    "liveBrowserSoak": { "result": "ENV_STOP" }
+    "fullBackendPytest": { "result": "FAIL", "passedBeforeFailure": 2334, "note": "existing Phase 1 historical contract drift; separate order-sensitive node passes in isolation" },
+    "fullFrontendTest": { "result": "PASS", "passed": 3481, "failed": 0 },
+    "lint": { "result": "FAIL", "errors": 140, "note": "repository-wide pre-existing errors; changed files pass" },
+    "browserAcceptance": { "result": "PASS", "localOffline": true, "live": true, "consoleErrors": 0 },
+    "mixedBrowserSoak60m": { "result": "ENV_STOP", "note": "short dual-environment browser acceptance is not a 60-minute mixed run" }
   },
   "dod": {
     "path": "docs/evidence/STRATEGY_RESEARCH_UNIFICATION_PHASE_12_DOD_20260825_zh.md",
@@ -72,12 +74,12 @@
     {
       "kind": "STRATEGY_RESEARCH_UNIFICATION_PHASE_12_RESULT_20260825_zh.md",
       "path": "docs/evidence/STRATEGY_RESEARCH_UNIFICATION_PHASE_12_RESULT_20260825_zh.md",
-      "sha256": "5cfe18a88d6defb02f4295fdeef8a983fd5a9508a0c5a73474c2be794caa35e4"
+      "sha256": "b8642adc9ca42fcc3622a5d5a96a406b5bf75114650a0090fcbf25c56d7c35ed"
     },
     {
       "kind": "STRATEGY_RESEARCH_UNIFICATION_PHASE_12_DOD_20260825_zh.md",
       "path": "docs/evidence/STRATEGY_RESEARCH_UNIFICATION_PHASE_12_DOD_20260825_zh.md",
-      "sha256": "476bdb64e6fa091dde95331515f7a848dcb76f2a12f85fa9abc032471460252f"
+      "sha256": "3b006943a9fe8022916c58855fddaced3aba97da13fde34b1e45360270bb2ff1"
     },
     {
       "kind": "STRATEGY_RESEARCH_UNIFICATION_PHASE_12_LEGACY_AUDIT_20260825_zh.md",
@@ -85,9 +87,44 @@
       "sha256": "5c8831f423f86294293a57aa6a8a492bd8f5eb612b41d620e66b1cfeb7533054"
     },
     {
+      "kind": "STRATEGY_RESEARCH_UNIFICATION_PHASE_12_FIRST_OPEN_20260825.md",
+      "path": "docs/evidence/STRATEGY_RESEARCH_UNIFICATION_PHASE_12_FIRST_OPEN_20260825.md",
+      "sha256": "9fce2ec846a76e3a320837547133f2b329db2eea40c8520c65e448395ba7628b"
+    },
+    {
+      "kind": "STRATEGY_RESEARCH_UNIFICATION_PHASE_12_ADDENDUM_20260825_zh.md",
+      "path": "docs/evidence/STRATEGY_RESEARCH_UNIFICATION_PHASE_12_ADDENDUM_20260825_zh.md",
+      "sha256": "833550af726f9cc4e6868dd0121e34df864512cc20dd0006af4a6c331ddb1828"
+    },
+    {
+      "kind": "STRATEGY_RESEARCH_UNIFICATION_PHASE_12_PYTEST_VS_MAIN_20260825.md",
+      "path": "docs/evidence/STRATEGY_RESEARCH_UNIFICATION_PHASE_12_PYTEST_VS_MAIN_20260825.md",
+      "sha256": "aec851413e7f518ef73e57879eb80257db3a43752087e2fbfe9085aa28ef7952"
+    },
+    {
       "kind": "strategy-research-unification-phase-12-soak-20260825.json",
       "path": "docs/evidence/strategy-research-unification-phase-12-soak-20260825.json",
       "sha256": "8bdf83f5939b60adfdbedcfed195496abf2cba5db1dbc9bc3441639366dbe33c"
+    },
+    {
+      "kind": "strategy-research-unification-phase-12-mixed-env-20260825.json",
+      "path": "docs/evidence/strategy-research-unification-phase-12-mixed-env-20260825.json",
+      "sha256": "be6d1d0acd26970fd9c099c66254a51509a6391d0c6605f279b844afa3482932"
+    },
+    {
+      "kind": "strategy-research-unification-phase-12-browser-20260825.json",
+      "path": "docs/evidence/strategy-research-unification-phase-12-browser-20260825.json",
+      "sha256": "7661d8cc0fa17eea463a30cf878f362f939693b5f615680c0366cc6472fb3e39"
+    },
+    {
+      "kind": "strategy-imported-completed.png",
+      "path": "docs/evidence/strategy-research-unification-phase-12/strategy-imported-completed.png",
+      "sha256": "b224d1f5b14c58a1b958e86f4d9cd1527148b6ba2d3fe0661a56f10db753abe3"
+    },
+    {
+      "kind": "live-current-chart-tester.png",
+      "path": "docs/evidence/strategy-research-unification-phase-12/live-current-chart-tester.png",
+      "sha256": "a8d532bab92ed803ce1d42da0c1ed6bb409332fdc113353b052022773357f13e"
     },
     {
       "kind": "strategy-research-unification-release.schema.json",
@@ -97,7 +134,7 @@
     {
       "kind": "verify_strategy_research_unification.py",
       "path": "backend/scripts/verify_strategy_research_unification.py",
-      "sha256": "1e4fbf684c343d15b3908356ccdf16cd9ea1eee91de66a01959b909f81400097"
+      "sha256": "039baefe77ecc4e00f8001ab4c1d8d8dc2c49b2d77dbb91ec34a9b283d3f2465"
     },
     {
       "kind": "soak_strategy_research_unification.py",
@@ -108,21 +145,6 @@
       "kind": "strategy-research-smoke.mjs",
       "path": "frontend/scripts/strategy-research-smoke.mjs",
       "sha256": "b7d02c3515ea01dda898ec846589c00be5b8c2ae2a51f82fdd345e7d17373e41"
-    },
-    {
-      "kind": "STRATEGY_RESEARCH_UNIFICATION_PHASE_12_ADDENDUM_20260825_zh.md",
-      "path": "docs/evidence/STRATEGY_RESEARCH_UNIFICATION_PHASE_12_ADDENDUM_20260825_zh.md",
-      "sha256": "088b9296ca3dca4066f92c47fcb25b7f14f176566646ba0113bc2cb72cc6e63c"
-    },
-    {
-      "kind": "STRATEGY_RESEARCH_UNIFICATION_PHASE_12_PYTEST_VS_MAIN_20260825.md",
-      "path": "docs/evidence/STRATEGY_RESEARCH_UNIFICATION_PHASE_12_PYTEST_VS_MAIN_20260825.md",
-      "sha256": "fd63a638393f2d94fd6c523900ca55e30bf59ad1723f622cdadb507f0a727da6"
-    },
-    {
-      "kind": "strategy-research-unification-phase-12-mixed-env-20260825.json",
-      "path": "docs/evidence/strategy-research-unification-phase-12-mixed-env-20260825.json",
-      "sha256": "61499442c239a5aa144aacfd47502fb6a214f00f5af787d1ed5bd1ba3b7d854d"
     }
   ]
 }

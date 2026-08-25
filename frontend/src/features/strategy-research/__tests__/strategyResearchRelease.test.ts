@@ -9,9 +9,10 @@ import { resolveStrategyResearchBootstrap } from "../strategyResearchLaunch.js";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../../");
 
-test("dual-flag rollback restores chart-first and independent local shell", () => {
-  assert.equal(resolveResearchDataLibraryEnabled({}), false);
+test("default-on release keeps explicit dual-flag rollback", () => {
+  assert.equal(resolveResearchDataLibraryEnabled({}), true);
   assert.equal(resolveResearchDataLibraryEnabled({ VITE_RESEARCH_DATA_LIBRARY_ENABLED: "0" }), false);
+  assert.equal(resolveResearchDataLibraryEnabled({ VITE_RESEARCH_DATA_LIBRARY_ENABLED: "invalid" }), false);
   assert.equal(resolveStrategyResearchBootstrap({ libraryEnabled: false, page: "local" }), "local-legacy");
   assert.equal(resolveStrategyResearchBootstrap({ libraryEnabled: false, page: "backtest" }), "backtest-legacy");
   assert.equal(resolveStrategyResearchBootstrap({ libraryEnabled: false, page: "strategy" }), "unified");

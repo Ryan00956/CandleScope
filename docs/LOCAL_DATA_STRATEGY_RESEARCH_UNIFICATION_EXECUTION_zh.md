@@ -1,6 +1,6 @@
 # CandleScope 本地数据与策略研究统一逐步执行方案
 
-- 状态：Phase 0–11 已提交；Phase 12 工程资格完成、生产 HOLD（旗标默认 0）。签署见 `docs/evidence/STRATEGY_RESEARCH_UNIFICATION_PHASE_12_DOD_20260825_zh.md`。未 push、未 merge、未删除旧 worktree。
+- 状态：Phase 0–12 已合并到本地 main；研究资料库按用户授权默认启用，显式 `0` 可回滚。Phase 12 历史签署仍记录启用前的生产 HOLD 与已知门禁；未 push、未 deploy、未删除旧 worktree。
 - 日期：2026-08-25
 - 仓库基线：main@144e748cc881220565cd5aa07fc494cba9a4133c
 - 参考旧分支：codex/local-offline-mode@d3c2fe37d1deacba8951b5725353ca967eca2d79
@@ -1696,8 +1696,8 @@ Git：
 
 | 旗标 | 开发期默认 | Phase 12 后候选 | 关闭结果 |
 | --- | --- | --- | --- |
-| CANDLESCOPE_RESEARCH_DATA_LIBRARY_ENABLED | 0 | 评审后决定 | LIVE 不挂载资料库 |
-| VITE_RESEARCH_DATA_LIBRARY_ENABLED | 0 | 评审后决定 | 策略页隐藏导入入口 |
+| CANDLESCOPE_RESEARCH_DATA_LIBRARY_ENABLED | 0 | 1（默认启用） | LIVE 不挂载资料库 |
+| VITE_RESEARCH_DATA_LIBRARY_ENABLED | 0 | 1（默认启用） | 策略页隐藏导入入口 |
 | 现有 chart strategy tester flag | 保持当前合同 | 不因本文改变 | 当前策略快测整体回滚 |
 
 约束：
@@ -1706,7 +1706,7 @@ Git：
 - 后端打开、前端关闭是安全但不可见状态。
 - 前端打开、后端关闭必须显示明确不可用，不重试风暴。
 - LOCAL_OFFLINE 不依赖 LIVE 资料库旗标。
-- 默认值变化只能在 Phase 12 release commit 中发生。
+- 默认值已在 Phase 12 完成并合并后的独立 activation commit 中变化；历史 release manifest 保持不可变。
 
 ---
 

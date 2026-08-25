@@ -61,7 +61,8 @@ a script and inspect trades, equity, drawdown, parameters, and the assumptions
 attached to each result. Advanced research stays inside the same Strategy
 product.
 
-Strategy research is currently an opt-in beta and is disabled by default.
+Strategy research is enabled by default. Set both research-data library flags to
+`0` for an explicit rollback to the compatibility paths.
 `/strategy.html` is the canonical URL; `/local.html` and `/backtest.html` remain
 compatibility entries. Pine/Pyne custom scripts are not claimed as available in
 the LOCAL_OFFLINE profile.

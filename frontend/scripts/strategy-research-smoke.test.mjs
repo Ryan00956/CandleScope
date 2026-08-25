@@ -12,5 +12,5 @@ test("strategy research smoke accepts the unified workspace contract", () => {
   assert.equal(result.ok, true);
   assert.equal(result.canonical, "/strategy.html");
   assert.deepEqual(result.compatibility, ["/local.html", "/backtest.html"]);
-  assert.equal(result.libraryFlagDefault, 0);
+  assert.equal(result.libraryFlagDefault, 1);
 });

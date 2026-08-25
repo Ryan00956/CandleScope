@@ -474,7 +474,7 @@ def _parse_strict_flag(name: str, default: str = "0") -> bool:
 
 RESEARCH_DATA_LIBRARY_ENABLED = _parse_strict_flag(
     "CANDLESCOPE_RESEARCH_DATA_LIBRARY_ENABLED",
-    "0",
+    "1",
 )
 LOCAL_DATA_MAX_UPLOAD_BYTES = int(
     os.getenv("CANDLESCOPE_LOCAL_DATA_MAX_UPLOAD_BYTES", str(512 * 1024**2))

@@ -6,6 +6,9 @@ export function resolveResearchDataLibraryEnabled(
   environment: ResearchDataLibraryFlagEnvironment = {},
 ): boolean {
   const raw = environment.VITE_RESEARCH_DATA_LIBRARY_ENABLED;
+  if (raw === undefined) {
+    return true;
+  }
   return raw === true || raw === 1 || raw === "1";
 }
 

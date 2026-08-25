@@ -149,8 +149,8 @@ test("this workspace never treats current chart as runnable", () => {
   assert.doesNotMatch(html.toLowerCase(), /dataset id|data epoch|snapshot hash/);
 });
 
-test("flag rollback hides the import entry", () => {
-  assert.equal(resolveResearchDataLibraryEnabled({}), false);
+test("default-on flag keeps explicit rollback for the import entry", () => {
+  assert.equal(resolveResearchDataLibraryEnabled({}), true);
   assert.equal(resolveResearchDataLibraryEnabled({ VITE_RESEARCH_DATA_LIBRARY_ENABLED: "0" }), false);
   assert.equal(resolveResearchDataLibraryEnabled({ VITE_RESEARCH_DATA_LIBRARY_ENABLED: "1" }), true);
   const hidden = renderToStaticMarkup(

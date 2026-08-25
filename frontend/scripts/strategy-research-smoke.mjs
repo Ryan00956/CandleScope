@@ -39,8 +39,11 @@ export function runStrategyResearchSmoke(root = repoRoot) {
     path.join(root, "frontend/src/features/research-data/researchDataFlags.ts"),
     "utf8",
   );
-  if (!flags.includes('raw === true || raw === 1 || raw === "1"')) {
-    throw new Error("library flag must default off");
+  if (
+    !flags.includes("if (raw === undefined)") ||
+    !flags.includes('raw === true || raw === 1 || raw === "1"')
+  ) {
+    throw new Error("library flag must default on and retain explicit rollback");
   }
   const bootstrap = readFileSync(
     path.join(root, "frontend/src/features/strategy-research/strategyResearchBootstrap.tsx"),
@@ -64,7 +67,7 @@ export function runStrategyResearchSmoke(root = repoRoot) {
     ok: true,
     canonical: "/strategy.html",
     compatibility: ["/local.html", "/backtest.html"],
-    libraryFlagDefault: 0,
+    libraryFlagDefault: 1,
   };
 }
 

@@ -1,6 +1,6 @@
 # ADR-BACKTEST-014：本地数据作为策略研究来源，LOCAL_OFFLINE 保持技术 profile
 
-- 状态：Accepted for implementation
+- 状态：Accepted、已合并；研究资料库默认启用
 - 日期：2026-08-25
 - 基线：`main@144e748cc881220565cd5aa07fc494cba9a4133c`
 - 工作树：`H:\program\CandleScope-strategy-research`
@@ -90,11 +90,11 @@ dataset_id + data_epoch + snapshot_hash + interval + start_time_ms + end_time_ms
 4. TrainingRun 与 BacktestRun/Study 继续隔离账户、checkpoint、cursor 和 UI store。
 5. LIVE 中 `/api/v1/local` 全部视为本机资料库 API；只接受可信本机 Origin/Host；不信任 CORS 或 `X-Forwarded-For`；不添加 `remote_admin` 裸开关。
 6. 唯一写入所有者：`LocalDataRuntime` 拥有 `LocalDatasetService` 与 import jobs；`BacktestRuntime` 注入只读/共享服务，不再隐式创建第二个可写 service。
-7. 回滚旗标默认关闭：
+7. 研究资料库在合并后的主线默认启用，并保留显式关闭回滚：
    - `CANDLESCOPE_RESEARCH_DATA_LIBRARY_ENABLED`
    - `VITE_RESEARCH_DATA_LIBRARY_ENABLED`
-   - 关闭后必须恢复当前已验证的 chart-first + 独立 `local.html` 行为
-   - 默认值变化只能在 Phase 12 评审后发生，不在中途改生产默认
+   - 未设置时启用；显式设为 `0` 时恢复已验证的 chart-first + 独立 `local.html` 行为
+   - 默认值变化发生在 Phase 12 完成并合并后，不追写历史候选证据
 
 ### 6. 目标信息架构
 

@@ -81,6 +81,9 @@ function safeId(value: string | null): string | null {
 export function researchReturnHref(context: BacktestResearchLaunchContext | null): string {
   const workspace = safeId(context?.source_workspace_id ?? null);
   const cell = safeId(context?.source_cell_id ?? null);
+  if (workspace === "strategy-research") {
+    return cell === "imported" ? "/strategy.html?source=imported" : "/strategy.html";
+  }
   if (!workspace || !cell) return "/";
   const query = new URLSearchParams({ workspace, cell, source: "backtest-research" });
   return `/?${query.toString()}`;

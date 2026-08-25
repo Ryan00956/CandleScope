@@ -56,6 +56,16 @@ export function parseStrategyResearchLaunch(location: {
   return { kind: "restore", page: "strategy" };
 }
 
+export function strategyResearchDeepLinkSearch(intent: StrategyResearchLaunchIntent): string | null {
+  if (intent.kind !== "deep-link") return null;
+  if (intent.entry.kind === "context") return `?context=${encodeURIComponent(intent.entry.contextId)}`;
+  if (intent.entry.kind === "run") {
+    const compare = intent.compareRunId ? `&compare=${encodeURIComponent(intent.compareRunId)}` : "";
+    return `?run=${encodeURIComponent(intent.entry.runId)}${compare}`;
+  }
+  return `?study=${encodeURIComponent(intent.entry.studyId)}`;
+}
+
 export function resolveStrategyResearchBootstrap(input: {
   libraryEnabled: boolean;
   page: StrategyResearchPage;

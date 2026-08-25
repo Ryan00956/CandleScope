@@ -1,0 +1,42 @@
+{
+  "schemaVersion": "candlescope.strategy-research-unification.phase10/1",
+  "generatedAt": "2026-08-25T16:58:57+08:00",
+  "status": "PHASE10_ENGINEERING_COMPLETE",
+  "baselineSha": "de15379d4927c666e7058aa6422ff909222c9435",
+  "candidateSha": "PENDING_PHASE10_COMMIT",
+  "dirtyPathsBefore": ["?? docs/LOCAL_DATA_STRATEGY_RESEARCH_UNIFICATION_EXECUTION_zh.md"],
+  "dirtyPathsAfterOriginalTree": ["?? docs/LOCAL_DATA_STRATEGY_RESEARCH_UNIFICATION_EXECUTION_zh.md"],
+  "commands": [
+    "npm.cmd run test:research-data",
+    "npm.cmd run test:backtest",
+    "npm.cmd run typecheck",
+    "npm.cmd run check:architecture"
+  ],
+  "exitCodes": {
+    "testResearchData": 0,
+    "testBacktest": 0,
+    "typecheck": 0,
+    "architecture": 0
+  },
+  "scopedTests": {
+    "testResearchData": { "result": "PASS", "passed": 81 },
+    "testBacktest": { "result": "PASS", "passed": 121 }
+  },
+  "fullTests": { "result": "NOT_REQUIRED_THIS_PHASE" },
+  "browserScenarios": [
+    {
+      "note": "no interactive browser MCP this phase; navigation, launch-context return, invalid deep-link, and runtime isolation gated by tests",
+      "topBar": "/strategy.html",
+      "compatibility": "/backtest.html and /backtest.html?run= retained"
+    }
+  ],
+  "runtimeMode": "LIVE",
+  "effectiveFlags": {
+    "VITE_RESEARCH_DATA_LIBRARY_ENABLED": "production default remains 0; tests exercise libraryEnabled true"
+  },
+  "rollbackResult": "restore TopBar /backtest.html link; unified StrategyResearchApp and data layer unchanged",
+  "unresolvedFindings": [
+    "Interactive browser click-through of the five advanced tasks was not available this phase",
+    "Repo-wide check:i18n still reports a pre-existing LocalApp empty-state string from Phase 7"
+  ]
+}

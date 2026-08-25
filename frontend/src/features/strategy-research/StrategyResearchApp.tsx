@@ -1,5 +1,7 @@
 import {
   Component,
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useMemo,
@@ -44,8 +46,13 @@ import { StrategyResearchShell } from "./StrategyResearchShell.js";
 import { useStrategyResearchRun } from "./useStrategyResearchRun.js";
 import { loadStrategyResearchHostHealth } from "./strategyResearchHostHealth.js";
 import type { StrategyResearchNetworkDiagnostics } from "./strategyResearchHostHealth.js";
+import { createStrategyResearchAdvancedHref } from "./strategyResearchAdvanced.js";
+import { MarketDataWorkspaceProvider } from "../market-data/MarketDataWorkspaceProvider.js";
+
+const BacktestResearchApp = lazy(() => import("../backtest/research/BacktestResearchApp.js"));
 import {
   parseStrategyResearchLaunch,
+  strategyResearchDeepLinkSearch,
   strategyResearchLaunchActions,
   strategyResearchVisualState,
   type StrategyResearchLaunchIntent,
@@ -255,6 +262,28 @@ export default function StrategyResearchApp({
     runtimeMode: runtime.runtimeMode,
     onRunId: (runId) => dispatch({ type: "result/setRun", runId }),
   });
+  const [advancedError, setAdvancedError] = useState<string | null>(null);
+  const openAdvanced = useCallback(() => {
+    if (researchRun.session === null || source === null) {
+      setAdvancedError(t("strategy.advancedNeedSource"));
+      return;
+    }
+    if (state.script.draftId === null) {
+      setAdvancedError(t("strategy.advancedNeedDraft"));
+      return;
+    }
+    setAdvancedError(null);
+    void createStrategyResearchAdvancedHref({
+      source,
+      session: researchRun.session,
+      draftId: state.script.draftId,
+      result: researchRun.result,
+    }).then((href) => {
+      window.location.assign(href);
+    }).catch((reason: unknown) => {
+      setAdvancedError(reason instanceof Error ? reason.message : String(reason));
+    });
+  }, [researchRun.result, researchRun.session, source, state.script.draftId]);
 
   const drawer = (
     <StrategyResearchDrawerBoundary
@@ -287,6 +316,7 @@ export default function StrategyResearchApp({
         onDraftId={(draftId) => dispatch({ type: "script/setDraft", draftId })}
         onRun={researchRun.onRun}
         onConfirmNeedsData={researchRun.onConfirmNeedsData}
+        onOpenAdvanced={openAdvanced}
       />
     </div>
   );
@@ -299,8 +329,10 @@ export default function StrategyResearchApp({
       error={researchRun.error}
       runStatus={researchRun.runStatus}
       network={networkDiagnostics}
+      onOpenAdvanced={openAdvanced}
     />
   );
+  const advancedWorkspace = intent.kind === "advanced" || intent.kind === "deep-link";
   const controls = (
     <>
       <button
@@ -334,6 +366,12 @@ export default function StrategyResearchApp({
           <button type="button" onClick={() => library.setError(null)}>{t("backtest.close")}</button>
         </div>
       )}
+      {advancedError !== null && (
+        <div className="local-global-error" role="alert" data-testid="strategy-research-advanced-error">
+          <span>{advancedError}</span>
+          <button type="button" onClick={() => setAdvancedError(null)}>{t("backtest.close")}</button>
+        </div>
+      )}
       <SettingsModal
         isOpen={settingsOpen}
         onClose={() => setSettingsOpen(false)}
@@ -363,6 +401,47 @@ export default function StrategyResearchApp({
     result,
     extraSurfaces,
   };
+
+  if (intent.kind === "invalid") {
+    return (
+      <StrategyResearchShell
+        {...shellShared}
+        intervalSelector={null}
+        toolbar={null}
+        exportOverlay={null}
+        chart={(
+          <p className="strategy-research-error" role="alert" data-testid="strategy-research-deep-link-error">
+            {intent.message}
+          </p>
+        )}
+        analysis={null}
+      />
+    );
+  }
+
+  if (advancedWorkspace) {
+    const advancedSearch = strategyResearchDeepLinkSearch(intent);
+    return (
+      <StrategyResearchShell
+        {...shellShared}
+        intervalSelector={null}
+        toolbar={null}
+        exportOverlay={null}
+        chart={(
+          <section className="strategy-research-advanced" data-testid="strategy-research-advanced">
+            <MarketDataWorkspaceProvider>
+              <Suspense fallback={<main className="research-status-page" data-state="loading" />}>
+                {advancedSearch === null
+                  ? <BacktestResearchApp />
+                  : <BacktestResearchApp search={advancedSearch} />}
+              </Suspense>
+            </MarketDataWorkspaceProvider>
+          </section>
+        )}
+        analysis={null}
+      />
+    );
+  }
 
   if (importedManifest !== null && analysisStore !== null && selectedInterval !== null) {
     const analysis = (

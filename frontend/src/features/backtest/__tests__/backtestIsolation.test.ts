@@ -38,8 +38,11 @@ test("live top bar exposes the enabled backtest entry without coupling to replay
   const topBar = readFileSync(join(featureRoot, "..", "..", "app", "TopBar.tsx"), "utf8");
   assert.match(topBar, /isBacktestEntryEnabled\(\)/);
   assert.match(topBar, /data-backtest-entry="enabled"/);
-  assert.match(topBar, /href="\/backtest\.html"/);
-  assert.match(topBar, /t\("shell\.backtest"\)/);
+  assert.match(topBar, /data-strategy-entry="enabled"/);
+  assert.match(topBar, /href="\/strategy\.html"/);
+  assert.match(topBar, /t\("shell\.strategy"\)/);
+  assert.doesNotMatch(topBar, /href="\/backtest\.html"/);
+  assert.doesNotMatch(topBar, /t\("shell\.backtest"\)/);
 });
 
 test("backtest feature does not import replay stores or controllers", () => {

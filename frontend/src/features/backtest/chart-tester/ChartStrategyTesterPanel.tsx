@@ -634,9 +634,15 @@ export default function ChartStrategyTesterPanel({
                 <h2>{t("chartTester.startTitle")}</h2>
                 <p>{t("chartTester.startLead", { symbol: session.symbol, interval: session.interval })}</p>
               </div>
-              <a href="/backtest.html" className="chart-strategy-advanced-link">
-                {t("chartTester.openAdvanced")}
-              </a>
+              {onOpenAdvanced ? (
+                <button type="button" className="chart-strategy-advanced-link" onClick={onOpenAdvanced}>
+                  {t("chartTester.openAdvanced")}
+                </button>
+              ) : (
+                <a href="/backtest.html" className="chart-strategy-advanced-link">
+                  {t("chartTester.openAdvanced")}
+                </a>
+              )}
             </div>
             <div className="chart-strategy-start-grid">
               <button type="button" onClick={() => setStartView("templates")}>

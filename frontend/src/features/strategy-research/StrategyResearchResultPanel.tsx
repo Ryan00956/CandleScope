@@ -16,6 +16,7 @@ export function StrategyResearchResultPanel({
   error,
   runStatus,
   network,
+  onOpenAdvanced,
 }: {
   result: ChartStrategyResultBundle | null;
   stale: boolean;
@@ -24,6 +25,7 @@ export function StrategyResearchResultPanel({
   error: string | null;
   runStatus: string;
   network: StrategyResearchNetworkDiagnostics | null;
+  onOpenAdvanced?(): void;
 }) {
   const locale = useLocale();
   if (error !== null) {
@@ -64,6 +66,7 @@ export function StrategyResearchResultPanel({
         result={result}
         stale={stale}
         onOpenTrades={() => undefined}
+        {...(onOpenAdvanced ? { onOpenAdvanced } : {})}
       />
       {network !== null ? (
         <details className="strategy-research-network-guard" data-testid="strategy-research-network-guard">

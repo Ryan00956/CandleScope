@@ -26,11 +26,16 @@
   flex-direction: column;
 }
 
-.strategy-research-imported-chart {
+.strategy-research-imported-chart,
+.strategy-research-advanced {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
+}
+
+.strategy-research-advanced {
+  padding: 0;
 }
 
 .strategy-research-imported-chart .tv-lightweight-charts,

@@ -23,8 +23,12 @@ function ResearchStatus({
   );
 }
 
-export default function BacktestResearchApp() {
-  const runtime = useBacktestResearchRuntime();
+export default function BacktestResearchApp({
+  search,
+}: {
+  search?: string;
+} = {}) {
+  const runtime = useBacktestResearchRuntime(search === undefined ? {} : { search });
   if (runtime.view.phase !== "READY") {
     return <ResearchStatus error={runtime.view.phase === "ERROR" ? runtime.view.error : null} onRetry={runtime.actions.refresh} />;
   }

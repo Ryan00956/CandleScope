@@ -114,11 +114,12 @@ function TopBar({
         <a
           className="replay-entry-link backtest-entry-link"
           data-backtest-entry="enabled"
-          href="/backtest.html"
+          data-strategy-entry="enabled"
+          href="/strategy.html"
           target="_blank"
           rel="noreferrer"
         >
-          {t("shell.backtest")}
+          {t("shell.strategy")}
         </a>
         )}
       </>}

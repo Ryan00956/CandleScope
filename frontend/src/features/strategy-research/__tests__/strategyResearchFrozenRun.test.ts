@@ -72,6 +72,7 @@ test("imported session is local/spot and never requires the user to type dataset
       onDraftId() {},
       onRun() {},
       onConfirmNeedsData() {},
+      onOpenAdvanced() {},
     }),
   );
   assert.match(html, /strategy-research-bar-only/);

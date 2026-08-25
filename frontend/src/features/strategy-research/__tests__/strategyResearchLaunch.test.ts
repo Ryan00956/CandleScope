@@ -110,6 +110,7 @@ test("unified shell renders without creating a second library store or loading M
   assert.match(html, /data-visual-state="first"/);
   assert.match(html, /strategy-research-chart-slot/);
   assert.doesNotMatch(html, /monaco/i);
+  assert.doesNotMatch(html, /strategy-research-advanced/);
   const appSource = readFileSync(path.resolve(here, "../StrategyResearchApp.tsx"), "utf8");
   const drawerSource = readFileSync(path.resolve(here, "../../research-data/ResearchDataDrawer.tsx"), "utf8");
   assert.doesNotMatch(appSource, /monaco-editor|PythonStudio|BacktestApp|LocalApp/);

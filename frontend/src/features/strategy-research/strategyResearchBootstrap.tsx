@@ -7,6 +7,7 @@ import { RESEARCH_DATA_LIBRARY_ENABLED } from "../research-data/researchDataFlag
 import { bindDocumentLocale, hydrateLocale } from "../../i18n/index.js";
 import { readPersistedLocale } from "../settings/chartAppearanceSettings.js";
 import "./strategyResearch.css";
+import "../backtest/research/backtestResearch.css";
 import {
   parseStrategyResearchLaunch,
   resolveStrategyResearchBootstrap,

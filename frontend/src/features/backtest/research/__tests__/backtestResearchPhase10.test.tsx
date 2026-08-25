@@ -85,6 +85,14 @@ test("authority restores context session and safely returns to a scoped chart", 
     "/?workspace=workspace-main&cell=cell-main&source=backtest-research",
   );
   assert.equal(researchReturnHref({ ...context, source_cell_id: null }), "/");
+  assert.equal(
+    researchReturnHref({ ...context, source_workspace_id: "strategy-research", source_cell_id: "imported" }),
+    "/strategy.html?source=imported",
+  );
+  assert.equal(
+    researchReturnHref({ ...context, source_workspace_id: "strategy-research", source_cell_id: "current" }),
+    "/strategy.html",
+  );
 });
 
 test("Run deep link derives session from immutable Run config and chart", () => {

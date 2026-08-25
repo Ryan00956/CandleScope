@@ -28,6 +28,7 @@ export function StrategyResearchScriptPanel({
   onDraftId,
   onRun,
   onConfirmNeedsData,
+  onOpenAdvanced,
 }: {
   cellScope: string;
   session: ChartSession | null;
@@ -38,6 +39,7 @@ export function StrategyResearchScriptPanel({
   onDraftId(draftId: string | null): void;
   onRun(request: ChartStrategyRunRequest): void;
   onConfirmNeedsData(): void;
+  onOpenAdvanced(): void;
 }) {
   const draftStore = useMemo(() => getChartStrategyDraftStore(), []);
   const [draft, setDraft] = useState<StrategyDraftRecord | null>(null);
@@ -112,6 +114,14 @@ export function StrategyResearchScriptPanel({
               {t(template.nameKey)}
             </button>
           ))}
+          <button
+            type="button"
+            className="chart-strategy-advanced-link"
+            data-testid="strategy-research-open-advanced"
+            onClick={onOpenAdvanced}
+          >
+            {t("strategy.advanced")}
+          </button>
         </div>
       ) : (
         <>
@@ -137,6 +147,14 @@ export function StrategyResearchScriptPanel({
             onClick={run}
           >
             {t("chartTester.run")}
+          </button>
+          <button
+            type="button"
+            className="chart-strategy-advanced-link"
+            data-testid="strategy-research-open-advanced"
+            onClick={onOpenAdvanced}
+          >
+            {t("strategy.advanced")}
           </button>
         </>
       )}

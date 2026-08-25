@@ -8,8 +8,21 @@ import { useResearchDataLibrary } from "./useResearchDataLibrary.js";
 import type { ChartSettings } from "../settings/chartAppearanceSettings.js";
 import type { LocalAnalysisEvent } from "../local-data/localAnalysisTypes.js";
 
-export function ResearchDataDrawer({
-  open,
+export function ResearchDataDrawer(props: {
+  open: boolean;
+  runtimeMode: ResearchRuntimeMode;
+  capabilities: ResearchCapabilitySummaryV1 | null;
+  libraryEnabled?: boolean;
+  settings: ChartSettings;
+  events: readonly LocalAnalysisEvent[];
+  onSelectKind(kind: ResearchSourceKind): void;
+  onClose(): void;
+}) {
+  if (!props.open) return null;
+  return <ResearchDataDrawerBody {...props} />;
+}
+
+function ResearchDataDrawerBody({
   runtimeMode,
   capabilities,
   libraryEnabled = RESEARCH_DATA_LIBRARY_ENABLED,
@@ -28,7 +41,6 @@ export function ResearchDataDrawer({
   onClose(): void;
 }) {
   const library = useResearchDataLibrary();
-  if (!open) return null;
   const kinds: ResearchSourceKind[] = ["CURRENT_CHART", "IMPORTED_DATASET", "COMPLETED_RUN"];
   return (
     <aside className="research-data-drawer" data-testid="research-data-drawer">

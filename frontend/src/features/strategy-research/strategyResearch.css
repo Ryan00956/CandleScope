@@ -1,0 +1,25 @@
+.strategy-research-shell {
+  min-height: 100%;
+}
+
+.strategy-research-shell[data-visual-state="first"] .strategy-research-script,
+.strategy-research-shell[data-visual-state="import"] .strategy-research-script,
+.strategy-research-shell[data-visual-state="chart"] .strategy-research-script {
+  max-height: 0;
+  overflow: hidden;
+}
+
+.strategy-research-chart-slot,
+.strategy-research-script-slot,
+.strategy-research-result-slot {
+  padding: 16px 20px;
+}
+
+.strategy-research-chart-slot {
+  min-height: 280px;
+}
+
+.strategy-research-error {
+  padding: 12px 16px;
+  color: #fecaca;
+}

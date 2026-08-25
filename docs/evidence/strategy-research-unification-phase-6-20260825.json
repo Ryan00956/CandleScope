@@ -1,0 +1,55 @@
+{
+  "schemaVersion": "candlescope.strategy-research-unification.phase6/1",
+  "generatedAt": "2026-08-25T18:10:00+08:00",
+  "status": "PHASE6_ENGINEERING_COMPLETE",
+  "baselineSha": "56867f4bec9803fdcccf6aa3d35e9134e3a2c252",
+  "candidateSha": "PENDING_PHASE6_COMMIT",
+  "dirtyPathsBefore": ["?? docs/LOCAL_DATA_STRATEGY_RESEARCH_UNIFICATION_EXECUTION_zh.md"],
+  "dirtyPathsAfterOriginalTree": ["?? docs/LOCAL_DATA_STRATEGY_RESEARCH_UNIFICATION_EXECUTION_zh.md"],
+  "commands": [
+    "npm.cmd run test:research-data",
+    "npm.cmd run test:backtest",
+    "npm.cmd run typecheck",
+    "npm.cmd run check:architecture"
+  ],
+  "exitCodes": {
+    "testResearchData": 0,
+    "testBacktest": 0,
+    "typecheck": 0,
+    "architecture": 0
+  },
+  "scopedTests": {
+    "testResearchData": { "result": "PASS", "passed": 32 }
+  },
+  "fullTests": { "result": "NOT_REQUIRED_THIS_PHASE" },
+  "browserScenarios": [
+    {
+      "route": "/strategy.html",
+      "path": "docs/evidence/strategy-research-unification-phase-6/strategy-1-1440x900.png",
+      "sha256": "b8f426dbdc80df0b72ce47fce7916e8825b967f42a800cd15977984e218edc8d",
+      "repeatSha256": "b8f426dbdc80df0b72ce47fce7916e8825b967f42a800cd15977984e218edc8d",
+      "visualState": "first"
+    },
+    {
+      "route": "/local.html",
+      "path": "docs/evidence/strategy-research-unification-phase-6/local-1-1440x900.png",
+      "sha256": "b433421895b8c8e9716c11018351e4c17babc6bfaf56165ff682298e6d96b30a",
+      "note": "flag=0 legacy LocalApp; matches Phase 0 local-first-open"
+    },
+    {
+      "route": "/backtest.html",
+      "path": "docs/evidence/strategy-research-unification-phase-6/backtest-1-1440x900.png",
+      "sha256": "34520884de1b3ebf03e3ded4781bf092099ae1df7d2560ef82c8f41e86900d7d",
+      "note": "flag=0 legacy advanced research; matches Phase 0 backtest-first-open"
+    }
+  ],
+  "runtimeMode": "n/a",
+  "effectiveFlags": {
+    "VITE_RESEARCH_DATA_LIBRARY_ENABLED": "0"
+  },
+  "rollbackResult": "flag=0 local.html and backtest.html keep legacy apps; strategy.html remains canonical",
+  "unresolvedFindings": [
+    "Chart/script/result slots are placeholders until Phase 7-8",
+    "Product visual review of five states is engineering-gated by tests, not a separate human sign-off"
+  ]
+}

@@ -44,6 +44,7 @@ export default defineConfig({
         replay: resolve(import.meta.dirname, 'replay.html'),
         local: resolve(import.meta.dirname, 'local.html'),
         backtest: resolve(import.meta.dirname, 'backtest.html'),
+        strategy: resolve(import.meta.dirname, 'strategy.html'),
         ...(replaySoakProjectionEnabled
           ? {
               replaySoakProjection: resolve(

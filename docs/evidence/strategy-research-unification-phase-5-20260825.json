@@ -1,0 +1,18 @@
+{
+  "schemaVersion": "candlescope.strategy-research-unification.phase5/1",
+  "generatedAt": "2026-08-25T17:30:00+08:00",
+  "status": "PHASE5_ENGINEERING_COMPLETE",
+  "baselineSha": "4d54a603aea2852915da4aaf40b936b66b12dfbf",
+  "candidateSha": "PENDING_PHASE5_COMMIT",
+  "dirtyPathsBefore": ["?? docs/LOCAL_DATA_STRATEGY_RESEARCH_UNIFICATION_EXECUTION_zh.md"],
+  "dirtyPathsAfterOriginalTree": ["?? docs/LOCAL_DATA_STRATEGY_RESEARCH_UNIFICATION_EXECUTION_zh.md"],
+  "commands": ["npm.cmd run test:research-data", "npm.cmd run typecheck"],
+  "exitCodes": { "testResearchData": 0, "typecheck": 0 },
+  "scopedTests": { "testResearchData": { "result": "PASS", "passed": 23 } },
+  "fullTests": { "result": "NOT_REQUIRED_THIS_PHASE" },
+  "browserScenarios": ["no canonical /strategy.html yet; drawer is module-tested"],
+  "runtimeMode": "n/a",
+  "effectiveFlags": { "VITE_RESEARCH_DATA_LIBRARY_ENABLED": "0" },
+  "rollbackResult": "flag=0 hides import entry",
+  "unresolvedFindings": ["canonical /strategy.html belongs to Phase 6"]
+}

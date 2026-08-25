@@ -24,9 +24,11 @@ import {
   zipFilesToBase64,
 } from "../pythonStudio.js";
 
-const app = readFileSync(new URL("../BacktestApp.tsx", import.meta.url), "utf8");
+const app = readFileSync(new URL("../research/ResearchStrategyPanel.tsx", import.meta.url), "utf8");
 const api = readFileSync(new URL("../backtestApi.ts", import.meta.url), "utf8");
 const studio = readFileSync(new URL("../PythonStudioPanel.tsx", import.meta.url), "utf8");
+const studioModel = readFileSync(new URL("../pythonStudio.ts", import.meta.url), "utf8");
+const study = readFileSync(new URL("../research/ResearchStudyPanel.tsx", import.meta.url), "utf8");
 
 describe("python studio mapping and state", () => {
   it("templates generate the three required files without user JSON", () => {
@@ -199,13 +201,13 @@ describe("python studio shipped surface", () => {
   it("wires template, import, smoke, persist and Host-owned result copy", () => {
     for (const token of [
       "<PythonStudioPanel",
-      "python-host-owns-report",
-      "backtest.createPythonStudy",
-      "composePythonExport",
       "restorePythonStudioState",
     ]) {
       assert.match(app, new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     }
+    assert.match(studio, /python-host-owns-report/);
+    assert.match(studioModel, /composePythonExport/);
+    assert.match(study, /createStudy/);
     for (const token of [
       "python-strategy-studio",
       "python-template-create",

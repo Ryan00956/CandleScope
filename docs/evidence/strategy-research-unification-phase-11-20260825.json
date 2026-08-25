@@ -1,0 +1,47 @@
+{
+  "schemaVersion": "candlescope.strategy-research-unification.phase11/1",
+  "generatedAt": "2026-08-25T17:12:33+08:00",
+  "status": "PHASE11_ENGINEERING_COMPLETE",
+  "baselineSha": "a88a8ee7584e3d40fdce93c15f468c14a1b83039",
+  "candidateSha": "PENDING_PHASE11_COMMIT",
+  "dirtyPathsBefore": ["?? docs/LOCAL_DATA_STRATEGY_RESEARCH_UNIFICATION_EXECUTION_zh.md"],
+  "dirtyPathsAfterOriginalTree": ["?? docs/LOCAL_DATA_STRATEGY_RESEARCH_UNIFICATION_EXECUTION_zh.md"],
+  "commands": [
+    "npm.cmd run test:research-data",
+    "npm.cmd run test:backtest",
+    "npm.cmd run typecheck",
+    "npm.cmd run check:architecture"
+  ],
+  "exitCodes": {
+    "testResearchData": 0,
+    "testBacktest": 0,
+    "typecheck": 0,
+    "architecture": 0
+  },
+  "scopedTests": {
+    "testResearchData": { "result": "PASS", "passed": 86 },
+    "testBacktest": { "result": "PASS", "passed": 121 }
+  },
+  "fullTests": { "result": "NOT_REQUIRED_THIS_PHASE" },
+  "browserScenarios": [
+    {
+      "note": "Phase 6/7 screenshots remain the last interactive browser acceptance; this phase gated compatibility URLs, flag-off shells, and orchestration uniqueness with tests",
+      "canonical": "/strategy.html",
+      "compatibility": "/local.html and /backtest.html retained"
+    }
+  ],
+  "runtimeMode": "LIVE",
+  "effectiveFlags": {
+    "VITE_RESEARCH_DATA_LIBRARY_ENABLED": "production default remains 0; flag-off restores LocalApp compatibility shell"
+  },
+  "rollbackResult": "restore the BacktestApp assembly commit; legacy storage keys and disk data were not deleted",
+  "deferredCapabilities": [
+    "rsi-trace-pane",
+    "decision-fill-hash-row",
+    "bounded-fill-table"
+  ],
+  "unresolvedFindings": [
+    "Interactive browser click-through of compatibility notices was not available this phase",
+    "M9 RSI trace pane, decision/fill hash row, and old bounded fill table are deferred in strategyResearchLegacyMap.ts"
+  ]
+}

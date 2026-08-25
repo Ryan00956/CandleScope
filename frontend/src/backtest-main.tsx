@@ -18,4 +18,4 @@ mountStrategyResearchPage({
   page: "backtest",
   researchEnabled: isBacktestResearchEnabled(),
   legacyEnabled: isBacktestLegacyWorkbenchEnabled(),
-});
+}); // compatibility URL; canonical is /strategy.html

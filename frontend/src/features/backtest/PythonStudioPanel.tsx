@@ -252,7 +252,7 @@ export default function PythonStudioPanel({
   return (
     <div className="backtest-strategy-help python-studio" data-testid="python-strategy-studio">
       <strong>{t("backtest.pythonStudio")}</strong>
-      <p>{hostOwnsOrdersCopy()}</p>
+      <p data-testid="python-host-owns-report">{hostOwnsOrdersCopy()}</p>
       <div className="backtest-form-row">
         <label>
           {t("backtest.template")}

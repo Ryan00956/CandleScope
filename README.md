@@ -54,12 +54,17 @@ connect through the plugin system.
 
 <!-- Product image: docs/assets/readme/pyne-indicator.png -->
 
-### Local backtesting
+### Strategy research
 
-Test frozen strategy revisions against local data, then inspect trades, equity,
-drawdown, parameters, and the assumptions attached to each result.
+Import your own data into the local library, or use the current chart, then run
+a script and inspect trades, equity, drawdown, parameters, and the assumptions
+attached to each result. Advanced research stays inside the same Strategy
+product.
 
-Local backtesting is currently an opt-in beta and is disabled by default.
+Strategy research is currently an opt-in beta and is disabled by default.
+`/strategy.html` is the canonical URL; `/local.html` and `/backtest.html` remain
+compatibility entries. Pine/Pyne custom scripts are not claimed as available in
+the LOCAL_OFFLINE profile.
 
 <!-- Product image: docs/assets/readme/backtest-research.png -->
 

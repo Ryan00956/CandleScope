@@ -1,8 +1,8 @@
-# CandleScope 本地分析模式
+# CandleScope 策略中的本地资料库
 
-本地分析模式用于把用户已有的 OHLC/OHLCV CSV 转换成可缩放、可标记、可绘图的 K 线工作台。这里的“本地”首先描述数据来源和分析项目归属，并不假设用户的电脑必须断网。产品边界是本地图表不能偷偷补线上 K 线、把直播价格混入 CSV，或因缺口触发网络 fallback。
+策略中的本地资料库用于把用户已有的 OHLC/OHLCV CSV 转换成可缩放、可标记、可绘图的 K 线数据来源。这里的“本地”首先描述数据来源和分析项目归属，并不假设用户的电脑必须断网。产品边界是本地图表不能偷偷补线上 K 线、把直播价格混入 CSV，或因缺口触发网络 fallback。
 
-当前实现仍使用独立的 `LOCAL_OFFLINE` 技术 profile 来保证这一数据边界：进程只加载本地数据 API，不创建交易所适配器、DataEngine、Backfill、Replay、行情 WebSocket、价格轮询、插件 host 或在线目录刷新。该隔离是实现手段，不是本地分析工作流本身的产品目的。
+`LOCAL_OFFLINE` 仍是启动 profile，不是页面开关：进程只加载本地数据 API，不创建交易所适配器、DataEngine、Backfill、Replay、行情 WebSocket、价格轮询、插件 host 或在线目录刷新。该隔离是实现手段，不是一级导航模式。规范产品入口是 `/strategy.html`；`/local.html` 保留为兼容地址。
 
 ## 启动
 
@@ -43,7 +43,7 @@ Linux / macOS：
 ./start-local-offline.sh
 ```
 
-默认页面为 `http://127.0.0.1:15173/local.html`，本地资料库存放在 `backend/data/local-data`。也可以指定独立目录：
+默认页面为 `http://127.0.0.1:15173/strategy.html?source=imported`，本地资料库存放在 `backend/data/local-data`。`/local.html` 仍可打开同一资料库。也可以指定独立目录：
 
 ```powershell
 .\start-local-offline.ps1 -DataDir "D:\CandleScopeData\local-data"
@@ -95,7 +95,7 @@ time,open,high,low,close,volume
 - 无时区 ISO 时间使用的 IANA 时区，例如 `UTC`、`Asia/Shanghai`。
 - 成交量是可选还是必须存在；默认允许可审计的 OHLC-only 数据集。
 
-导入器会拒绝重复或乱序时间、非有限数值、负成交量、同一文件内周期相位变化的时间戳，以及不满足 OHLC 关系的行。固定周期以第一根 K 线确定稳定相位，从而兼容 TradingView 中按交易时段对齐的 2 小时等 K 线；周线和月线仍按各自的日历边界严格校验。源数据中的缺口会写入 `excluded_ranges`，视为数据集的终止事实；本地分析不会尝试联网修复或静默填充。
+导入器会拒绝重复或乱序时间、非有限数值、负成交量、同一文件内周期相位变化的时间戳，以及不满足 OHLC 关系的行。固定周期以第一根 K 线确定稳定相位，从而兼容 TradingView 中按交易时段对齐的 2 小时等 K 线；周线和月线仍按各自的日历边界严格校验。源数据中的缺口会写入 `excluded_ranges`，视为数据集的终止事实；本地资料库不会尝试联网修复或静默填充。
 
 ## 多周期与自定义周期
 
@@ -139,7 +139,7 @@ CSV 默认通过后台任务导入。上传阶段显示字节进度，后端解�
 
 ## 通用事件标记
 
-本地分析页面支持与数据集修订绑定的手工事件和事件 CSV。手工使用时，用户先把十字光标移动到目标 K 线，再选择类型、颜色、标题和备注。内置的“备注”“信号”“开仓”“平仓”“自定义”只是显示模板；持久化模型是通用事件，不要求用户提供订单格式。
+策略中的本地资料库支持与数据集修订绑定的手工事件和事件 CSV。手工使用时，用户先把十字光标移动到目标 K 线，再选择类型、颜色、标题和备注。内置的“备注”“信号”“开仓”“平仓”“自定义”只是显示模板；持久化模型是通用事件，不要求用户提供订单格式。
 
 事件 CSV 只要求一列时间，价格、类型、标题、备注和颜色均可选，未映射列会原样保存在事件的扩展字段中。导入页会先展示数据预览和自动建议的列映射，再由用户明确执行校验和导入。Unix 秒、Unix 毫秒和带 `Z`/偏移的 ISO 时间受支持；不带时区的日期文本会被拒绝，避免隐式使用电脑时区。
 
@@ -153,23 +153,23 @@ CSV 默认通过后台任务导入。上传阶段显示字节进度，后端解�
 
 ## 共享指标体验
 
-本地分析页复用正式行情页的 `IndicatorPanel`、显式-bars 指标 Runtime、计算调度、输出归一化和窗格投影。指标目录不再在前端维护第二份清单，而是由 `/api/v1/local/indicators/presets` 从正式内置注册表投影；因此名称、默认参数、参数 schema、窗格目标和新增内置指标都使用同一来源。当前注册表包含 MA、EMA、RSI、MACD、BOLL、ATR 和 VOL；VOL 只有在数据集确实包含 volume 列时才能添加，OHLC-only 数据集仍会显示该项目及不可用原因。
+本地资料库图表复用正式行情页的 `IndicatorPanel`、显式-bars 指标 Runtime、计算调度、输出归一化和窗格投影。指标目录不再在前端维护第二份清单，而是由 `/api/v1/local/indicators/presets` 从正式内置注册表投影；因此名称、默认参数、参数 schema、窗格目标和新增内置指标都使用同一来源。当前注册表包含 MA、EMA、RSI、MACD、BOLL、ATR 和 VOL；VOL 只有在数据集确实包含 volume 列时才能添加，OHLC-only 数据集仍会显示该项目及不可用原因。
 
 选择与参数按 `dataset_id + data_epoch` 保存在浏览器中，刷新页面后会恢复；同类指标仍可同时存在，例如 MA(20) 与 MA(60)。Pine/Pyne 自定义脚本 Runtime 没有在离线 profile 中启动，面板保留禁用的“自定义”入口并说明原因，不会静默请求普通在线指标 API。
 
 共享 Runtime 注入的是数据集绑定的本地计算 transport。计算请求只提交指标身份、参数和已选周期；后端根据 `dataset_id + data_epoch` 打开对应不可变 SQLite 修订，读取源 K 线或先执行同合同的完整 bucket 聚合，再做一次性内置计算。它不接收浏览器提供的 OHLCV，不创建 DataManager、交易所连接、回填、指标 WebSocket 或插件 host。源数据缺口不会修复或插值，缺失成交量也不会被当成真实的零成交量。
 
-当前一次静态计算默认最多支持 250,000 根 K 线，可通过 `CANDLESCOPE_LOCAL_INDICATOR_MAX_BARS` 下调或上调；超过时明确拒绝，不会截断后冒充完整结果。同一修订、同一指标请求的完整结果会写入本地分析缓存，重复计算直接命中缓存。Pine/Pyne 和自定义脚本尚未进入本地 profile；后续接入时必须继续使用显式的本地执行合同，不能回退到在线指标、插件或行情链路。
+当前一次静态计算默认最多支持 250,000 根 K 线，可通过 `CANDLESCOPE_LOCAL_INDICATOR_MAX_BARS` 下调或上调；超过时明确拒绝，不会截断后冒充完整结果。同一修订、同一指标请求的完整结果会写入本地资料库缓存，重复计算直接命中缓存。Pine/Pyne 和自定义脚本尚未进入本地 profile；后续接入时必须继续使用显式的本地执行合同，不能回退到在线指标、插件或行情链路。
 
 ## 本地数据边界
 
 - 本地 profile 只注册 `/api/v1/local/*`、健康检查和 API 文档；直播、回放和插件 API 不加载，并由 profile middleware 拒绝。
 - Python 进程安装 loopback-only 网络 guard，在 DNS、TCP connect 和 UDP send 边界阻断非 loopback 目标。
-- `local.html` 使用 `LocalKlineApi` 和静态 `SeriesWindowStore`，没有 WebSocket URL，也没有定时轮询。
+- 策略页导入数据与兼容的 `/local.html` 都使用 `LocalKlineApi` 和静态 `SeriesWindowStore`，没有 WebSocket URL，也没有定时轮询。
 - 本地工作区复用正式 `DrawingToolbar` 与 Drawing Engine；绘图仍按 `dataset_id + data_epoch` 隔离保存。
 - 图表外观设置、图表类型及其高级参数、价格轴偏好、视口保存和截图导出复用正式图表 Runtime；数据集身份仍独立保存视口。
 - 指标只调用数据集绑定的 `/api/v1/local/datasets/{dataset_id}/indicators/compute/batch`，结果带回同一 `data_epoch`；普通 `/api/v1/indicators/*` 路由仍不加载。
-- 当前 profile 的网络 guard 是防止本地数据链路误入线上 fallback 的应用内防线，并不表示使用本地分析功能时要求电脑处于断网状态。
+- 当前 profile 的网络 guard 是防止本地数据链路误入线上 fallback 的应用内防线，并不表示使用本地资料库时要求电脑处于断网状态。
 
 ## 第一阶段范围
 

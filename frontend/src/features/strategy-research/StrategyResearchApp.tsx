@@ -47,6 +47,7 @@ import { useStrategyResearchRun } from "./useStrategyResearchRun.js";
 import { loadStrategyResearchHostHealth } from "./strategyResearchHostHealth.js";
 import type { StrategyResearchNetworkDiagnostics } from "./strategyResearchHostHealth.js";
 import { createStrategyResearchAdvancedHref } from "./strategyResearchAdvanced.js";
+import { StrategyResearchCompatNotice } from "./StrategyResearchCompatNotice.js";
 import { MarketDataWorkspaceProvider } from "../market-data/MarketDataWorkspaceProvider.js";
 
 const BacktestResearchApp = lazy(() => import("../backtest/research/BacktestResearchApp.js"));
@@ -360,6 +361,9 @@ export default function StrategyResearchApp({
   );
   const extraSurfaces = (
     <>
+      {(intent.page === "local" || intent.page === "backtest") ? (
+        <StrategyResearchCompatNotice page={intent.page} />
+      ) : null}
       {library.error !== null && (
         <div className="local-global-error" role="alert">
           <span>{library.error}</span>

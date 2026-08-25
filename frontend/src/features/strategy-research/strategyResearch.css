@@ -49,6 +49,29 @@
   color: #fecaca;
 }
 
+.strategy-research-compat-notice {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  align-items: center;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border-color);
+  background: color-mix(in srgb, var(--panel-bg, #111) 88%, #334155);
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.strategy-research-compat-notice p {
+  margin: 0;
+  flex: 1 1 240px;
+}
+
+.strategy-research-compat-notice a,
+.strategy-research-compat-notice button {
+  font: inherit;
+  color: inherit;
+}
+
 .local-interval-strip {
   display: flex;
   flex-wrap: wrap;

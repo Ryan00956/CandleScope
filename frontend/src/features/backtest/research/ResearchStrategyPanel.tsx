@@ -2,6 +2,7 @@ import { lazy, Suspense, useMemo, useState } from "react";
 import { t } from "../../../i18n/index.js";
 import { defaultBacktestApi } from "../backtestApi.js";
 import { isPythonStrategyEntryEnabled } from "../backtestFlags.js";
+import { restorePythonStudioState } from "../pythonStudio.js";
 import type { BacktestResearchRuntime } from "./backtestResearchTypes.js";
 import ResearchPanelFrame from "./ResearchPanelFrame.js";
 
@@ -38,6 +39,7 @@ export default function ResearchStrategyPanel({ runtime }: { runtime: BacktestRe
   const [revisionSource, setRevisionSource] = useState("");
   const parameters = useMemo(() => schemaParameters(runtime), [runtime]);
   const pythonEnabled = isPythonStrategyEntryEnabled();
+  const restoredStudio = useMemo(() => restorePythonStudioState(pythonEnabled), [pythonEnabled]);
   return (
     <ResearchPanelFrame
       eyebrow={t("research.panel.strategy")}
@@ -95,6 +97,15 @@ export default function ResearchStrategyPanel({ runtime }: { runtime: BacktestRe
                     endTimeMs={endTimeMs}
                     schemaParameters={parameters}
                     selectedRevisionId={selectedRevisionId}
+                    {...(restoredStudio === null ? {} : {
+                      restored: {
+                        revisionId: restoredStudio.revisionId,
+                        bundleIdentity: restoredStudio.bundleIdentity,
+                        smokePassed: restoredStudio.smokePassed,
+                        runtimeMode: restoredStudio.runtimeMode,
+                        trustedConfirmed: restoredStudio.trustedConfirmed,
+                      },
+                    })}
                     onLoading={runtime.actions.setBusy}
                     onNotice={runtime.actions.setNotice}
                     onError={runtime.actions.setOperationError}

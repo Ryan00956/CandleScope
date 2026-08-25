@@ -8,4 +8,4 @@ import "@fontsource/jetbrains-mono/latin-500.css";
 import "./index.css";
 import { mountStrategyResearchPage } from "./features/strategy-research/strategyResearchBootstrap.js";
 
-mountStrategyResearchPage({ page: "local" });
+mountStrategyResearchPage({ page: "local" }); // compatibility URL; canonical is /strategy.html

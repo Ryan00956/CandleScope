@@ -48,6 +48,7 @@ export function renderStrategyResearchBootstrap(input: {
   if (mode === "unified") {
     return <StrategyResearchApp intent={intent} libraryEnabled={libraryEnabled} />;
   }
+  // Flag-off keeps independent local.html and the thin backtest compatibility shell.
   if (mode === "local-legacy") {
     return <LocalApp />;
   }

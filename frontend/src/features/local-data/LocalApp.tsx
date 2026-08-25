@@ -186,7 +186,7 @@ export default function LocalApp() {
           <div className="local-interval-strip">
             <div className="local-dataset-truthbar">
               <span>{t("local.waitData")}</span>
-              <span>source: local_dataset</span>
+              <span>{t("local.sourceKind")}</span>
             </div>
           </div>
         )
@@ -234,6 +234,7 @@ export default function LocalApp() {
       )}
       featureSurfaces={(
         <>
+          <span data-testid="local-app-compat-shell" hidden />
           {error !== null && (
             <div className="local-global-error" role="alert">
               <span>{error}</span>

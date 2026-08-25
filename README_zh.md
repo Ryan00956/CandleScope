@@ -53,12 +53,14 @@
 
 <!-- 产品图片：docs/assets/readme/pyne-indicator.png -->
 
-### 本地回测
+### 策略研究
 
-在本地数据上测试固定的策略版本，查看交易、权益、回撤、参数，以及每份结果所用的
-测试假设。
+把导入数据放进策略中的本地资料库，或使用当前图表，然后运行脚本并查看交易、权益、
+回撤、参数，以及每份结果所用的测试假设。高级研究属于同一个「策略」产品。
 
-本地回测目前是可选 Beta，默认不开启。
+策略研究目前是可选 Beta，默认不开启。规范地址是 `/strategy.html`；`/local.html`
+与 `/backtest.html` 仍是兼容入口。文档不宣称 Pine/Pyne 自定义脚本已在
+LOCAL_OFFLINE 配置下可用。LOCAL_OFFLINE 仍是启动 profile，不是页面开关。
 
 <!-- 产品图片：docs/assets/readme/backtest-research.png -->
 

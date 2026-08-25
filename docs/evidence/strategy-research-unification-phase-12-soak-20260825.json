@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "candlescope.strategy-research-unification-soak/1",
+  "status": "PASS",
+  "requestedDurationMs": 3600000,
+  "elapsedMs": 3600131,
+  "cycles": 711,
+  "error": null,
+  "last": {
+    "cycle": 710,
+    "heartbeat": true
+  },
+  "covers": {
+    "localOfflineImport": true,
+    "localOfflineNetworkDeny": true,
+    "remoteOriginDeny": true,
+    "liveChartBrowser": false,
+    "liveImportedChartBrowser": false
+  }
+}

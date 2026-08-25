@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "candlescope.strategy-research-unification-release/1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "generatedAt",
+    "status",
+    "candidateSha",
+    "phaseCommits",
+    "effectiveFlags",
+    "gates",
+    "dod",
+    "legacyWorktree",
+    "scope",
+    "artifactPaths"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "candlescope.strategy-research-unification-release/1" },
+    "generatedAt": { "type": "string", "minLength": 10 },
+    "status": {
+      "type": "string",
+      "enum": [
+        "ENGINEERING_QUALIFIED_FLAGS_DEFAULT_OFF",
+        "PRODUCTION_HOLD",
+        "ENV_STOP"
+      ]
+    },
+    "candidateSha": { "type": "string", "minLength": 40, "maxLength": 40 },
+    "phaseCommits": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["sha", "subject"],
+        "properties": {
+          "sha": { "type": "string", "minLength": 40 },
+          "subject": { "type": "string", "minLength": 8 }
+        }
+      }
+    },
+    "effectiveFlags": {
+      "type": "object",
+      "required": [
+        "CANDLESCOPE_RESEARCH_DATA_LIBRARY_ENABLED",
+        "VITE_RESEARCH_DATA_LIBRARY_ENABLED"
+      ],
+      "properties": {
+        "CANDLESCOPE_RESEARCH_DATA_LIBRARY_ENABLED": { "const": "0" },
+        "VITE_RESEARCH_DATA_LIBRARY_ENABLED": { "const": "0" }
+      },
+      "additionalProperties": { "type": "string" }
+    },
+    "gates": { "type": "object" },
+    "dod": { "type": "object" },
+    "legacyWorktree": {
+      "type": "object",
+      "required": ["path", "branch", "head", "deleted", "archived", "merged"],
+      "properties": {
+        "path": { "type": "string" },
+        "branch": { "const": "codex/local-offline-mode" },
+        "head": { "type": "string" },
+        "deleted": { "const": false },
+        "archived": { "const": false },
+        "merged": { "const": false },
+        "dirtyAudit": { "type": "object" }
+      }
+    },
+    "scope": {
+      "type": "object",
+      "required": ["push", "merge", "deploy", "productionFlagsChanged", "oldWorktreeDeleted"],
+      "properties": {
+        "push": { "const": false },
+        "merge": { "const": false },
+        "deploy": { "const": false },
+        "productionFlagsChanged": { "const": false },
+        "oldWorktreeDeleted": { "const": false }
+      }
+    },
+    "artifactPaths": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["kind", "path", "sha256"],
+        "properties": {
+          "kind": { "type": "string" },
+          "path": { "type": "string" },
+          "sha256": { "type": "string", "minLength": 64, "maxLength": 64 }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,113 @@
+{
+  "schemaVersion": "candlescope.strategy-research-unification-release/1",
+  "generatedAt": "2026-08-25T18:27:49+08:00",
+  "status": "ENGINEERING_QUALIFIED_FLAGS_DEFAULT_OFF",
+  "candidateSha": "PENDING_PHASE12_COMMIT",
+  "phaseCommits": {
+    "phase0": { "sha": "0522ba90ee23d4b897ec6714bbd3086b3e3a9c8b", "subject": "docs(strategy): freeze local-data research unification contract" },
+    "phase1": { "sha": "4c1498813649029c3c3bb80258c587fac169a323", "subject": "feat(research): define unified strategy data source contracts" },
+    "phase2": { "sha": "537755a7785a433d68dc8024e8d28084a6a2245a", "subject": "refactor(local): extract reusable research data library components" },
+    "phase3": { "sha": "5e663c8c73e34f3c8f00d3a79b8497112ed7fc0d", "subject": "refactor(research): unify local dataset runtime ownership" },
+    "phase4": { "sha": "21a85967313eb41a64ea9907279c43528f39d155", "subject": "feat(research): expose local data library to trusted live clients" },
+    "phase5": { "sha": "c0eb95f6c0b75cb6a34550f91dbf8ec66e3ca947", "subject": "feat(research): add unified strategy data source drawer" },
+    "phase6": { "sha": "3eb4d7899d8d77a99d3cdac1fb27a9d570aa3751", "subject": "feat(strategy): add unified full-screen research workspace" },
+    "phase7": { "sha": "8d0ddd7db77517466b366c6066b3be70051b0948", "subject": "feat(strategy): bring immutable local analysis into research workspace" },
+    "phase8": { "sha": "4e3cfe3f0ff5b68ab19ee164afa2aa7ff5f79b82", "subject": "feat(strategy): run chart and imported data through one frozen context" },
+    "phase9": { "sha": "32edf2a44d3015fff5cc40870d782fc27b02ae05", "subject": "feat(strategy): use unified research workspace in offline profile" },
+    "phase10": { "sha": "8b680c9dd27a9db59553c554bc9abf1d395efc35", "subject": "feat(strategy): unify quick and advanced research navigation" },
+    "phase11": { "sha": "67ac5e46f4790d4a44068416c4466cf5e3ff681e", "subject": "refactor(strategy): retire duplicate local and backtest app orchestration" },
+    "phase12": { "sha": "PENDING_PHASE12_COMMIT", "subject": "test(strategy): qualify unified local-data research release" }
+  },
+  "effectiveFlags": {
+    "CANDLESCOPE_RESEARCH_DATA_LIBRARY_ENABLED": "0",
+    "VITE_RESEARCH_DATA_LIBRARY_ENABLED": "0"
+  },
+  "gates": {
+    "scopedPytest": { "result": "PASS", "passed": 89 },
+    "testResearchData": { "result": "PASS", "passed": 88 },
+    "testBacktest": { "result": "PASS", "passed": 121 },
+    "typecheck": { "result": "PASS" },
+    "architecture": { "result": "PASS" },
+    "strategyResearchSmoke": { "result": "PASS" },
+    "build": { "result": "PASS" },
+    "localOfflineSoak60m": { "result": "PASS", "cycles": 711, "elapsedMs": 3600131 },
+    "securityMatrix": { "result": "PASS" },
+    "dualFlagRollback": { "result": "PASS" },
+    "fullBackendPytest": { "result": "FAIL", "note": "failure cluster near 58-65 percent then hang" },
+    "fullFrontendTest": { "result": "FAIL", "passed": 3473, "failed": 1, "note": "scripts/pine-language.test.mjs monaco ESM import" },
+    "lint": { "result": "FAIL", "note": "pre-existing eslint errors remain" },
+    "browserAcceptance": { "result": "ENV_STOP" },
+    "smokeBacktest": { "result": "ENV_STOP", "note": "ECONNREFUSED 127.0.0.1:8000" },
+    "liveBrowserSoak": { "result": "ENV_STOP" }
+  },
+  "dod": {
+    "path": "docs/evidence/STRATEGY_RESEARCH_UNIFICATION_PHASE_12_DOD_20260825_zh.md",
+    "productionDecision": "HOLD"
+  },
+  "legacyWorktree": {
+    "path": "H:/program/CandleScope-local-offline",
+    "branch": "codex/local-offline-mode",
+    "head": "d3c2fe37d1deacba8951b5725353ca967eca2d79",
+    "deleted": false,
+    "archived": false,
+    "merged": false,
+    "dirtyAudit": {
+      "dirtyCount": 37,
+      "path": "docs/evidence/STRATEGY_RESEARCH_UNIFICATION_PHASE_12_LEGACY_AUDIT_20260825_zh.md"
+    }
+  },
+  "scope": {
+    "push": false,
+    "merge": false,
+    "deploy": false,
+    "productionFlagsChanged": false,
+    "oldWorktreeDeleted": false
+  },
+  "artifactPaths": [
+    {
+      "kind": "STRATEGY_RESEARCH_UNIFICATION_PHASE_12_PLAN_20260825_zh.md",
+      "path": "docs/evidence/STRATEGY_RESEARCH_UNIFICATION_PHASE_12_PLAN_20260825_zh.md",
+      "sha256": "a5622e3e7d89bc04acfafc9d1bf0941c747f72bb8fa7c53b087a8e30ac3f6806"
+    },
+    {
+      "kind": "STRATEGY_RESEARCH_UNIFICATION_PHASE_12_RESULT_20260825_zh.md",
+      "path": "docs/evidence/STRATEGY_RESEARCH_UNIFICATION_PHASE_12_RESULT_20260825_zh.md",
+      "sha256": "5e441285e3d1873d926d21b0119774304a8cb16a331186adfb074806880c3c58"
+    },
+    {
+      "kind": "STRATEGY_RESEARCH_UNIFICATION_PHASE_12_DOD_20260825_zh.md",
+      "path": "docs/evidence/STRATEGY_RESEARCH_UNIFICATION_PHASE_12_DOD_20260825_zh.md",
+      "sha256": "9b2dd8a83ad421696dbffd48adc249941eb465eeab75d42c522b2d9f211e37e3"
+    },
+    {
+      "kind": "STRATEGY_RESEARCH_UNIFICATION_PHASE_12_LEGACY_AUDIT_20260825_zh.md",
+      "path": "docs/evidence/STRATEGY_RESEARCH_UNIFICATION_PHASE_12_LEGACY_AUDIT_20260825_zh.md",
+      "sha256": "5c8831f423f86294293a57aa6a8a492bd8f5eb612b41d620e66b1cfeb7533054"
+    },
+    {
+      "kind": "strategy-research-unification-phase-12-soak-20260825.json",
+      "path": "docs/evidence/strategy-research-unification-phase-12-soak-20260825.json",
+      "sha256": "ca7b38efee2a775de5cde4555da331d69f8ea39d5bf083c9fc9f34faf734204e"
+    },
+    {
+      "kind": "strategy-research-unification-release.schema.json",
+      "path": "docs/evidence/strategy-research-unification-release.schema.json",
+      "sha256": "77edbd167ba7a19e2f471f9c01efaf108abffe9da85db17428d4927b82970850"
+    },
+    {
+      "kind": "verify_strategy_research_unification.py",
+      "path": "backend/scripts/verify_strategy_research_unification.py",
+      "sha256": "1e4fbf684c343d15b3908356ccdf16cd9ea1eee91de66a01959b909f81400097"
+    },
+    {
+      "kind": "soak_strategy_research_unification.py",
+      "path": "backend/scripts/soak_strategy_research_unification.py",
+      "sha256": "62bf59063ebc89ab8534fb6abdfe40dea81680fdcf51090de7cd9ab4d080de6a"
+    },
+    {
+      "kind": "strategy-research-smoke.mjs",
+      "path": "frontend/scripts/strategy-research-smoke.mjs",
+      "sha256": "b7d02c3515ea01dda898ec846589c00be5b8c2ae2a51f82fdd345e7d17373e41"
+    }
+  ]
+}

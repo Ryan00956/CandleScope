@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "candlescope.strategy-research-unification.phase1/1",
+  "generatedAt": "2026-08-25T15:40:00+08:00",
+  "status": "PHASE1_ENGINEERING_COMPLETE",
+  "baselineSha": "6fb69e4f04231aaf7430e386092f9ed1166fe72d",
+  "candidateSha": "PENDING_PHASE1_COMMIT",
+  "dirtyPathsBefore": [
+    "?? docs/LOCAL_DATA_STRATEGY_RESEARCH_UNIFICATION_EXECUTION_zh.md"
+  ],
+  "dirtyPathsAfterOriginalTree": [
+    "?? docs/LOCAL_DATA_STRATEGY_RESEARCH_UNIFICATION_EXECUTION_zh.md"
+  ],
+  "commands": [
+    "D:\\anaconda\\python.exe -m pytest -q tests/test_research_data_contracts.py",
+    "npx tsx --test src/features/research-data/__tests__/researchDataSourceModel.test.ts",
+    "D:\\anaconda\\python.exe -m pytest -q tests/test_local_data_service.py tests/test_local_data_api.py tests/test_local_data_jobs.py",
+    "D:\\anaconda\\python.exe -m pytest -q tests/test_local_offline_main_profile.py tests/test_local_offline_network_guard.py",
+    "D:\\anaconda\\python.exe -m pytest -q tests/test_backtest_chart_context.py tests/test_backtest_quick_presets.py",
+    "npm.cmd run test:backtest",
+    "npm.cmd run typecheck"
+  ],
+  "exitCodes": {
+    "pytestResearchContracts": 0,
+    "tsxResearchData": 0,
+    "pytestLocalData": 0,
+    "pytestOffline": 0,
+    "pytestBacktestChart": 0,
+    "npmTestBacktest": 0,
+    "npmTypecheck": 0
+  },
+  "scopedTests": {
+    "pytestResearchContracts": { "result": "PASS", "passed": 11 },
+    "tsxResearchData": { "result": "PASS", "passed": 10 }
+  },
+  "fullTests": { "result": "NOT_REQUIRED_THIS_PHASE" },
+  "browserScenarios": [
+    "unchanged from Phase 0; no page or API behavior change"
+  ],
+  "runtimeMode": "n/a",
+  "effectiveFlags": {
+    "CANDLESCOPE_RESEARCH_DATA_LIBRARY_ENABLED": "unset_default_off",
+    "VITE_RESEARCH_DATA_LIBRARY_ENABLED": "unset_default_off"
+  },
+  "rollbackResult": "remove new research_data/research-data files; no data migration",
+  "unresolvedFindings": [
+    "No runtime callers yet",
+    "npm script test:research-data belongs to Phase 2"
+  ]
+}

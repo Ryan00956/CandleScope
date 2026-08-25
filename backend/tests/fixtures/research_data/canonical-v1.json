@@ -1,0 +1,130 @@
+{
+  "schemaVersion": "candlescope.research-data-canonical-fixture/1",
+  "sourceRefs": {
+    "currentChart": {
+      "schemaVersion": "candlescope.research-source/1",
+      "kind": "CURRENT_CHART",
+      "workspaceId": "ws_main",
+      "cellId": "cell-1",
+      "exchange": "binance",
+      "marketType": "spot",
+      "symbol": "BTCUSDT",
+      "interval": "1h"
+    },
+    "importedDataset": {
+      "schemaVersion": "candlescope.research-source/1",
+      "kind": "IMPORTED_DATASET",
+      "datasetId": "local-0123456789abcdef0123456789abcdef",
+      "dataEpoch": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "interval": "15m"
+    },
+    "completedRun": {
+      "schemaVersion": "candlescope.research-source/1",
+      "kind": "COMPLETED_RUN",
+      "runId": "bt_0123456789abcdef0123456789abcdef",
+      "datasetId": "local-0123456789abcdef0123456789abcdef",
+      "dataEpoch": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "snapshotHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  },
+  "freezeInputs": {
+    "currentChart": {
+      "schemaVersion": "candlescope.frozen-research-context/1",
+      "sourceKind": "CURRENT_CHART",
+      "datasetId": "local-fedcba9876543210fedcba9876543210",
+      "dataEpoch": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "snapshotHash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "interval": "1h",
+      "startTimeMs": 1704067200000,
+      "endTimeMs": 1704070800000,
+      "symbol": "BTCUSDT",
+      "qualitySummary": {
+        "status": "ok",
+        "rows": 12,
+        "excludedRangeCount": 0,
+        "volumeAvailable": true
+      }
+    },
+    "importedDataset": {
+      "schemaVersion": "candlescope.frozen-research-context/1",
+      "sourceKind": "IMPORTED_DATASET",
+      "datasetId": "local-0123456789abcdef0123456789abcdef",
+      "dataEpoch": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "snapshotHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "interval": "15m",
+      "startTimeMs": 1704067200000,
+      "endTimeMs": 1704153600000,
+      "symbol": "BTC-USDT",
+      "qualitySummary": {
+        "status": "ok",
+        "rows": 96,
+        "excludedRangeCount": 0,
+        "volumeAvailable": false
+      }
+    },
+    "completedRun": {
+      "schemaVersion": "candlescope.frozen-research-context/1",
+      "sourceKind": "COMPLETED_RUN",
+      "datasetId": "local-0123456789abcdef0123456789abcdef",
+      "dataEpoch": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "snapshotHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "interval": "15m",
+      "startTimeMs": 1704067200000,
+      "endTimeMs": 1704153600000,
+      "symbol": "BTC-USDT",
+      "qualitySummary": {
+        "status": "ok",
+        "rows": 96,
+        "excludedRangeCount": 0,
+        "volumeAvailable": false
+      }
+    }
+  },
+  "invalid": [
+    {
+      "name": "imported-missing-dataset",
+      "code": "MISSING_DATASET_IDENTITY",
+      "source": {
+        "schemaVersion": "candlescope.research-source/1",
+        "kind": "IMPORTED_DATASET",
+        "dataEpoch": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "interval": "15m"
+      }
+    },
+    {
+      "name": "imported-missing-epoch",
+      "code": "MISSING_DATASET_IDENTITY",
+      "source": {
+        "schemaVersion": "candlescope.research-source/1",
+        "kind": "IMPORTED_DATASET",
+        "datasetId": "local-0123456789abcdef0123456789abcdef",
+        "interval": "15m"
+      }
+    },
+    {
+      "name": "completed-missing-snapshot",
+      "code": "MISSING_SNAPSHOT_HASH",
+      "source": {
+        "schemaVersion": "candlescope.research-source/1",
+        "kind": "COMPLETED_RUN",
+        "runId": "bt_0123456789abcdef0123456789abcdef",
+        "datasetId": "local-0123456789abcdef0123456789abcdef",
+        "dataEpoch": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "name": "unknown-kind",
+      "code": "UNKNOWN_SOURCE_KIND",
+      "source": {
+        "schemaVersion": "candlescope.research-source/1",
+        "kind": "LIVE_STREAM",
+        "workspaceId": "ws_main",
+        "cellId": "cell-1",
+        "exchange": "binance",
+        "marketType": "spot",
+        "symbol": "BTCUSDT",
+        "interval": "1h"
+      }
+    }
+  ]
+}

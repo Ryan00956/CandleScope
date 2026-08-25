@@ -1,0 +1,364 @@
+import {
+  FROZEN_RESEARCH_CONTEXT_SCHEMA,
+  FORBIDDEN_ORDINARY_UI_TERMS,
+  ORDINARY_RESEARCH_TERMS,
+  RESEARCH_CAPABILITY_IDS,
+  RESEARCH_SOURCE_KINDS,
+  RESEARCH_SOURCE_SCHEMA,
+  type FrozenResearchContextV1,
+  type ResearchCapabilityDecisionV1,
+  type ResearchCapabilityId,
+  type ResearchCapabilitySummaryV1,
+  type ResearchDataErrorShape,
+  type ResearchQualitySummaryV1,
+  type ResearchRuntimeMode,
+  type ResearchSourceKind,
+  type ResearchSourceRefV1,
+} from "./researchDataTypes.js";
+
+const ERROR_ACTIONS: Record<string, string> = {
+  INVALID_RESEARCH_SOURCE: "重新选择数据来源",
+  UNKNOWN_SOURCE_KIND: "重新选择数据来源",
+  MISSING_DATASET_IDENTITY: "重新选择本地资料库中的数据版本",
+  MISSING_SNAPSHOT_HASH: "从完成结果重新打开，不要手工填写身份",
+  INVALID_FROZEN_CONTEXT: "重新冻结数据后再运行",
+  CONTEXT_HASH_MISMATCH: "重新冻结数据后再运行",
+  FRONTEND_MUST_NOT_INVENT_SNAPSHOT: "等待后端返回已冻结身份",
+};
+
+export class ResearchDataError extends Error {
+  readonly code: string;
+  readonly action: string;
+  readonly details: Record<string, unknown>;
+
+  constructor(code: string, message: string, details: Record<string, unknown> = {}) {
+    super(message);
+    this.name = "ResearchDataError";
+    this.code = code;
+    this.action = ERROR_ACTIONS[code] ?? "重新选择来源";
+    this.details = details;
+  }
+
+  toJSON(): ResearchDataErrorShape {
+    return {
+      code: this.code,
+      message: this.message,
+      action: this.action,
+      ...(Object.keys(this.details).length > 0 ? { details: this.details } : {}),
+    };
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function requireString(values: Record<string, unknown>, key: string, code: string, label = key): string {
+  const raw = values[key];
+  if (typeof raw !== "string" || raw.trim() === "") {
+    throw new ResearchDataError(code, `${label} is required`);
+  }
+  return raw.trim();
+}
+
+function requireInt(values: Record<string, unknown>, key: string, code: string): number {
+  const raw = values[key];
+  if (typeof raw !== "number" || !Number.isInteger(raw)) {
+    throw new ResearchDataError(code, `${key} must be an integer`);
+  }
+  return raw;
+}
+
+function canonicalValue(value: unknown): unknown {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    if (!Number.isInteger(value)) throw new ResearchDataError("INVALID_FROZEN_CONTEXT", "numbers must be integers");
+    return value;
+  }
+  if (Array.isArray(value)) return value.map(canonicalValue);
+  if (isRecord(value)) {
+    return Object.fromEntries(
+      Object.keys(value).sort().map((key) => [key, canonicalValue(value[key])]),
+    );
+  }
+  throw new ResearchDataError("INVALID_FROZEN_CONTEXT", "unsupported canonical value");
+}
+
+export function researchCanonicalJson(value: unknown): string {
+  return JSON.stringify(canonicalValue(value));
+}
+
+export async function sha256HexUtf8(text: string): Promise<string> {
+  const bytes = new TextEncoder().encode(text);
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)].map((item) => item.toString(16).padStart(2, "0")).join("");
+}
+
+export function parseResearchSourceRef(value: unknown): ResearchSourceRefV1 {
+  if (!isRecord(value)) {
+    throw new ResearchDataError("INVALID_RESEARCH_SOURCE", "research source must be an object");
+  }
+  const schema = requireString(value, "schemaVersion", "INVALID_RESEARCH_SOURCE");
+  if (schema !== RESEARCH_SOURCE_SCHEMA) {
+    throw new ResearchDataError("INVALID_RESEARCH_SOURCE", `unsupported schemaVersion ${schema}`);
+  }
+  const kind = value.kind;
+  if (typeof kind !== "string" || !(RESEARCH_SOURCE_KINDS as readonly string[]).includes(kind)) {
+    throw new ResearchDataError("UNKNOWN_SOURCE_KIND", "unknown research source kind", { kind });
+  }
+  if (kind === "CURRENT_CHART") {
+    return {
+      schemaVersion: RESEARCH_SOURCE_SCHEMA,
+      kind: "CURRENT_CHART",
+      workspaceId: requireString(value, "workspaceId", "INVALID_RESEARCH_SOURCE"),
+      cellId: requireString(value, "cellId", "INVALID_RESEARCH_SOURCE"),
+      exchange: requireString(value, "exchange", "INVALID_RESEARCH_SOURCE"),
+      marketType: requireString(value, "marketType", "INVALID_RESEARCH_SOURCE"),
+      symbol: requireString(value, "symbol", "INVALID_RESEARCH_SOURCE"),
+      interval: requireString(value, "interval", "INVALID_RESEARCH_SOURCE"),
+    };
+  }
+  if (kind === "IMPORTED_DATASET") {
+    const datasetId = value.datasetId;
+    const dataEpoch = value.dataEpoch;
+    if (typeof datasetId !== "string" || datasetId.trim() === "" || typeof dataEpoch !== "string" || dataEpoch.trim() === "") {
+      throw new ResearchDataError(
+        "MISSING_DATASET_IDENTITY",
+        "imported data requires dataset and data version from the library",
+      );
+    }
+    return {
+      schemaVersion: RESEARCH_SOURCE_SCHEMA,
+      kind: "IMPORTED_DATASET",
+      datasetId: datasetId.trim(),
+      dataEpoch: dataEpoch.trim(),
+      interval: requireString(value, "interval", "INVALID_RESEARCH_SOURCE"),
+    };
+  }
+  const snapshotHash = value.snapshotHash;
+  if (typeof snapshotHash !== "string" || snapshotHash.trim() === "") {
+    throw new ResearchDataError(
+      "MISSING_SNAPSHOT_HASH",
+      "completed results require a backend snapshot hash",
+    );
+  }
+  return {
+    schemaVersion: RESEARCH_SOURCE_SCHEMA,
+    kind: "COMPLETED_RUN",
+    runId: requireString(value, "runId", "INVALID_RESEARCH_SOURCE"),
+    datasetId: requireString(value, "datasetId", "MISSING_DATASET_IDENTITY"),
+    dataEpoch: requireString(value, "dataEpoch", "MISSING_DATASET_IDENTITY"),
+    snapshotHash: snapshotHash.trim(),
+  };
+}
+
+export function parseQualitySummary(value: unknown): ResearchQualitySummaryV1 {
+  if (!isRecord(value)) {
+    throw new ResearchDataError("INVALID_FROZEN_CONTEXT", "qualitySummary must be an object");
+  }
+  const status = value.status;
+  if (status !== "ok" && status !== "gap" && status !== "failed") {
+    throw new ResearchDataError("INVALID_FROZEN_CONTEXT", "unknown quality status");
+  }
+  const volumeAvailable = value.volumeAvailable;
+  if (typeof volumeAvailable !== "boolean") {
+    throw new ResearchDataError("INVALID_FROZEN_CONTEXT", "volumeAvailable must be a boolean");
+  }
+  const rows = requireInt(value, "rows", "INVALID_FROZEN_CONTEXT");
+  const excludedRangeCount = requireInt(value, "excludedRangeCount", "INVALID_FROZEN_CONTEXT");
+  if (rows < 0 || excludedRangeCount < 0) {
+    throw new ResearchDataError("INVALID_FROZEN_CONTEXT", "quality counts cannot be negative");
+  }
+  return { status, rows, excludedRangeCount, volumeAvailable };
+}
+
+export function frozenContextIdentityWire(
+  input: Omit<FrozenResearchContextV1, "capabilitySummary" | "contextHash"> & {
+    capabilitySummary?: FrozenResearchContextV1["capabilitySummary"];
+    contextHash?: string;
+  },
+): Record<string, unknown> {
+  return {
+    schemaVersion: input.schemaVersion,
+    sourceKind: input.sourceKind,
+    datasetId: input.datasetId,
+    dataEpoch: input.dataEpoch,
+    snapshotHash: input.snapshotHash,
+    interval: input.interval,
+    startTimeMs: input.startTimeMs,
+    endTimeMs: input.endTimeMs,
+    symbol: input.symbol,
+    qualitySummary: input.qualitySummary,
+  };
+}
+
+export function frozenContextCanonicalJson(
+  input: Omit<FrozenResearchContextV1, "capabilitySummary" | "contextHash">,
+): string {
+  return researchCanonicalJson(frozenContextIdentityWire(input));
+}
+
+function allow(userReason: string): ResearchCapabilityDecisionV1 {
+  return { available: true, reasonCode: null, userReason, userAction: "" };
+}
+
+function deny(reasonCode: string, userReason: string, userAction: string): ResearchCapabilityDecisionV1 {
+  return { available: false, reasonCode, userReason, userAction };
+}
+
+export function projectResearchCapabilities(input: {
+  sourceKind: ResearchSourceKind;
+  runtimeMode?: ResearchRuntimeMode;
+  quality?: ResearchQualitySummaryV1 | null;
+  hasFrozenTrades?: boolean;
+  hasResultCapabilities?: boolean | null;
+}): ResearchCapabilitySummaryV1 {
+  const runtimeMode = input.runtimeMode ?? "LIVE";
+  const kind = input.sourceKind;
+  const qualityOk = input.quality?.status === "ok";
+  const imported = kind === "IMPORTED_DATASET";
+  const completed = kind === "COMPLETED_RUN";
+  const chart = kind === "CURRENT_CHART";
+  const offline = runtimeMode === "LOCAL_OFFLINE";
+  const hasFrozenTrades = input.hasFrozenTrades === true;
+  const fidelityCeiling = hasFrozenTrades ? "TRADE_TAPE" : "BAR_APPROX";
+
+  const capabilities: ResearchCapabilitySummaryV1["capabilities"] = {
+    viewKlines: allow("可以查看 K 线"),
+    importNewData: imported
+      ? allow("可以导入 CSV")
+      : deny("IMPORT_NOT_AVAILABLE", "当前来源不能导入新数据", "切换到本地资料库"),
+    modifyRevisionPointer: imported
+      ? allow("可以激活数据版本")
+      : deny("REVISION_POINTER_NOT_AVAILABLE", "当前来源不能修改数据版本", "在本地资料库中管理数据版本"),
+    barApprox: imported || completed || qualityOk
+      ? allow("基于 K 线估算")
+      : deny("DATA_GAP", "所选区间存在缺口", "缩短区间或导入完整数据"),
+    tradeTape: hasFrozenTrades
+      ? allow("已有冻结成交")
+      : deny("UNSUPPORTED_FIDELITY", "当前数据不支持逐笔精度，只能基于 K 线估算", "使用 K 线估算或导入成交数据"),
+    onlineBackfill: offline
+      ? deny("OFFLINE_LIVE_SOURCE_UNAVAILABLE", "离线运行时没有实时行情", "选择本地资料库")
+      : chart
+        ? allow("用户确认后可准备缺失历史")
+        : deny("IMPORTED_DATASET_NEVER_NETWORKS", "导入数据不会联网补历史", "使用已导入的数据或缩短区间"),
+    indicators: completed
+      ? allow("只读结果能力")
+      : imported
+        ? allow("本地显式-bars 指标")
+        : !offline
+          ? allow("当前行情指标")
+          : deny("OFFLINE_LIVE_SOURCE_UNAVAILABLE", "离线运行时没有实时行情指标", "选择本地资料库"),
+    drawingsEvents: completed
+      ? allow("独立复核范围")
+      : imported
+        ? allow("绑定当前数据版本")
+        : allow("绑定当前图表"),
+  };
+
+  if (offline && chart) {
+    capabilities.viewKlines = deny(
+      "OFFLINE_LIVE_SOURCE_UNAVAILABLE",
+      "离线运行时没有实时行情",
+      "选择本地资料库",
+    );
+    capabilities.barApprox = deny(
+      "OFFLINE_LIVE_SOURCE_UNAVAILABLE",
+      "离线运行时不能运行当前图表策略",
+      "选择本地资料库",
+    );
+  }
+
+  return { sourceKind: kind, runtimeMode, fidelityCeiling, capabilities };
+}
+
+export function isCapabilityAvailable(
+  summary: ResearchCapabilitySummaryV1 | Record<string, unknown> | null | undefined,
+  capabilityId: ResearchCapabilityId | string,
+): boolean {
+  if (summary == null || typeof summary !== "object") return false;
+  const capabilities = "capabilities" in summary ? summary.capabilities : undefined;
+  if (capabilities == null || typeof capabilities !== "object") return false;
+  const decision = (capabilities as Record<string, unknown>)[capabilityId];
+  if (decision == null || typeof decision !== "object") return false;
+  return (decision as ResearchCapabilityDecisionV1).available === true;
+}
+
+export async function assembleFrozenResearchContext(
+  values: Record<string, unknown>,
+  capabilitySummary: ResearchCapabilitySummaryV1,
+  snapshotHash?: string,
+): Promise<FrozenResearchContextV1> {
+  const schema = typeof values.schemaVersion === "string" && values.schemaVersion
+    ? values.schemaVersion
+    : FROZEN_RESEARCH_CONTEXT_SCHEMA;
+  if (schema !== FROZEN_RESEARCH_CONTEXT_SCHEMA) {
+    throw new ResearchDataError("INVALID_FROZEN_CONTEXT", `unsupported schemaVersion ${schema}`);
+  }
+  const sourceKind = values.sourceKind;
+  if (typeof sourceKind !== "string" || !(RESEARCH_SOURCE_KINDS as readonly string[]).includes(sourceKind)) {
+    throw new ResearchDataError("UNKNOWN_SOURCE_KIND", "unknown frozen source kind");
+  }
+  const providedSnapshot = snapshotHash ?? values.snapshotHash;
+  if (typeof providedSnapshot !== "string" || providedSnapshot.trim() === "") {
+    throw new ResearchDataError(
+      "FRONTEND_MUST_NOT_INVENT_SNAPSHOT",
+      "snapshot hash must come from the backend freeze step",
+    );
+  }
+  const qualitySummary = parseQualitySummary(values.qualitySummary);
+  const startTimeMs = requireInt(values, "startTimeMs", "INVALID_FROZEN_CONTEXT");
+  const endTimeMs = requireInt(values, "endTimeMs", "INVALID_FROZEN_CONTEXT");
+  if (endTimeMs < startTimeMs) {
+    throw new ResearchDataError("INVALID_FROZEN_CONTEXT", "endTimeMs must be >= startTimeMs");
+  }
+  const identity = {
+    schemaVersion: FROZEN_RESEARCH_CONTEXT_SCHEMA,
+    sourceKind: sourceKind as ResearchSourceKind,
+    datasetId: requireString(values, "datasetId", "MISSING_DATASET_IDENTITY"),
+    dataEpoch: requireString(values, "dataEpoch", "MISSING_DATASET_IDENTITY"),
+    snapshotHash: providedSnapshot.trim(),
+    interval: requireString(values, "interval", "INVALID_FROZEN_CONTEXT"),
+    startTimeMs,
+    endTimeMs,
+    symbol: requireString(values, "symbol", "INVALID_FROZEN_CONTEXT"),
+    qualitySummary,
+  };
+  const contextHash = `sha256:${await sha256HexUtf8(frozenContextCanonicalJson(identity))}`;
+  const declared = values.contextHash;
+  if (typeof declared === "string" && declared.trim() !== "" && declared.trim() !== contextHash) {
+    throw new ResearchDataError("CONTEXT_HASH_MISMATCH", "frozen context hash does not match identity");
+  }
+  return { ...identity, capabilitySummary, contextHash };
+}
+
+export async function parseFrozenResearchContext(value: unknown): Promise<FrozenResearchContextV1> {
+  if (!isRecord(value)) {
+    throw new ResearchDataError("INVALID_FROZEN_CONTEXT", "frozen research context must be an object");
+  }
+  const capability = value.capabilitySummary;
+  if (!isRecord(capability) || typeof capability.sourceKind !== "string") {
+    throw new ResearchDataError("INVALID_FROZEN_CONTEXT", "capabilitySummary must be an object");
+  }
+  return assembleFrozenResearchContext(value, capability as unknown as ResearchCapabilitySummaryV1);
+}
+
+export function ordinarySourceLabel(kind: ResearchSourceKind, locale: "en" | "zh" = "zh"): string {
+  if (kind === "CURRENT_CHART") return ORDINARY_RESEARCH_TERMS.currentChart[locale];
+  if (kind === "IMPORTED_DATASET") return ORDINARY_RESEARCH_TERMS.importedLibrary[locale];
+  return ORDINARY_RESEARCH_TERMS.completedResult[locale];
+}
+
+export function ordinaryTermsContainInternalIdentity(): string[] {
+  const hits: string[] = [];
+  const forbidden = FORBIDDEN_ORDINARY_UI_TERMS.map((item) => item.toLowerCase());
+  for (const [key, pair] of Object.entries(ORDINARY_RESEARCH_TERMS)) {
+    for (const text of Object.values(pair)) {
+      const lower = text.toLowerCase();
+      if (forbidden.some((term) => lower.includes(term))) hits.push(`${key}:${text}`);
+    }
+  }
+  return hits;
+}
+
+export { RESEARCH_CAPABILITY_IDS };

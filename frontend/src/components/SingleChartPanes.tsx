@@ -268,7 +268,9 @@ export interface SingleChartPanesProps {
   onCrosshairMove?: ((value: MainSeriesCrosshairValue | null) => void) | null;
   onNeedMoreLeft?: LoadMoreLeft | null;
   onNeedMoreRight?: (() => Promise<boolean>) | null;
+  onRestoreLatestWindow?: (() => Promise<boolean>) | null;
   canLoadMoreLeft?: boolean;
+  canLoadMoreRight?: boolean;
   canRestoreLatestWindow?: boolean;
   rightWindowTruncated?: boolean;
   datasetKey: string;
@@ -1256,7 +1258,9 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   onCrosshairMove,
   onNeedMoreLeft,
   onNeedMoreRight = null,
+  onRestoreLatestWindow = null,
   canLoadMoreLeft = true,
+  canLoadMoreRight,
   canRestoreLatestWindow = true,
   rightWindowTruncated,
   datasetKey,
@@ -1440,7 +1444,9 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   }>({ base: null, panes: new Map() });
   const onNeedMoreLeftRef = useRef(onNeedMoreLeft);
   const onNeedMoreRightRef = useRef(onNeedMoreRight);
+  const onRestoreLatestWindowRef = useRef(onRestoreLatestWindow);
   const canLoadMoreLeftRef = useRef(canLoadMoreLeft);
+  const canLoadMoreRightRef = useRef(canLoadMoreRight ?? canRestoreLatestWindow);
   const canRestoreLatestWindowRef = useRef(canRestoreLatestWindow);
   const rightWindowTruncatedRef = useRef(rightWindowTruncated);
   const loadingRef = useRef(loading);
@@ -1457,6 +1463,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     promise: Promise<boolean>;
   } | null>(null);
   const rightWindowRestoreScrollFrameRef = useRef<number | null>(null);
+  const explicitLatestWindowRestoreRef = useRef<Promise<boolean> | null>(null);
   const datasetKeyRef = useRef(datasetKey);
   const surfaceConfigKeyRef = useRef<string | null>(null);
   const drawingProjectionConfigRef = useRef<string | null>(null);
@@ -1678,6 +1685,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   const [collapsedPaneIds, setCollapsedPaneIds] = useState<string[]>([]);
   const [hoveredPaneId, setHoveredPaneId] = useState<string | null>(null);
   const [maximizedPaneId, setMaximizedPaneId] = useState<string | null>(null);
+  const [latestWindowRestorePending, setLatestWindowRestorePending] = useState(false);
 
   const resolvedChartType = normalizeMainChartType(chartType);
   const resolvedDescriptor = getChartTypeDescriptor(resolvedChartType);
@@ -2289,6 +2297,9 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   useEffect(() => { intervalRef.current = interval; }, [interval]);
   useEffect(() => { onNeedMoreLeftRef.current = onNeedMoreLeft; }, [onNeedMoreLeft]);
   useEffect(() => { onNeedMoreRightRef.current = onNeedMoreRight; }, [onNeedMoreRight]);
+  useEffect(() => {
+    onRestoreLatestWindowRef.current = onRestoreLatestWindow;
+  }, [onRestoreLatestWindow]);
   useEffect(() => { loadingRef.current = loading; }, [loading]);
   useEffect(() => { onViewportRangeChangeRef.current = onViewportRangeChange; }, [onViewportRangeChange]);
   useEffect(() => {
@@ -2394,9 +2405,33 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     });
   }, [flushLeftHistoryDemand]);
 
+  const scheduleLatestWindowScroll = useCallback((requestedDatasetKey: string) => {
+    if (rightWindowRestoreScrollFrameRef.current != null) {
+      cancelAnimationFrame(rightWindowRestoreScrollFrameRef.current);
+    }
+    rightWindowRestoreScrollFrameRef.current = requestAnimationFrame(() => {
+      rightWindowRestoreScrollFrameRef.current = null;
+      if (datasetKeyRef.current !== requestedDatasetKey) return;
+      if (followLatestRef.current && displayRowsRef.current.length > 0) {
+        followLatestDisabledRef.current = false;
+        const rawPosition = Number(latestBarPositionRef.current);
+        const position = Number.isFinite(rawPosition)
+          ? Math.min(1, Math.max(0, rawPosition))
+          : 0.5;
+        viewportControllerRef.current?.followLatest(
+          displayRowsRef.current.length - 1,
+          { position },
+        );
+      } else {
+        chartRef.current?.timeScale().scrollToRealTime?.();
+      }
+    });
+  }, []);
+
   const requestRightWindowRestore = useCallback((range: VisibleLogicalRange): boolean => {
     const store = seriesStoreRef.current;
     const restore = onNeedMoreRightRef.current;
+    const edgeRequestRestoresLatest = onRestoreLatestWindowRef.current == null;
     // Visible logical ranges are indexed by the active display axis. In a
     // derived representation one source K-line can produce several display
     // points, so comparing this range to sourceRows would restore the latest
@@ -2405,7 +2440,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     const interactionGeneration = leftHistoryInteractionGenerationRef.current;
     if (!shouldRequestRightWindowRestore({
       logicalBarCount,
-      canLoad: canRestoreLatestWindowRef.current
+      canLoad: canLoadMoreRightRef.current
         && !loadingRef.current
         && rightWindowRestoreRef.current == null,
       consumedInteractionGeneration: leftHistoryConsumedGenerationRef.current,
@@ -2435,26 +2470,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       .then(() => restore())
       .then((restored) => {
         if (!restored || datasetKeyRef.current !== requestedDatasetKey) return false;
-        if (rightWindowRestoreScrollFrameRef.current != null) {
-          cancelAnimationFrame(rightWindowRestoreScrollFrameRef.current);
-        }
-        rightWindowRestoreScrollFrameRef.current = requestAnimationFrame(() => {
-          rightWindowRestoreScrollFrameRef.current = null;
-          if (datasetKeyRef.current !== requestedDatasetKey) return;
-          if (followLatestRef.current && displayRowsRef.current.length > 0) {
-            followLatestDisabledRef.current = false;
-            const rawPosition = Number(latestBarPositionRef.current);
-            const position = Number.isFinite(rawPosition)
-              ? Math.min(1, Math.max(0, rawPosition))
-              : 0.5;
-            viewportControllerRef.current?.followLatest(
-              displayRowsRef.current.length - 1,
-              { position },
-            );
-          } else {
-            chartRef.current?.timeScale().scrollToRealTime?.();
-          }
-        });
+        if (edgeRequestRestoresLatest) scheduleLatestWindowScroll(requestedDatasetKey);
         return true;
       })
       .catch((error) => {
@@ -2466,7 +2482,36 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       });
     owner.promise = promise;
     return true;
-  }, []);
+  }, [scheduleLatestWindowScroll]);
+
+  const handleRestoreLatestWindow = useCallback(() => {
+    const restore = onRestoreLatestWindowRef.current;
+    if (
+      !restore
+      || !canRestoreLatestWindowRef.current
+      || explicitLatestWindowRestoreRef.current != null
+    ) return;
+
+    const requestedDatasetKey = datasetKeyRef.current;
+    setLatestWindowRestorePending(true);
+    const promise = Promise.resolve()
+      .then(() => restore())
+      .then((restored) => {
+        if (!restored || datasetKeyRef.current !== requestedDatasetKey) return false;
+        scheduleLatestWindowScroll(requestedDatasetKey);
+        return true;
+      })
+      .catch((error) => {
+        console.warn("SingleChartPanes: failed to explicitly restore the latest K-line window", error);
+        return false;
+      })
+      .finally(() => {
+        if (explicitLatestWindowRestoreRef.current !== promise) return;
+        explicitLatestWindowRestoreRef.current = null;
+        setLatestWindowRestorePending(false);
+      });
+    explicitLatestWindowRestoreRef.current = promise;
+  }, [scheduleLatestWindowScroll]);
 
   const evaluateHistoryEdgeGesture = useCallback((
     range: VisibleLogicalRange,
@@ -2487,6 +2532,9 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     canLoadMoreLeftRef.current = canLoadMoreLeft;
     if (canLoadMoreLeft) scheduleLeftHistoryDemandFlush();
   }, [canLoadMoreLeft, scheduleLeftHistoryDemandFlush]);
+  useEffect(() => {
+    canLoadMoreRightRef.current = canLoadMoreRight ?? canRestoreLatestWindow;
+  }, [canLoadMoreRight, canRestoreLatestWindow]);
   useEffect(() => {
     canRestoreLatestWindowRef.current = canRestoreLatestWindow;
   }, [canRestoreLatestWindow]);
@@ -5285,6 +5333,25 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         onContextMenu={handlePriceScaleContextMenu}
         style={{ cursor: cursorStyleForDrawingTool(effectiveDrawingTool) }}
       />
+
+      {onRestoreLatestWindow
+        && (rightWindowTruncated ?? Boolean(seriesStore?.rightTruncated)) && (
+        <button
+          type="button"
+          className="chart-return-to-realtime"
+          disabled={!canRestoreLatestWindow || latestWindowRestorePending}
+          data-pending={latestWindowRestorePending ? "true" : "false"}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            handleRestoreLatestWindow();
+          }}
+        >
+          {t(latestWindowRestorePending
+            ? "status.returningRealtime"
+            : "status.returnToRealtime", {}, locale)}
+        </button>
+      )}
 
       <MainChartLegend
         allowSourceCrosshairFallback={!usesDerivedAxis}

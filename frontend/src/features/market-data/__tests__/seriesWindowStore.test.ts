@@ -200,6 +200,57 @@ test("a generic right-truncated store keeps authoritative range convergence enab
   assert.deepEqual(store.snapshot().map((row) => row.time), [4, 5, 6]);
 });
 
+test("a trusted forward page advances a fenced historical window without enabling realtime", () => {
+  const store = new SeriesWindowStore({
+    intervalSeconds: 1,
+    maxBars: 3,
+    rightTruncatedFuturePolicy: "reject",
+  });
+  store.replace(rows([4, 5, 6]));
+  store.applyRange(rows([1, 2, 3]));
+
+  const page = store.applyForwardPage(rows([4, 5, 6]), { source: "right-window-page" });
+  const blockedTick = store.applyTick(rows([100])[0]);
+
+  assert.equal(page.type, WINDOW_DELTA_TYPES.APPEND);
+  assert.equal(page.trimmedLeft, 3);
+  assert.equal(store.rightTruncated, true);
+  assert.equal(blockedTick.type, WINDOW_DELTA_TYPES.NOOP);
+  assert.deepEqual(store.snapshot().map((row) => row.time), [4, 5, 6]);
+});
+
+test("only a verified current-tail transition re-enables realtime ticks", () => {
+  const store = new SeriesWindowStore({
+    intervalSeconds: 1,
+    maxBars: 3,
+    rightTruncatedFuturePolicy: "reject",
+  });
+  store.replace(rows([4, 5, 6]));
+  store.applyRange(rows([1, 2, 3]));
+  store.applyForwardPage(rows([4, 5, 6]));
+
+  assert.equal(store.markRightEdgeCurrent(), true);
+  assert.equal(store.markRightEdgeCurrent(), false);
+  assert.equal(store.applyTick(rows([7])[0]).type, WINDOW_DELTA_TYPES.TICK);
+  assert.equal(store.rightTruncated, false);
+  assert.deepEqual(store.snapshot().map((row) => row.time), [5, 6, 7]);
+});
+
+test("a forward page cannot be used outside a right-truncated window", () => {
+  const store = new SeriesWindowStore({
+    intervalSeconds: 1,
+    maxBars: 3,
+    rightTruncatedFuturePolicy: "reject",
+  });
+  store.replace(rows([1, 2, 3]));
+
+  const delta = store.applyForwardPage(rows([4, 5, 6]));
+
+  assert.equal(delta.type, WINDOW_DELTA_TYPES.NOOP);
+  assert.equal(delta.rejectedForwardPage, true);
+  assert.deepEqual(store.snapshot().map((row) => row.time), [1, 2, 3]);
+});
+
 test("prepend retention reports incoming rows discarded beyond the window budget", () => {
   const store = new SeriesWindowStore({ intervalSeconds: 1, maxBars: 3 });
   store.replace(rows([5, 6, 7]));

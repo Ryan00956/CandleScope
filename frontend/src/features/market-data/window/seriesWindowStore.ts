@@ -339,11 +339,45 @@ export class SeriesWindowStore {
     rows: readonly KlineBarInput[] | null | undefined,
     meta: WindowDeltaDetail = {},
   ): WindowDelta {
+    return this._applyRange(rows, meta, false);
+  }
+
+  /**
+   * Merge one explicitly requested chronological page to the right of a
+   * bounded historical window. Ordinary range/tick writers remain fenced so
+   * realtime traffic cannot impersonate this navigation authority.
+   */
+  applyForwardPage(
+    rows: readonly KlineBarInput[] | null | undefined,
+    meta: WindowDeltaDetail = {},
+  ): WindowDelta {
+    if (!this._rightTruncated) {
+      return createWindowDelta(WINDOW_DELTA_TYPES.NOOP, {
+        ...meta,
+        rejectedForwardPage: true,
+      });
+    }
+    return this._applyRange(rows, meta, true);
+  }
+
+  /** Mark a verified forward traversal as reattached to the current tail. */
+  markRightEdgeCurrent(): boolean {
+    if (!this._rightTruncated) return false;
+    this._rightTruncated = false;
+    return true;
+  }
+
+  private _applyRange(
+    rows: readonly KlineBarInput[] | null | undefined,
+    meta: WindowDeltaDetail,
+    allowFutureRows: boolean,
+  ): WindowDelta {
     let incoming = normalizeRows(rows);
     if (!incoming.length) return createWindowDelta(WINDOW_DELTA_TYPES.NOOP);
     const originalIncomingBars = incoming.length;
     const rightBoundaryTime = this._rightTruncated
       && this.rightTruncatedFuturePolicy === "reject"
+      && !allowFutureRows
       ? this._lastTime()
       : null;
     if (rightBoundaryTime != null) {

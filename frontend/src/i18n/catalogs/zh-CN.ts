@@ -58,6 +58,8 @@ export const zhCN = {
   "status.barCount.one": "{count} 根 K 线",
   "status.loadingOlder": "正在加载更早数据…",
   "status.noMoreHistory": "没有更多历史",
+  "status.returnToRealtime": "回到实时",
+  "status.returningRealtime": "正在返回实时…",
   "status.mockUnavailable": "{exchange} 不可用，正在使用模拟数据",
   "status.exchangeCapabilitiesFallback": "交易所能力回退",
   "status.exchangeLimitationCount": "{count} 条交易所限制",

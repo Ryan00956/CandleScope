@@ -144,6 +144,18 @@ interface PatchChartDataOptions {
   source?: string;
 }
 
+interface ForwardChartDataOptions {
+  reachedLatest?: boolean;
+  source?: string;
+}
+
+type CommitForwardChartData = (
+  symbol: SymbolCode,
+  interval: IntervalString,
+  rows: KlineBar[],
+  options?: ForwardChartDataOptions,
+) => boolean;
+
 interface UseChartDataRuntimeOptions {
   exchange: ExchangeId;
   marketType: MarketType;
@@ -173,6 +185,7 @@ export interface ChartDataRuntime {
   clearChartData(source?: string, symbol?: SymbolCode, interval?: IntervalString): void;
   markChartDataTransition(symbol: SymbolCode, interval: IntervalString, source?: string): void;
   commitMergedChartData: CommitChartData;
+  commitForwardChartData: CommitForwardChartData;
   commitPatchedChartData: CommitChartData;
 }
 
@@ -1324,6 +1337,71 @@ export function useChartDataRuntime({
     touchCacheMeta,
   ]);
 
+  const commitForwardChartData = useCallback<CommitForwardChartData>((
+    sym,
+    intv,
+    incoming,
+    { reachedLatest = false, source = "right-window-page" } = {},
+  ) => {
+    const key = cacheKey(sym, intv);
+    const store = getStore(sym, intv, { meta: { source } });
+    if (store.isEmpty() || !store.rightTruncated) return false;
+
+    const delta = store.applyForwardPage(incoming, { source });
+    const rightEdgeStateChanged = reachedLatest && store.markRightEdgeCurrent();
+    if (delta.type === WINDOW_DELTA_TYPES.NOOP && !rightEdgeStateChanged) return false;
+
+    const next = store.snapshot({ force: delta.changed });
+    const deferIndicatorWindow = delta.changed
+      && indicatorWindowCommitBufferRef.current.hasPending(key);
+    const indicatorWindowCommit = delta.changed
+      ? indicatorWindowCommitBufferRef.current.record(key, delta.changedRanges, {
+          pending: deferIndicatorWindow,
+        })
+      : { ranges: [] as NonNullable<WindowDelta["changedRanges"]>, deferred: false };
+
+    registerStoreResource(key, store, { symbol: sym, interval: intv, source });
+    touchCacheMeta(key, {
+      symbol: sym,
+      interval: intv,
+      marketType,
+      exchange,
+      lastUpdatedMs: Date.now(),
+      source,
+      trimmedLeft: delta.trimmedLeft || 0,
+    });
+    if (ownsActiveChart(key)) {
+      chartDataRef.current = next;
+      setActiveSeriesStore(store);
+      recordChartDataCommit(sym, intv, next, source, {
+        incomingBars: incoming.length,
+        incomingFirstTime: incoming[0]?.time ?? null,
+        incomingLastTime: incoming[incoming.length - 1]?.time ?? null,
+        status: "ready",
+        ...(delta.originalBars === undefined ? {} : { originalBars: delta.originalBars }),
+        ...(delta.trimmedLeft === undefined ? {} : { trimmedLeft: delta.trimmedLeft }),
+        ...(delta.trimmedRight === undefined ? {} : { trimmedRight: delta.trimmedRight }),
+        windowDeltaType: delta.type,
+        addedLeft: delta.addedLeft || 0,
+        addedRight: delta.addedRight || 0,
+        changedRanges: indicatorWindowCommit.ranges,
+        indicatorWindowDeferred: indicatorWindowCommit.deferred,
+        rightEdgeCurrent: !store.rightTruncated,
+      });
+      if (delta.changed) setChartData(next);
+    }
+    return true;
+  }, [
+    cacheKey,
+    exchange,
+    getStore,
+    marketType,
+    ownsActiveChart,
+    recordChartDataCommit,
+    registerStoreResource,
+    touchCacheMeta,
+  ]);
+
   const commitPatchedChartData = useCallback((
     sym: SymbolCode,
     intv: IntervalString,
@@ -1576,6 +1654,7 @@ export function useChartDataRuntime({
     clearChartData,
     markChartDataTransition,
     commitMergedChartData,
+    commitForwardChartData,
     commitPatchedChartData,
   };
 }

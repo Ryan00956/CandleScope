@@ -200,13 +200,25 @@ test("continuous drawing preference is shared by the toolbar and drawing surface
   assert.deepEqual(changes, [false]);
 });
 
-test("latest-window recovery reaches the chart surface", () => {
+test("right-edge paging and explicit latest recovery reach separate chart actions", () => {
+  const loadMoreRight = async () => true;
+  const restoreLatestWindow = async () => true;
+  const model = buildChartWorkspaceViewModel(buildContext({
+    marketActions: { loadMoreRight, restoreLatestWindow },
+  }));
+
+  assert.equal(model.chart.chartProps.onNeedMoreRight, loadMoreRight);
+  assert.equal(model.chart.chartProps.onRestoreLatestWindow, restoreLatestWindow);
+});
+
+test("legacy sources may still use latest recovery as their right-edge action", () => {
   const restoreLatestWindow = async () => true;
   const model = buildChartWorkspaceViewModel(buildContext({
     marketActions: { restoreLatestWindow },
   }));
 
   assert.equal(model.chart.chartProps.onNeedMoreRight, restoreLatestWindow);
+  assert.equal(model.chart.chartProps.onRestoreLatestWindow, undefined);
 });
 
 test("latest-window recovery is gated while left history owns the runtime", () => {

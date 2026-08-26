@@ -168,6 +168,7 @@ function createStaticMarketData(
     actions: {
       retry() {},
       async loadMoreLeft() {},
+      async loadMoreRight() { return false; },
       async restoreLatestWindow() { return false; },
       onCrosshairMove() {},
       onVisibleRangeChange() {},
@@ -176,9 +177,11 @@ function createStaticMarketData(
     status: {
       hasMoreLeft: false,
       loadingMoreLeft: false,
+      loadingMoreRight: false,
       initialHistoryPending: false,
       activeChartReady: bars.length > 0,
       canLoadMoreLeft: false,
+      canLoadMoreRight: false,
       canRestoreLatestWindow: false,
       barCount: bars.length,
       cacheDiagnostics: () => ({ source, bars: view.bars.length }),

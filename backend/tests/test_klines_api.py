@@ -385,6 +385,49 @@ def test_strict_range_withholds_contiguous_but_untrusted_rows() -> None:
     assert permissive_payload["complete"] is False
 
 
+def test_range_reports_exact_latest_closed_bar_boundary(monkeypatch) -> None:
+    class _RangeDataManager:
+        def query(self, symbol, interval, *, exchange, market_type, **kwargs) -> QueryResult:
+            bars = [
+                BarData(time=60, open=1, high=2, low=1, close=2, volume=1),
+                BarData(time=120, open=2, high=3, low=2, close=3, volume=1),
+            ]
+            return QueryResult(
+                bars=bars,
+                symbol=symbol,
+                interval=interval,
+                exchange=exchange,
+                market_type=market_type,
+                source=QuerySource.STORAGE,
+                total=len(bars),
+                history_state="ready",
+                complete=True,
+                metadata={"all_rows_final": True},
+            )
+
+    monkeypatch.setattr(
+        klines_api,
+        "_last_closed_open_ms",
+        lambda interval, *args, **kwargs: 120_000,
+    )
+    response = _client(_RangeDataManager()).get(
+        "/api/v1/klines/range",
+        params={
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "start_ms": 60_000,
+            "end_ms": 120_000,
+            "repair": "none",
+            "strict": True,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["effective_end_ms"] == 120_000
+    assert payload["reached_latest_closed_bar"] is True
+
+
 def test_get_klines_returns_503_without_data_manager() -> None:
     client = _client()
 

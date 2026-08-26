@@ -12,6 +12,7 @@ export function bindMarketChartSurfaceProps(input: {
   paused?: boolean;
 }): MarketChartSurfaceChartProps {
   const { source, chartProps } = input;
+  const loadMoreRight = source.marketData.actions.loadMoreRight;
   const restoreLatestWindow = source.marketData.actions.restoreLatestWindow;
   return {
     ...chartProps,
@@ -22,8 +23,13 @@ export function bindMarketChartSurfaceProps(input: {
     loading: source.marketData.view.loading,
     dataMeta: source.marketData.view.meta,
     onNeedMoreLeft: source.marketData.actions.loadMoreLeft,
-    ...(restoreLatestWindow ? { onNeedMoreRight: restoreLatestWindow } : {}),
+    ...((loadMoreRight ?? restoreLatestWindow)
+      ? { onNeedMoreRight: loadMoreRight ?? restoreLatestWindow }
+      : {}),
+    ...(loadMoreRight && restoreLatestWindow ? { onRestoreLatestWindow: restoreLatestWindow } : {}),
     canLoadMoreLeft: source.marketData.status.canLoadMoreLeft,
+    canLoadMoreRight: source.marketData.status.canLoadMoreRight
+      ?? source.marketData.status.canRestoreLatestWindow,
     canRestoreLatestWindow: source.marketData.status.canRestoreLatestWindow,
     onCrosshairMove: chartProps.onCrosshairMove ?? source.marketData.actions.onCrosshairMove,
     onVisibleRangeChange: chartProps.onVisibleRangeChange

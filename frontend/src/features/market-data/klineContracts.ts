@@ -36,6 +36,7 @@ export interface WindowDeltaDetail extends Record<string, unknown> {
   originalIncomingBars?: number;
   ignoredRightTruncatedRows?: number;
   rightBoundaryTime?: EpochSeconds;
+  rejectedForwardPage?: boolean;
   trimmedLeft?: number;
   trimmedRight?: number;
   changedRanges?: WindowChangedRange[];
@@ -84,6 +85,7 @@ export interface KlineFetchResult extends Record<string, unknown> {
   all_rows_final?: boolean;
   has_more?: boolean;
   has_tail_gap?: boolean;
+  reached_latest_closed_bar?: boolean;
   source?: string;
   start_ms?: unknown;
   end_ms?: unknown;

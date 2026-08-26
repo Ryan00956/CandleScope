@@ -199,7 +199,10 @@ test("surface binding takes session, series, status, and paging only from source
   assert.equal(bound.datasetKey, "dataset-1:epoch-1");
   assert.equal(bound.seriesStore, source.marketData.view.seriesStore);
   assert.equal(bound.loading, false);
+  assert.equal(bound.onNeedMoreRight, source.marketData.actions.loadMoreRight);
+  assert.equal(bound.onRestoreLatestWindow, source.marketData.actions.restoreLatestWindow);
   assert.equal(bound.canLoadMoreLeft, false);
+  assert.equal(bound.canLoadMoreRight, false);
   assert.equal(bound.canRestoreLatestWindow, false);
   assert.equal(bound.suspended, true);
   assert.deepEqual(bound.subPanes, [ownPane, chartPane]);

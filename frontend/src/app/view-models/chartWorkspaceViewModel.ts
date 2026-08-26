@@ -111,10 +111,16 @@ export function buildChartWorkspaceViewModel({
         loading: marketView.loading,
         onCrosshairMove: marketActions.onCrosshairMove,
         onNeedMoreLeft: marketActions.loadMoreLeft,
-        ...(marketActions.restoreLatestWindow === undefined ? {} : {
-          onNeedMoreRight: marketActions.restoreLatestWindow,
+        ...((marketActions.loadMoreRight ?? marketActions.restoreLatestWindow) === undefined ? {} : {
+          onNeedMoreRight: marketActions.loadMoreRight ?? marketActions.restoreLatestWindow,
+        }),
+        ...(marketActions.loadMoreRight === undefined
+          || marketActions.restoreLatestWindow === undefined ? {} : {
+          onRestoreLatestWindow: marketActions.restoreLatestWindow,
         }),
         canLoadMoreLeft: marketStatus.canLoadMoreLeft,
+        canLoadMoreRight: marketStatus.canLoadMoreRight
+          ?? marketStatus.canRestoreLatestWindow,
         canRestoreLatestWindow: marketStatus.canRestoreLatestWindow,
         datasetKey,
         upColor: chartSettings.upColor,

@@ -8663,6 +8663,38 @@ body {
   overflow: hidden;
 }
 
+.chart-return-to-realtime {
+  position: absolute;
+  right: 72px;
+  bottom: 30px;
+  z-index: 14;
+  padding: 6px 11px;
+  border: 1px solid rgba(56, 189, 248, 0.45);
+  border-radius: 999px;
+  color: #e0f2fe;
+  background: rgba(3, 105, 161, 0.88);
+  box-shadow: 0 4px 14px rgba(2, 8, 23, 0.24);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.chart-return-to-realtime:hover:not(:disabled) {
+  background: rgba(2, 132, 199, 0.94);
+}
+
+.chart-return-to-realtime:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+[data-theme='light'] .chart-return-to-realtime {
+  color: #f8fafc;
+  border-color: rgba(2, 132, 199, 0.38);
+  background: rgba(3, 105, 161, 0.9);
+}
+
 .synthetic-chart-notice {
   position: absolute;
   top: 8px;

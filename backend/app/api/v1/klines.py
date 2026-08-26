@@ -2542,10 +2542,13 @@ async def get_klines_range(
     )
 
     now_ms = int(time.time() * 1000)
-    effective_end_ms = min(
-        end_ms,
-        _last_closed_open_ms(interval, now_ms, calendar=calendar),
+    latest_closed_open_ms = _last_closed_open_ms(
+        interval,
+        now_ms,
+        calendar=calendar,
     )
+    effective_end_ms = min(end_ms, latest_closed_open_ms)
+    reached_latest_closed_bar = end_ms >= latest_closed_open_ms
     if effective_end_ms < start_ms:
         return {
             "exchange": exchange,
@@ -2555,6 +2558,7 @@ async def get_klines_range(
             "start_ms": start_ms,
             "end_ms": end_ms,
             "effective_end_ms": effective_end_ms,
+            "reached_latest_closed_bar": reached_latest_closed_bar,
             "query_start_ms": start_ms,
             "query_end_ms": effective_end_ms,
             "truncated": False,
@@ -2727,6 +2731,7 @@ async def get_klines_range(
         "start_ms": start_ms,
         "end_ms": end_ms,
         "effective_end_ms": effective_end_ms,
+        "reached_latest_closed_bar": reached_latest_closed_bar,
         "query_start_ms": query_start_ms,
         "query_end_ms": query_end_ms,
         "truncated": range_cap["truncated"],

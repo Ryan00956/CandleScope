@@ -258,6 +258,7 @@ export function parseKlineResponse(
     "verified_contiguous",
     "all_rows_final",
     "renderable",
+    "reached_latest_closed_bar",
   ]) {
     optionalBoolean(record, key, path);
   }

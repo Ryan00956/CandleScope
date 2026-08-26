@@ -49,6 +49,11 @@ import type { ExchangeId, MarketType, SymbolCode } from "../../utils/symbolKey.j
 import type { MarketDataRuntimeContract } from "./marketDataRuntimeContract.js";
 import { getClientInstanceId } from "../../services/api.js";
 import { useMarketDataWorkspaceResources } from "./marketDataWorkspaceContext.js";
+import {
+  planRightWindowPage,
+  rightWindowPageReachedLatest,
+  rightWindowPageRowsAreBounded,
+} from "./rightWindowPagination.js";
 
 let chartDemandScopeSequence = 0;
 const chartDemandScopeRuntimeId = [
@@ -266,6 +271,7 @@ export function useMarketDataRuntime({
     replaceChartData,
     markChartDataTransition,
     commitMergedChartData,
+    commitForwardChartData,
     commitPatchedChartData,
   } = useChartDataRuntime({
     exchange,
@@ -312,6 +318,19 @@ export function useMarketDataRuntime({
     restoringLatestWindowRef.current = value;
     setRestoringLatestWindowState(value);
   }, []);
+  const rightWindowPageRequestIdRef = useRef(0);
+  const rightWindowPageAbortRef = useRef<AbortController | null>(null);
+  const rightWindowPageInFlightRef = useRef<{
+    requestId: number;
+    sessionKey: string;
+    promise: Promise<boolean>;
+  } | null>(null);
+  const [loadingMoreRight, setLoadingMoreRightState] = useState(false);
+  const loadingMoreRightRef = useRef(false);
+  const setLoadingMoreRight = useCallback((value: boolean) => {
+    loadingMoreRightRef.current = value;
+    setLoadingMoreRightState(value);
+  }, []);
   const requestDemandRef = useRef<{
     scope: string;
     generation: number;
@@ -334,14 +353,22 @@ export function useMarketDataRuntime({
     rightWindowRestoreAbortRef.current?.abort();
     rightWindowRestoreAbortRef.current = null;
     rightWindowRestoreInFlightRef.current = null;
+    rightWindowPageAbortRef.current?.abort();
+    rightWindowPageAbortRef.current = null;
+    rightWindowPageInFlightRef.current = null;
     setRestoringLatestWindow(false);
+    setLoadingMoreRight(false);
     return () => {
       rightWindowRestoreAbortRef.current?.abort();
       rightWindowRestoreAbortRef.current = null;
       rightWindowRestoreInFlightRef.current = null;
+      rightWindowPageAbortRef.current?.abort();
+      rightWindowPageAbortRef.current = null;
+      rightWindowPageInFlightRef.current = null;
       restoringLatestWindowRef.current = false;
+      loadingMoreRightRef.current = false;
     };
-  }, [sessionKey, setRestoringLatestWindow]);
+  }, [sessionKey, setLoadingMoreRight, setRestoringLatestWindow]);
   const nativeIntervalValues = useMemo(
     () => nativeIntervals.map((item) => item.value),
     [nativeIntervals],
@@ -558,6 +585,143 @@ export function useMarketDataRuntime({
     commitMergedChartData,
   });
 
+  const loadMoreRight = useCallback((): Promise<boolean> => {
+    backgroundPrefetchPriority.yieldToForeground();
+    if (!marketDataReady || activeSessionKeyRef.current !== sessionKey) {
+      return Promise.resolve(false);
+    }
+    const currentRequest = rightWindowPageInFlightRef.current;
+    if (currentRequest?.sessionKey === sessionKey) return currentRequest.promise;
+    if (
+      rightWindowRestoreInFlightRef.current != null
+      || loadingMoreRightRef.current
+      || hasActivePaginationOwnership()
+      || !canRequestRightWindowRestoreDuringRuntime({
+        loading,
+        loadingMoreLeft,
+        marketDataReady,
+        paginationPhase: paginationState.phase,
+      })
+      || !activeSeriesStore?.rightTruncated
+    ) return Promise.resolve(false);
+
+    const lastLoaded = activeSeriesStore.last();
+    const plan = planRightWindowPage(interval, lastLoaded?.time);
+    const demand = requestDemandRef.current;
+    if (!plan || !demand?.ready || demand.sessionKey !== sessionKey) {
+      return Promise.resolve(false);
+    }
+
+    resetPagination();
+    const series = { exchange, marketType, symbol, interval };
+    const epoch = seriesDataFeed.beginEpoch(series);
+    const controller = new AbortController();
+    rightWindowPageAbortRef.current?.abort();
+    rightWindowPageAbortRef.current = controller;
+    const requestId = rightWindowPageRequestIdRef.current + 1;
+    rightWindowPageRequestIdRef.current = requestId;
+    const expectedDemandScope = demand.scope;
+    const expectedDemandGeneration = demand.generation;
+    const owner = {
+      requestId,
+      sessionKey,
+      promise: Promise.resolve(false),
+    };
+    rightWindowPageInFlightRef.current = owner;
+    setLoadingMoreRight(true);
+
+    const ownsRequest = () => {
+      const currentDemand = requestDemandRef.current;
+      return rightWindowPageInFlightRef.current === owner
+        && currentDemand?.ready === true
+        && currentDemand.sessionKey === sessionKey
+        && currentDemand.scope === expectedDemandScope
+        && currentDemand.generation === expectedDemandGeneration
+        && shouldCommitRightWindowRestore({
+          aborted: controller.signal.aborted,
+          active: seriesDataFeed.shouldCommitActive(series),
+          currentEpoch: seriesDataFeed.currentEpoch(series),
+          currentSessionKey: activeSessionKeyRef.current,
+          expectedEpoch: epoch,
+          expectedSessionKey: sessionKey,
+        });
+    };
+
+    const promise = (async () => {
+      try {
+        const result = await seriesDataFeed.getRange(series, {
+          start: plan.start,
+          end: plan.end,
+          repair: "wait",
+          waitMs: 1_500,
+          strict: true,
+          source: "right-window-page",
+          signal: controller.signal,
+          commit: "none",
+          maxPages: 1,
+        });
+        const reachedLatest = rightWindowPageReachedLatest(result, plan);
+        const rows = result.data || [];
+        const settledEmptyTail = reachedLatest
+          && rows.length === 0
+          && result.complete === true;
+        if (
+          !ownsRequest()
+          || result.stale
+          || result.active === false
+          || isKlineResultRepairPending(result)
+          || result.verified_contiguous !== true
+          || !rightWindowPageRowsAreBounded(rows, plan)
+          || (!settledEmptyTail && (rows.length === 0 || result.all_rows_final !== true))
+        ) return false;
+
+        const committed = commitForwardChartData(symbol, interval, rows, {
+          reachedLatest,
+          source: reachedLatest ? "right-window-page-current" : "right-window-page",
+        });
+        if (!committed) return false;
+        setHasMoreLeft(true);
+        setDataSource(result.source || "right-window-page");
+        setConnectionStatus("connected");
+        setError(null);
+        return true;
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          console.warn("Next K-line history page failed; retaining the current historical window", error);
+        }
+        return false;
+      } finally {
+        if (rightWindowPageInFlightRef.current === owner) {
+          rightWindowPageInFlightRef.current = null;
+          setLoadingMoreRight(false);
+        }
+        if (rightWindowPageAbortRef.current === controller) {
+          rightWindowPageAbortRef.current = null;
+        }
+      }
+    })();
+    owner.promise = promise;
+    return promise;
+  }, [
+    activeSeriesStore,
+    backgroundPrefetchPriority,
+    commitForwardChartData,
+    exchange,
+    hasActivePaginationOwnership,
+    interval,
+    loading,
+    loadingMoreLeft,
+    marketDataReady,
+    marketType,
+    paginationState.phase,
+    resetPagination,
+    seriesDataFeed,
+    sessionKey,
+    setHasMoreLeft,
+    setLoadingMoreRight,
+    symbol,
+  ]);
+
   const restoreLatestWindow = useCallback((): Promise<boolean> => {
     backgroundPrefetchPriority.yieldToForeground();
     if (!marketDataReady || activeSessionKeyRef.current !== sessionKey) {
@@ -565,6 +729,10 @@ export function useMarketDataRuntime({
     }
     const currentRequest = rightWindowRestoreInFlightRef.current;
     if (currentRequest?.sessionKey === sessionKey) return currentRequest.promise;
+    rightWindowPageAbortRef.current?.abort();
+    rightWindowPageAbortRef.current = null;
+    rightWindowPageInFlightRef.current = null;
+    setLoadingMoreRight(false);
     if (hasActivePaginationOwnership() || !canRequestRightWindowRestoreDuringRuntime({
       loading,
       loadingMoreLeft,
@@ -674,6 +842,7 @@ export function useMarketDataRuntime({
     seriesDataFeed,
     sessionKey,
     setHasMoreLeft,
+    setLoadingMoreRight,
     setRestoringLatestWindow,
     symbol,
     updateLastPrice,
@@ -764,7 +933,7 @@ export function useMarketDataRuntime({
       loading: loadingRef.current,
       pendingInitial: initialHistoryPending,
       pendingRepairs: seriesDataFeed.pendingRepairCount(activeSeries),
-      restoringLatestWindow: restoringLatestWindowRef.current,
+      restoringLatestWindow: restoringLatestWindowRef.current || loadingMoreRightRef.current,
     });
   }, [
     exchange,
@@ -788,7 +957,7 @@ export function useMarketDataRuntime({
       symbol,
       interval,
     }),
-    restoringLatestWindow,
+    restoringLatestWindow: restoringLatestWindow || loadingMoreRight,
   });
   useLayoutEffect(() => {
     const current = foregroundBusyLeaseRef.current;
@@ -840,6 +1009,7 @@ export function useMarketDataRuntime({
       && marketDataReady
       && !loading
       && !loadingMoreLeft
+      && !loadingMoreRight
       && !initialHistoryPending
       && indicatorRangeRequests.length === 0,
   });
@@ -943,7 +1113,11 @@ export function useMarketDataRuntime({
     rightWindowRestoreAbortRef.current?.abort();
     rightWindowRestoreAbortRef.current = null;
     rightWindowRestoreInFlightRef.current = null;
+    rightWindowPageAbortRef.current?.abort();
+    rightWindowPageAbortRef.current = null;
+    rightWindowPageInFlightRef.current = null;
     setRestoringLatestWindow(false);
+    setLoadingMoreRight(false);
     resetPagination();
     void loadData(symbol, interval, marketType, exchange);
   }, [
@@ -954,6 +1128,7 @@ export function useMarketDataRuntime({
     marketDataReady,
     marketType,
     resetPagination,
+    setLoadingMoreRight,
     setRestoringLatestWindow,
     symbol,
   ]);
@@ -1024,6 +1199,7 @@ export function useMarketDataRuntime({
     actions: {
       retry,
       loadMoreLeft: loadMoreLeftWithPriority,
+      loadMoreRight,
       restoreLatestWindow,
       onCrosshairMove: publishCrosshairData,
       onVisibleRangeChange: handleMarketVisibleRangeChange,
@@ -1032,6 +1208,7 @@ export function useMarketDataRuntime({
     status: {
       hasMoreLeft,
       loadingMoreLeft,
+      loadingMoreRight,
       initialHistoryPending,
       activeChartReady,
       canLoadMoreLeft: canRequestMoreLeftDuringRuntime({
@@ -1039,15 +1216,25 @@ export function useMarketDataRuntime({
         loading,
         loadingMoreLeft,
         marketDataReady,
-        restoringLatestWindow,
+        restoringLatestWindow: restoringLatestWindow || loadingMoreRight,
       }),
+      canLoadMoreRight: !hasActivePaginationOwnership()
+        && activeSeriesStore?.rightTruncated === true
+        && canRequestRightWindowRestoreDuringRuntime({
+          loading,
+          loadingMoreLeft,
+          marketDataReady,
+          paginationPhase: paginationState.phase,
+        })
+        && !restoringLatestWindow
+        && !loadingMoreRight,
       canRestoreLatestWindow: !hasActivePaginationOwnership()
         && canRequestRightWindowRestoreDuringRuntime({
         loading,
         loadingMoreLeft,
         marketDataReady,
         paginationPhase: paginationState.phase,
-      }) && !restoringLatestWindow,
+      }) && !restoringLatestWindow && !loadingMoreRight,
       barCount: chartData.length,
       cacheDiagnostics: getCacheDiagnostics,
       trimCacheEntries,

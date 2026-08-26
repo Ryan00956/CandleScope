@@ -60,6 +60,8 @@ export const en = {
   "status.barCount.one": "{count} bar",
   "status.loadingOlder": "Loading older data...",
   "status.noMoreHistory": "No more history",
+  "status.returnToRealtime": "Return to realtime",
+  "status.returningRealtime": "Returning to realtime...",
   "status.mockUnavailable": "{exchange} unavailable, using mock data",
   "status.exchangeCapabilitiesFallback": "Exchange capabilities fallback",
   "status.exchangeLimitationCount": "{count} exchange limitations",

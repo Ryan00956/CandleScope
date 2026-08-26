@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { getLocale, t, translateMarketType } from "../../i18n/index.js";
 import { useLocale } from "../../i18n/useLocale.js";
+import { useRightDrawerResize } from "../../shared/useRightDrawerResize.js";
 import {
   createAlertRule,
   deleteAlertRule,
@@ -37,7 +38,6 @@ import {
 import { parseSymbolKey } from "../../utils/symbolKey";
 import type {
   Dispatch,
-  MouseEvent as ReactMouseEvent,
   ReactNode,
   SetStateAction,
 } from "react";
@@ -896,8 +896,15 @@ export default function AlertsPanel({
 }: AlertsPanelProps) {
   const locale = useLocale();
   const [tab, setTab] = useState<AlertTab>("add");
-  const [panelWidth, setPanelWidth] = useState(520);
-  const [isResizing, setIsResizing] = useState(false);
+  const {
+    width: panelWidth,
+    isResizing,
+    resizeHandleProps,
+  } = useRightDrawerResize({
+    initialWidth: 520,
+    minWidth: 430,
+    maxWidth: 780,
+  });
   const [selectedProductKey, setSelectedProductKey] = useState("");
   const [selectedInterval, setSelectedInterval] = useState("");
   const [rules, setRules] = useState<AlertRule[]>([]);
@@ -1283,33 +1290,6 @@ export default function AlertsPanel({
     }
   }, [loadAlerts]);
 
-  const startResizing = useCallback((event: ReactMouseEvent<HTMLDivElement>) => {
-    setIsResizing(true);
-    event.preventDefault();
-  }, []);
-
-  const stopResizing = useCallback(() => {
-    setIsResizing(false);
-  }, []);
-
-  const resize = useCallback((event: MouseEvent) => {
-    if (!isResizing) return;
-    const nextWidth = window.innerWidth - event.clientX;
-    if (nextWidth >= 430 && nextWidth <= Math.min(window.innerWidth - 80, 780)) {
-      setPanelWidth(nextWidth);
-    }
-  }, [isResizing]);
-
-  useEffect(() => {
-    if (!isResizing) return undefined;
-    window.addEventListener("mousemove", resize);
-    window.addEventListener("mouseup", stopResizing);
-    return () => {
-      window.removeEventListener("mousemove", resize);
-      window.removeEventListener("mouseup", stopResizing);
-    };
-  }, [isResizing, resize, stopResizing]);
-
   useEffect(() => {
     if (intervalLabel && intervalLabel !== "--") {
       setSelectedInterval((prev) => prev || intervalLabel);
@@ -1337,15 +1317,15 @@ export default function AlertsPanel({
   if (!isOpen) return null;
 
   return (
-    <div className="alert-panel-overlay" onClick={onClose}>
+    <div className={`alert-panel-overlay right-drawer-overlay ${isResizing ? "is-resizing" : ""}`}>
       <aside
         className="alert-panel"
         style={{ width: `${panelWidth}px` }}
-        onClick={(event) => event.stopPropagation()}
       >
         <div
-          className={`alert-resize-handle ${isResizing ? "active" : ""}`}
-          onMouseDown={startResizing}
+          {...resizeHandleProps}
+          className="right-drawer-resize-handle"
+          aria-label={t("rail.resizeWidth")}
         />
 
         <div className="alert-panel-header">
@@ -1360,7 +1340,14 @@ export default function AlertsPanel({
             </div>
             <div className="alert-panel-subtitle">{deliveryStatusLabel}</div>
           </div>
-          <button className="alert-panel-close" onClick={onClose} type="button">✕</button>
+          <button
+            className="alert-panel-close"
+            onClick={onClose}
+            type="button"
+            aria-label={t("alert.closePanel")}
+          >
+            ✕
+          </button>
         </div>
 
         <div className="alert-context-card">

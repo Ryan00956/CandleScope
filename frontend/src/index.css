@@ -5866,21 +5866,43 @@ body {
   overflow: hidden;
 }
 
-.alert-resize-handle {
+.right-drawer-resize-handle {
   position: absolute;
-  left: -2px;
+  left: 0;
   top: 0;
   bottom: 0;
-  width: 6px;
+  width: 8px;
+  padding: 0;
+  border: 0;
   cursor: col-resize;
-  z-index: 5;
+  z-index: 10;
   background: transparent;
-  transition: background-color 0.15s ease;
+  touch-action: none;
 }
 
-.alert-resize-handle:hover,
-.alert-resize-handle.active {
-  background: #f59e0b;
+.right-drawer-resize-handle::after {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 2px;
+  background: var(--accent-blue);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.right-drawer-resize-handle:hover::after,
+.right-drawer-resize-handle:focus-visible::after,
+.right-drawer-overlay.is-resizing .right-drawer-resize-handle::after {
+  opacity: 1;
+}
+
+.right-drawer-resize-handle:focus-visible {
+  outline: none;
+}
+
+.right-drawer-overlay.is-resizing {
+  cursor: col-resize;
+  user-select: none;
 }
 
 .alert-panel-header {
@@ -6917,7 +6939,7 @@ body {
 }
 
 .alert-panel {
-  min-width: min(520px, 94vw);
+  min-width: 0;
   background:
     linear-gradient(180deg, rgba(15, 23, 42, 0.98), rgba(10, 14, 23, 0.98)),
     var(--bg-secondary);
@@ -6930,11 +6952,6 @@ body {
     linear-gradient(180deg, rgba(248, 250, 252, 0.98), rgba(241, 245, 249, 0.98)),
     var(--bg-secondary);
   box-shadow: -18px 0 42px rgba(15, 23, 42, 0.16);
-}
-
-.alert-resize-handle:hover,
-.alert-resize-handle.active {
-  background: var(--accent-blue);
 }
 
 .alert-panel-header {

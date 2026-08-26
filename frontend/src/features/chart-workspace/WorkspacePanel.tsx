@@ -6,6 +6,7 @@ import {
 } from "react";
 import { t, type MessageKey } from "../../i18n/index.js";
 import { useLocale } from "../../i18n/useLocale.js";
+import { useRightDrawerResize } from "../../shared/useRightDrawerResize.js";
 import type { ChartLinkViewportIssue } from "./chartLinkCoordinator.js";
 import {
   summarizeChartDrawingLink,
@@ -237,22 +238,27 @@ export default function WorkspacePanel({
   const [selectedGroupId, setSelectedGroupId] = useState<ChartLinkGroupId | null>(
     runtime.view.activeCell.linkGroupId,
   );
+  const {
+    width: panelWidth,
+    isResizing,
+    resizeHandleProps,
+  } = useRightDrawerResize({
+    initialWidth: 430,
+    minWidth: 360,
+    maxWidth: 780,
+  });
 
   useEffect(() => {
     if (!isOpen) return undefined;
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
+      if (event.key !== "Escape" || !editingName) return;
       event.preventDefault();
-      if (editingName) {
-        setEditingName(false);
-        setNameDraft(runtime.view.activeWorkspaceName);
-        return;
-      }
-      onClose();
+      setEditingName(false);
+      setNameDraft(runtime.view.activeWorkspaceName);
     };
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [editingName, isOpen, onClose, runtime.view.activeWorkspaceName]);
+  }, [editingName, isOpen, runtime.view.activeWorkspaceName]);
 
   if (!isOpen) return null;
 
@@ -298,14 +304,19 @@ export default function WorkspacePanel({
   };
 
   return (
-    <div className="workspace-panel-overlay" onClick={onClose}>
+    <div className={`workspace-panel-overlay right-drawer-overlay ${isResizing ? "is-resizing" : ""}`}>
       <aside
         className="workspace-panel"
         role="dialog"
         aria-modal="true"
         aria-label={t("workspace.manage")}
-        onClick={(event) => event.stopPropagation()}
+        style={{ width: `${panelWidth}px` }}
       >
+        <div
+          {...resizeHandleProps}
+          className="right-drawer-resize-handle"
+          aria-label={t("rail.resizeWidth")}
+        />
         <header className="workspace-panel-header">
           <div>
             <div className="workspace-panel-kicker">{t("workspace.kicker")}</div>

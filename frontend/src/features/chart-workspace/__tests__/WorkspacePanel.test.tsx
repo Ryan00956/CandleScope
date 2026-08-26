@@ -106,7 +106,10 @@ test("workspace panel exposes workspace management in a dedicated dialog", () =>
     />,
   );
 
-  assert.match(html, /class="workspace-panel-overlay"/);
+  assert.match(html, /class="workspace-panel-overlay/);
+  assert.match(html, /class="right-drawer-resize-handle"/);
+  assert.match(html, /role="separator"/);
+  assert.match(html, /aria-orientation="vertical"/);
   assert.match(html, /role="dialog"/);
   assert.match(html, /aria-label="图表工作区管理"/);
   assert.match(html, /图表工作区/);

@@ -9,12 +9,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { t, type MessageKey } from "../../i18n/index.js";
 import { useLocale } from "../../i18n/useLocale.js";
+import { useRightDrawerResize } from "../../shared/useRightDrawerResize.js";
 import {
   shouldShowIndicatorCatalogLoading,
   useIndicatorCatalogRuntime,
 } from "./useIndicatorCatalogRuntime";
 import IndicatorEditor from "./IndicatorEditor";
-import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
+import type { ReactNode } from "react";
 import type { CatalogIndicator } from "./useIndicatorCatalogRuntime.js";
 import type {
   CustomIndicatorRecord,
@@ -344,8 +345,15 @@ export default function IndicatorPanel({
   const activeMarketStudies = marketStudies.filter((study) => study.added);
   const activeItemCount = activeIndicators.length + activeMarketStudies.length;
 
-  const [panelWidth, setPanelWidth] = useState(400);
-  const [isResizing, setIsResizing] = useState(false);
+  const {
+    width: panelWidth,
+    isResizing,
+    resizeHandleProps,
+  } = useRightDrawerResize({
+    initialWidth: 400,
+    minWidth: 350,
+    maxWidth: 860,
+  });
 
   const getSchemaForIndicator = useCallback((indicator: IndicatorDefinition): UiParamSchema[] => {
     const liveSchema = normalizeParamSchema(paramSchemas[indicator.id]);
@@ -421,35 +429,6 @@ export default function IndicatorPanel({
       />
     );
   }, [handleParamChange, onRecompute]);
-
-  const startResizing = useCallback((e: ReactMouseEvent<HTMLDivElement>) => {
-    setIsResizing(true);
-    e.preventDefault();
-  }, []);
-
-  const stopResizing = useCallback(() => {
-    setIsResizing(false);
-  }, []);
-
-  const resize = useCallback((e: MouseEvent) => {
-    if (isResizing) {
-      const newWidth = window.innerWidth - e.clientX;
-      if (newWidth > 350 && newWidth < window.innerWidth - 100) {
-        setPanelWidth(newWidth);
-      }
-    }
-  }, [isResizing]);
-
-  useEffect(() => {
-    if (isResizing) {
-      window.addEventListener("mousemove", resize);
-      window.addEventListener("mouseup", stopResizing);
-    }
-    return () => {
-      window.removeEventListener("mousemove", resize);
-      window.removeEventListener("mouseup", stopResizing);
-    };
-  }, [isResizing, resize, stopResizing]);
 
   const handleAddPreset = useCallback(async (preset: CatalogIndicator) => {
     try {
@@ -673,28 +652,15 @@ plot(ma, "MA", color=line_color)
   if (!isOpen) return null;
 
   return (
-    <div className="indicator-panel-overlay" onClick={onClose}>
+    <div className={`indicator-panel-overlay right-drawer-overlay ${isResizing ? "is-resizing" : ""}`}>
       <div
         className="indicator-panel"
-        onClick={(e) => e.stopPropagation()}
         style={{ width: `${panelWidth}px` }}
       >
-        {/* Resize Handle */}
         <div
-          onMouseDown={startResizing}
-          style={{
-            position: 'absolute',
-            left: '-2px',
-            top: 0,
-            bottom: 0,
-            width: '6px',
-            cursor: 'col-resize',
-            zIndex: 100,
-            backgroundColor: isResizing ? 'var(--accent-blue)' : 'transparent',
-            transition: 'background-color 0.2s',
-          }}
-          onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = 'var(--accent-blue)'; }}
-          onMouseLeave={(e) => { if (!isResizing) e.currentTarget.style.backgroundColor = 'transparent'; }}
+          {...resizeHandleProps}
+          className="right-drawer-resize-handle"
+          aria-label={t("rail.resizeWidth")}
         />
 
         {tab === "editor" && editingIndicator ? (
@@ -747,7 +713,14 @@ plot(ma, "MA", color=line_color)
                   </span>
                 )}
               </h3>
-              <button className="indicator-panel-close" onClick={onClose}>✕</button>
+              <button
+                className="indicator-panel-close"
+                onClick={onClose}
+                type="button"
+                aria-label={t("indicator.closePanel")}
+              >
+                ✕
+              </button>
             </div>
 
             {/* Tab bar */}

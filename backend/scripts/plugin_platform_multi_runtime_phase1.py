@@ -25,14 +25,14 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_ROOT = REPOSITORY_ROOT / "backend"
 SDK_ROOT = REPOSITORY_ROOT / "packages" / "candlescope-plugin-sdk"
 SDK_SOURCE = SDK_ROOT / "src"
-CONTRACT_PATH = (
+FIXTURE_ROOT = (
     BACKEND_ROOT
     / "tests"
     / "fixtures"
     / "plugin_platform_multi_runtime"
-    / "phase1_contract_v1.json"
 )
-HISTORICAL_CONTRACT_PATH = CONTRACT_PATH
+CONTRACT_PATH = FIXTURE_ROOT / "phase1_contract_v2.json"
+HISTORICAL_CONTRACT_PATH = FIXTURE_ROOT / "phase1_contract_v1.json"
 HISTORICAL_CONTRACT_FILE_SHA256 = (
     "9364ad74467a98ff789d1cf5d4217517c3cb80d05a9b94bc8a0953737a39e8ff"
 )
@@ -51,8 +51,10 @@ OLD_REGISTRY_FIXTURE = (
     / "plugin_platform_multi_runtime"
     / "activation_registry_v2.json"
 )
-CONTRACT_SCHEMA_VERSION = "candlescope.plugin-platform.multi-runtime.phase1-contract/1"
-HISTORICAL_CONTRACT_SCHEMA_VERSION = CONTRACT_SCHEMA_VERSION
+CONTRACT_SCHEMA_VERSION = "candlescope.plugin-platform.multi-runtime.phase1-contract/2"
+HISTORICAL_CONTRACT_SCHEMA_VERSION = (
+    "candlescope.plugin-platform.multi-runtime.phase1-contract/1"
+)
 GATE_SCHEMA_VERSION = "candlescope.plugin-platform.multi-runtime.phase1-gate/1"
 RUNTIME_KINDS = (
     "python-module",
@@ -160,6 +162,8 @@ def capture_contract() -> dict[str, Any]:
     return {
         "schemaVersion": CONTRACT_SCHEMA_VERSION,
         "implementedOn": "2026-08-03",
+        "migratedOn": "2026-08-26",
+        "previousContractSha256": "sha256:" + HISTORICAL_CONTRACT_FILE_SHA256,
         "protocol": {
             "plugin": PLUGIN_PROTOCOL_V2,
             "controlTransport": CONTROL_TRANSPORT_V1,

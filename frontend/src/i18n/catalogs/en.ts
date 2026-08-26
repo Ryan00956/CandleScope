@@ -3141,7 +3141,7 @@ export const en = {
   "plugin.market.telemetryOn": "user opted in; local aggregate counts only",
   "plugin.market.telemetryOff": "off",
   "plugin.market.telemetry": "Anonymous stability telemetry: {state} · upload always off · no strategy inputs, accounts, identifiers, or plugin-private data",
-  "plugin.market.notCodeSafety": "publisher verification is not code safety",
+  "plugin.market.notCodeSafety": "publisher verification is not code safety and does not mean the plugin is official or vulnerability-free",
   "plugin.market.publisher": "Publisher: {state}",
   "plugin.market.verified": "verified",
   "plugin.market.unverified": "unverified",

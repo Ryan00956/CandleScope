@@ -24,6 +24,9 @@ def test_phase0_frozen_contracts_match_current_v1_fixtures() -> None:
 
     assert contracts["status"] == "verified"
     assert contracts["fileSha256"] == phase0.FROZEN_FILE_SHA256
+    assert contracts["currentOfficialReleaseLockSha256"] == (
+        phase0.CURRENT_OFFICIAL_RELEASE_LOCK_SHA256
+    )
     assert contracts["wireSha256"] == phase0.FROZEN_WIRE_SHA256
     assert contracts["schemas"] == {
         "sdkTranscript": "candlescope.plugin-sdk-transcript.v1",

@@ -52,6 +52,15 @@ export default defineConfig([
     },
     rules: {
       'no-unused-vars': 'off',
+      // CandleScope does not enable the React Compiler. eslint-plugin-react-hooks
+      // 7.x added compiler-eligibility diagnostics to its recommended preset;
+      // keep the runtime hook rules, but do not turn compiler opt-out reasons
+      // into repository lint failures until the compiler is adopted.
+      'react-hooks/preserve-manual-memoization': 'off',
+      'react-hooks/purity': 'off',
+      'react-hooks/refs': 'off',
+      'react-hooks/set-state-in-effect': 'off',
+      'react-hooks/use-memo': 'off',
       '@typescript-eslint/no-base-to-string': 'off',
       '@typescript-eslint/no-misused-promises': [
         'error',

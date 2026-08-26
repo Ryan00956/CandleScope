@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -16,6 +15,7 @@ from app.research_data.access import (
     evaluate_local_research_access,
 )
 from tests.asgi_peer import PeerASGIApp
+from tests.source_checkout_testkit import source_checkout_environment
 
 
 def test_access_matrix_loopback_and_forwards() -> None:
@@ -174,8 +174,7 @@ assert client.get("/health").status_code == 200
 response = client.get("/api/v1/local/datasets")
 assert response.status_code == 404, response.text
 """
-    environment = os.environ.copy()
-    environment.update(
+    environment = source_checkout_environment(
         {
             "CANDLESCOPE_RUNTIME_MODE": "LIVE",
             "CANDLESCOPE_RESEARCH_DATA_LIBRARY_ENABLED": "0",

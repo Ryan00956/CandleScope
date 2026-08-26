@@ -223,10 +223,9 @@ class BacktestService:
                     "BACKTEST_PYTHON_TRUSTED_LOCAL_ENABLED", "0"
                 ).strip()
                 == "1",
-                "BACKTEST_PYTHON_SCALE_V1_ENABLED": os.environ.get(
-                    "BACKTEST_PYTHON_SCALE_V1_ENABLED", "0"
-                ).strip()
-                == "1",
+                "BACKTEST_PYTHON_SCALE_V1_ENABLED": (
+                    self.settings.python_scale_v1_enabled
+                ),
             },
             "fidelity_modes": fidelity_modes,
             "chart_context": {
@@ -404,6 +403,7 @@ class BacktestService:
             parameters=dict(parameters or {}),
             mode=str(mode or "SANDBOXED_LOCAL"),
             trusted_confirmed=bool(trusted_confirmed),
+            bound_transcript=self.settings.python_scale_v1_enabled,
         )
 
     def get_python_runtime_receipt(self, revision_id: str) -> dict[str, object]:
@@ -2654,9 +2654,7 @@ class BacktestService:
                 **_execution_kernel_kwargs(config),
                 execution_reporter=self._execution_reporter(session),
             )
-            from app.backtest.strategy.python_scale import scale_v1_enabled
-
-            if scale_v1_enabled():
+            if self.settings.python_scale_v1_enabled:
                 if kernel.equity_curve_event_interval < 10_000:
                     kernel.equity_curve_event_interval = 10_000
                 kernel.scale_stream_decisions = True
@@ -2956,6 +2954,7 @@ class BacktestService:
                 funding_mode=str(config.get("funding_mode") or "OFF"),
                 leverage=_config_decimal(config, "leverage", "1"),
                 host_policy_revision=config.get("host_policy_revision"),
+                scale_stream_decisions=self.settings.python_scale_v1_enabled,
                 **_execution_kernel_kwargs(config),
                 execution_reporter=self._execution_reporter(session),
             )

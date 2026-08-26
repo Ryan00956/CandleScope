@@ -3139,7 +3139,7 @@ export const zhCN = {
   "plugin.market.telemetryOn": "用户已选择，仅保存在本机聚合计数",
   "plugin.market.telemetryOff": "关闭",
   "plugin.market.telemetry": "匿名稳定性遥测：{state} · 上传始终关闭 · 不记录策略输入、账户、标识符或插件私有数据",
-  "plugin.market.notCodeSafety": "发布者验证不等于代码安全",
+  "plugin.market.notCodeSafety": "发布者验证不等于代码安全，也不表示插件是 CandleScope 官方提供或没有漏洞",
   "plugin.market.publisher": "发布者：{state}",
   "plugin.market.verified": "已验证",
   "plugin.market.unverified": "未验证",

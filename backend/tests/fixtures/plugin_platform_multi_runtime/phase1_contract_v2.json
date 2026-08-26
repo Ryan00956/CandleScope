@@ -1,0 +1,125 @@
+{
+  "activationRegistry": {
+    "entrypointFields": [
+      "artifactSha256",
+      "id",
+      "launch",
+      "runtimeId",
+      "runtimeKind"
+    ],
+    "losslessV2RollbackExport": true,
+    "readSchemaVersions": [
+      2,
+      3
+    ],
+    "v2RuntimeId": "python-v2-compat",
+    "v2RuntimeKind": "python-module",
+    "writeSchemaVersion": 3
+  },
+  "bundleV3": {
+    "format": "candlescope.plugin-bundle/3",
+    "referenceBundles": {
+      "java-jar": {
+        "artifactRoles": [
+          "java-jar",
+          "sbom",
+          "schema"
+        ],
+        "manifestSha256": "sha256:2a2651ccd2c55446d087670f00918289494b2edec09812b1f260c7243b7b29a1",
+        "sha256": "sha256:995ec88acdb41604fe25df26c0c4d0fd13fffda2d665724fa1eec2715826cfe6"
+      },
+      "native-executable": {
+        "artifactRoles": [
+          "native-executable",
+          "sbom",
+          "schema"
+        ],
+        "manifestSha256": "sha256:af9199852e145d14fc37edeff22495f71e4de96444dbbd4d1feeb80cc670edce",
+        "sha256": "sha256:d15a96213f527c3aeb3984641b5ac6684c0d4febe938e2b7e8a8eeb13a0ca550"
+      },
+      "node-module": {
+        "artifactRoles": [
+          "node-bundle",
+          "sbom",
+          "schema"
+        ],
+        "manifestSha256": "sha256:34e7803299f7ee2e546f5b40691148a9383c5216e73e61309c4fb4ef2a90e31a",
+        "sha256": "sha256:a6e97a81170cdff5c0cf0d70edb6fa62ef282094b50a39bc4cf398f15a99520c"
+      },
+      "python-module": {
+        "artifactRoles": [
+          "python-wheel",
+          "sbom",
+          "schema"
+        ],
+        "manifestSha256": "sha256:aae592b4e73e59d7a7e731f39fd95c47eace6a89d80587ab4280c4580303eac9",
+        "sha256": "sha256:698d82371ca1b49a45b0a3d409f452036f37e6640c3dc51c4b05c7745f4b7ee4"
+      },
+      "wasm-component": {
+        "artifactRoles": [
+          "sbom",
+          "schema",
+          "wasm-component"
+        ],
+        "manifestSha256": "sha256:805bed8ce5ed513e57af2f82a69901edcb2bd6e85219ba7fc360f73b62d9ae7c",
+        "sha256": "sha256:1d314792e9a6939a1091c6bdac9e8b4baae120add2b35fb0c9a4e9908c2c116b"
+      }
+    },
+    "schemaVersion": 3
+  },
+  "executionBoundary": {
+    "default": false,
+    "featureFlag": "CANDLESCOPE_PLUGIN_MULTI_RUNTIME_ENABLED",
+    "featureOffError": "PLUGIN_MULTI_RUNTIME_FEATURE_DISABLED",
+    "providerUnavailableError": "PLUGIN_RUNTIME_PROVIDER_UNAVAILABLE",
+    "schemaV3ProvidersAvailable": []
+  },
+  "frozenV2": {
+    "historicalPhase0BundleSha256": {
+      "0.1.0": "sha256:876120fde99c355c279cca97891e6a1f8a58455125856bd682f6977f167594b2",
+      "0.2.0": "sha256:ccc8492b72de9c5ae8f21e8d493c065123a3f1b683bffbb739b9f367a7f2d7af"
+    },
+    "manifestSchemaCanonicalSha256": "sha256:16bc9cb9f51b66ad2e717cd74798cd5c2e0b6a7d6d0fc2f442ba60f68cb1b5a5",
+    "manifestSchemaVersion": 2,
+    "phase1SdkBundleGeneration": {
+      "0.1.0": {
+        "manifestSha256": "sha256:aee90ba2b5b2708f9615c981f061c5a9533e3f9e565ae0f03def62162b372f35",
+        "sha256": "sha256:23204c22e17534118e680e22fc012efa9d129f17e1c791df20440e18cc2d169b"
+      },
+      "0.2.0": {
+        "manifestSha256": "sha256:ef075f852819aead0885e15523fdc1fd30cc2fbeede318d0c1d66807364944d9",
+        "sha256": "sha256:5f767524c7e3244e1ccab0614af3d9dee95b0122fac7c6e0c5411567a95d34fa"
+      }
+    },
+    "referenceManifestCanonicalSha256": "sha256:9f472a450c48025b2119ff880515898f7bd7748c06e1c99d2a6491754bc0d688",
+    "referenceWireCanonicalSha256": "sha256:80408fa59e60e46b71e62ca390b2e498fbdbf793b9466878beea19900917f06f"
+  },
+  "implementedOn": "2026-08-03",
+  "manifestV3": {
+    "runtimeKinds": [
+      "python-module",
+      "native-executable",
+      "java-jar",
+      "node-module",
+      "wasm-component"
+    ],
+    "schemaCanonicalSha256": "sha256:f102b617d13a7d25136d8c942cadc75157229cd7ecab0142572f261250958610",
+    "schemaId": "https://candlescope.local/schemas/plugin-manifest-v3.schema.json",
+    "schemaRawSha256": "sha256:93a7cf7aaa350a07ae44780a9e035627802e15a97e9334d7538e37faef51d12c",
+    "schemaVersion": 3,
+    "validFixtureCanonicalSha256": {
+      "java-jar": "sha256:c32b1144b4f2ddfd8aec6cce2a512b60cfd4b496a048a760195a63e1c9339238",
+      "native-executable": "sha256:ab94f428dbfec9370ecaec5a8cdb6518c50da7ed5cc8c4f2b6301c138308fc6b",
+      "node-module": "sha256:1f5564c89cac309a414b16fc5ffa22dc89d27c22f391c13985a1923f4b2cd741",
+      "python-module": "sha256:f596fcdca3b755e453f4b988cde7b197cc3a72bf000445c5f2a3c2b9b087538e",
+      "wasm-component": "sha256:58ef7210f3a7b3f378c8e2c3636671460d79fe2672b78c0414e661570fb02d8d"
+    }
+  },
+  "migratedOn": "2026-08-26",
+  "previousContractSha256": "sha256:9364ad74467a98ff789d1cf5d4217517c3cb80d05a9b94bc8a0953737a39e8ff",
+  "protocol": {
+    "controlTransport": "jsonl/1",
+    "plugin": "candlescope.plugin/2"
+  },
+  "schemaVersion": "candlescope.plugin-platform.multi-runtime.phase1-contract/2"
+}

@@ -13,10 +13,24 @@ def gate_result() -> dict[str, object]:
     return phase6.run_gate()
 
 
+def test_phase6_historical_v1_fixture_is_not_rewritten() -> None:
+    historical = phase6.validate_historical_contract_v1()
+
+    assert historical["schemaVersion"] == phase6.HISTORICAL_CONTRACT_SCHEMA_VERSION
+    assert historical["ui"]["runtimeAndPermissionDiff"] is True
+    assert historical["ui"]["verifiedPublisherNotSafeOrOfficial"] is True
+
+
 def test_phase6_contract_freezes_trust_grants_sandbox_and_jre_migration() -> None:
     contract = phase6.validate_contract()
 
     assert contract["schemaVersion"] == phase6.CONTRACT_SCHEMA_VERSION
+    assert contract["previousContractSha256"] == (
+        "sha256:" + phase6.HISTORICAL_CONTRACT_FILE_SHA256
+    )
+    assert contract["realGateEvidenceContractSha256"] == (
+        phase6._canonical_sha256(phase6.validate_historical_contract_v1())
+    )
     assert contract["trust"]["localMode"] == "trusted-local"
     assert contract["trust"]["marketplaceDefaultMode"] == "marketplace-sandboxed"
     assert contract["trust"]["itemizedAcknowledgements"] is True
@@ -58,6 +72,8 @@ def test_phase6_contract_freezes_trust_grants_sandbox_and_jre_migration() -> Non
     }
     assert contract["rollout"]["trustUxDefault"] is False
     assert contract["rollout"]["liveDefaults"] == [False] * 5
+    assert contract["ui"]["runtimeAndPermissionDiff"] is True
+    assert contract["ui"]["verifiedPublisherNotSafeOrOfficial"] is True
 
 
 def test_phase6_contract_drift_fails_closed(

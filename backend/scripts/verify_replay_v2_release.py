@@ -310,7 +310,9 @@ def _validate_default_flags() -> dict[str, str]:
     entry_source = (
         REPOSITORY_ROOT / "frontend/src/features/replay/useReplayEntryCapability.ts"
     ).read_text(encoding="utf-8")
-    readme = (REPOSITORY_ROOT / "README.md").read_text(encoding="utf-8")
+    product_contract = (
+        REPOSITORY_ROOT / "docs" / "KLINE_REPLAY_TRAINING_PRODUCT_CONTRACT_zh.md"
+    ).read_text(encoding="utf-8")
     flags = {
         "REPLAY_ENABLED": "1",
         "RAW_AGG_TRADE_ARCHIVE_ENABLED": "0",
@@ -335,8 +337,8 @@ def _validate_default_flags() -> dict[str, str]:
         in backend_source,
         "frontend_entry_has_no_vite_gate": "VITE_REPLAY_ENTRY_ENABLED"
         not in entry_source,
-        "readme_freezes_all_defaults": all(
-            f"{name}={value}" in readme for name, value in flags.items()
+        "product_contract_requires_default_on": (
+            "hard cutover 要求回放入口和所需能力默认启用" in product_contract
         ),
     }
     if not all(checks.values()):

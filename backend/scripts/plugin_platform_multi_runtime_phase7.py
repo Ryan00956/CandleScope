@@ -163,7 +163,11 @@ def capture_contract() -> dict[str, Any]:
     return {
         "schemaVersion": CONTRACT_SCHEMA_VERSION,
         "implementedOn": "2026-08-03",
-        "phase6ContractSha256": _canonical_sha256(phase6.validate_contract()),
+        # Phase 7 v1 was reviewed against Phase 6 v1. Keep that historical
+        # dependency stable while Phase 6 evolves independently.
+        "phase6ContractSha256": _canonical_sha256(
+            phase6.validate_historical_contract_v1()
+        ),
         "runtimeRegistry": {
             "activeRegistryPath": OFFICIAL_REGISTRY_V4_PATH.name,
             "revision": revision4.revision,

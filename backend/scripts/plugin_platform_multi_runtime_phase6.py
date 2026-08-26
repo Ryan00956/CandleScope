@@ -22,7 +22,11 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_ROOT = REPOSITORY_ROOT / "backend"
 SDK_SOURCE = REPOSITORY_ROOT / "packages" / "candlescope-plugin-sdk" / "src"
 FIXTURE_ROOT = BACKEND_ROOT / "tests" / "fixtures" / "plugin_platform_multi_runtime"
-CONTRACT_PATH = FIXTURE_ROOT / "phase6_contract_v1.json"
+CONTRACT_PATH = FIXTURE_ROOT / "phase6_contract_v2.json"
+HISTORICAL_CONTRACT_PATH = FIXTURE_ROOT / "phase6_contract_v1.json"
+HISTORICAL_CONTRACT_FILE_SHA256 = (
+    "c9b5e173a6f7a2fc42741b5a39c9c64f4cd5ee23ffdb1807b857091bb165dc90"
+)
 PYTHON_PROBE = FIXTURE_ROOT / "phase6_python_sandbox_probe.py"
 JAVA_PROBE = FIXTURE_ROOT / "Phase6JavaSandboxProbe.java"
 NATIVE_PROBE = (
@@ -39,7 +43,10 @@ REAL_EVIDENCE_PATH = (
     / "plugin-platform-v2"
     / "multi-runtime-phase6-2026-08-03-windows-amd64.json"
 )
-CONTRACT_SCHEMA_VERSION = "candlescope.plugin-platform.multi-runtime.phase6-contract/1"
+CONTRACT_SCHEMA_VERSION = "candlescope.plugin-platform.multi-runtime.phase6-contract/2"
+HISTORICAL_CONTRACT_SCHEMA_VERSION = (
+    "candlescope.plugin-platform.multi-runtime.phase6-contract/1"
+)
 REAL_GATE_SCHEMA_VERSION = (
     "candlescope.plugin-platform.multi-runtime.phase6-real-gate/1"
 )
@@ -183,10 +190,23 @@ def capture_contract() -> dict[str, Any]:
         encoding="utf-8"
     )
     parser_source = (ui_path / "pluginPlatformParsers.ts").read_text(encoding="utf-8")
+    english_catalog_source = (
+        REPOSITORY_ROOT / "frontend" / "src" / "i18n" / "catalogs" / "en.ts"
+    ).read_text(encoding="utf-8")
+    chinese_catalog_source = (
+        REPOSITORY_ROOT / "frontend" / "src" / "i18n" / "catalogs" / "zh-CN.ts"
+    ).read_text(encoding="utf-8")
     return {
         "schemaVersion": CONTRACT_SCHEMA_VERSION,
         "implementedOn": "2026-08-03",
+        "migratedOn": "2026-08-26",
+        "previousContractSha256": "sha256:" + HISTORICAL_CONTRACT_FILE_SHA256,
         "phase5ContractSha256": _canonical_sha256(phase5_contract),
+        # The recorded Windows AppContainer run predates the UI-only i18n
+        # migration. Bind it to the immutable contract it actually exercised.
+        "realGateEvidenceContractSha256": _canonical_sha256(
+            _strict_json(HISTORICAL_CONTRACT_PATH)
+        ),
         "trust": {
             "aliases": {key: TRUST_ALIASES[key] for key in sorted(TRUST_ALIASES)},
             "canonicalModes": sorted(CANONICAL_TRUST_MODES),
@@ -296,17 +316,43 @@ def capture_contract() -> dict[str, Any]:
         "ui": {
             "surfaceSha256": _sha256_bytes(surface_source.encode("utf-8")),
             "parserSha256": _sha256_bytes(parser_source.encode("utf-8")),
+            "englishCatalogSha256": _sha256_bytes(
+                english_catalog_source.encode("utf-8")
+            ),
+            "chineseCatalogSha256": _sha256_bytes(
+                chinese_catalog_source.encode("utf-8")
+            ),
             "itemizedDoubleConfirmation": (
                 'data-plugin-trust-flow="itemized-double-confirmation"'
                 in surface_source
             ),
             "runtimeAndPermissionDiff": all(
-                value in surface_source for value in ("Runtime diff", "Permission diff")
+                value in surface_source
+                for value in (
+                    't("plugin.host.runtimeDiff")',
+                    't("plugin.host.permissionDiff")',
+                )
+            ) and all(
+                value in english_catalog_source
+                for value in (
+                    '"plugin.host.runtimeDiff": "Runtime diff"',
+                    '"plugin.host.permissionDiff": "Permission diff"',
+                )
+            ) and all(
+                value in chinese_catalog_source
+                for value in (
+                    '"plugin.host.runtimeDiff": "运行时差异"',
+                    '"plugin.host.permissionDiff": "权限差异"',
+                )
             ),
             "tokenKeptInReactMemory": "useState<PluginTrustReview | null>"
             in surface_source,
             "verifiedPublisherNotSafeOrOfficial": (
-                "不表示代码“安全”“官方”或无漏洞" in surface_source
+                't("plugin.market.notCodeSafety")' in surface_source
+                and "publisher verification is not code safety" in english_catalog_source
+                and "not mean the plugin is official" in english_catalog_source
+                and "发布者验证不等于代码安全" in chinese_catalog_source
+                and "不表示插件是 CandleScope 官方提供" in chinese_catalog_source
             ),
             "strictTrustParsers": all(
                 value in parser_source
@@ -356,7 +402,24 @@ def capture_contract() -> dict[str, Any]:
     }
 
 
+def validate_historical_contract_v1() -> dict[str, Any]:
+    """Keep the original Phase 6 fixture byte-stable. Do not rewrite it."""
+
+    raw = HISTORICAL_CONTRACT_PATH.read_bytes().replace(b"\r\n", b"\n")
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest != HISTORICAL_CONTRACT_FILE_SHA256:
+        raise Phase6GateError(
+            "historical Phase 6 contract v1 was rewritten: "
+            f"expected={HISTORICAL_CONTRACT_FILE_SHA256} current={digest}"
+        )
+    historical = _strict_json(HISTORICAL_CONTRACT_PATH)
+    if historical.get("schemaVersion") != HISTORICAL_CONTRACT_SCHEMA_VERSION:
+        raise Phase6GateError("historical Phase 6 contract lost schemaVersion /1")
+    return historical
+
+
 def validate_contract() -> dict[str, Any]:
+    validate_historical_contract_v1()
     fixture = _strict_json(CONTRACT_PATH)
     current = capture_contract()
     if fixture != current:
@@ -919,7 +982,8 @@ def validate_real_gate_evidence() -> dict[str, Any]:
     if (
         evidence.get("schemaVersion") != REAL_GATE_SCHEMA_VERSION
         or evidence.get("result") != "pass"
-        or evidence.get("contractSha256") != _canonical_sha256(contract)
+        or evidence.get("contractSha256")
+        != contract["realGateEvidenceContractSha256"]
     ):
         raise Phase6GateError("recorded Phase 6 real gate is missing, failed, or stale")
     attacks = evidence.get("attacks")

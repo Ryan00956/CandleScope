@@ -40,6 +40,7 @@ class DualClockSimulationKernel:
     order_end_policy: str = "CANCEL_AT_END"
     equity_curve_event_interval: int = 1
     equity_curve_mode: str | None = None
+    scale_stream_decisions: bool = False
     execution_reporter: Callable[[dict], None] | None = field(default=None, repr=False)
     execution: TradeSimulationKernel = field(init=False)
     builder: TradeBarBuilder = field(init=False)
@@ -47,6 +48,8 @@ class DualClockSimulationKernel:
     execution_event_count: int = 0
     _last_source_sequence: int | None = None
     frozen_intents: list[dict] = field(default_factory=list)
+    _decision_chain_hash: str = "sha256:GENESIS"
+    _decision_count: int = 0
 
     def __post_init__(self) -> None:
         self.builder = TradeBarBuilder(self.signal_interval, gap_policy=self.gap_policy)
@@ -89,7 +92,16 @@ class DualClockSimulationKernel:
             "gap_policy": self.gap_policy,
             "execution": self.execution.snapshot(),
             "bar_builder": self.builder.snapshot(),
+            "scale_stream_decisions": self.scale_stream_decisions,
             "decisions": list(self.decisions),
+            **(
+                {
+                    "decision_chain_hash": self._decision_chain_hash,
+                    "decision_count": self._decision_count,
+                }
+                if self.scale_stream_decisions
+                else {}
+            ),
             "execution_event_count": self.execution_event_count,
             "last_source_sequence": self._last_source_sequence,
             **(
@@ -104,6 +116,8 @@ class DualClockSimulationKernel:
             payload.get("schemaVersion") != "candlescope.dual-clock-kernel/1"
             or payload.get("signal_interval") != self.signal_interval
             or payload.get("gap_policy") != self.gap_policy
+            or bool(payload.get("scale_stream_decisions") or False)
+            != self.scale_stream_decisions
         ):
             raise MarketDatasetError(
                 "dual-clock checkpoint identity changed", code="CHECKPOINT_CORRUPT"
@@ -111,6 +125,11 @@ class DualClockSimulationKernel:
         self.execution.restore(payload["execution"])
         self.builder.restore(payload["bar_builder"])
         self.decisions = [dict(item) for item in payload.get("decisions") or []]
+        if self.scale_stream_decisions:
+            self._decision_chain_hash = str(
+                payload.get("decision_chain_hash") or "sha256:GENESIS"
+            )
+            self._decision_count = int(payload.get("decision_count") or 0)
         self.execution_event_count = int(payload.get("execution_event_count") or 0)
         self._last_source_sequence = (
             None
@@ -171,13 +190,18 @@ class DualClockSimulationKernel:
                 intents = strategy((bar,), bar)
                 if bar.sequence <= warmup_events:
                     intents = []
-                self.decisions.append(
-                    _decision_record(
-                        intents,
-                        sequence=bar.sequence,
-                        watermark_ms=bar.event_time_ms,
-                    )
+                decision = _decision_record(
+                    intents,
+                    sequence=bar.sequence,
+                    watermark_ms=bar.event_time_ms,
                 )
+                if self.scale_stream_decisions:
+                    self._decision_chain_hash = "sha256:" + sha256_hex(
+                        {"previous": self._decision_chain_hash, "decision": decision}
+                    )
+                    self._decision_count += 1
+                else:
+                    self.decisions.append(decision)
                 if self.execution_model_revision is not None and intents:
                     self.frozen_intents.append(
                         {
@@ -235,7 +259,11 @@ class DualClockSimulationKernel:
         ledger["execution_event_count"] = self.execution_event_count
         ledger_hash = sha256_hex(ledger)
         return SimulationResult(
-            decision_hash=sha256_hex(self.decisions),
+            decision_hash=(
+                self._decision_chain_hash
+                if self.scale_stream_decisions
+                else sha256_hex(self.decisions)
+            ),
             fill_hash=base.fill_hash,
             ledger_hash=ledger_hash,
             report_hash=sha256_hex(

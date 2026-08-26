@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import json
-import os
 import runpy
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+from tests.source_checkout_testkit import source_checkout_environment
 
 ROOT = Path(__file__).resolve().parents[2]
 BACKEND = ROOT / "backend"
@@ -38,7 +38,7 @@ assert RUNTIME_MODE == "LIVE"
 assert RESEARCH_DATA_LIBRARY_ENABLED is True
 assert any(route.path == "/api/v1/local/datasets" for route in app.routes)
 """
-    environment = os.environ.copy()
+    environment = source_checkout_environment()
     environment.pop("CANDLESCOPE_RESEARCH_DATA_LIBRARY_ENABLED", None)
     environment.update(
         {
@@ -73,8 +73,7 @@ client = TestClient(app)
 assert client.get("/health").status_code == 200
 assert client.get("/api/v1/local/datasets").status_code == 404
 """
-    environment = os.environ.copy()
-    environment.update(
+    environment = source_checkout_environment(
         {
             "CANDLESCOPE_RUNTIME_MODE": "LIVE",
             "CANDLESCOPE_RESEARCH_DATA_LIBRARY_ENABLED": "0",

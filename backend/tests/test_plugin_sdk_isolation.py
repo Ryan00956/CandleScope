@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
 import types
 from pathlib import Path
 
 from plugin_sdk_isolation import SDK_SOURCE, pin_in_repo_plugin_sdk
+
+
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_pin_evicts_sibling_worktree_plugin_sdk(tmp_path: Path, monkeypatch) -> None:
@@ -37,3 +42,28 @@ def test_pin_evicts_sibling_worktree_plugin_sdk(tmp_path: Path, monkeypatch) -> 
     assert "onBacktestRun" not in ACTIVATION_EVENTS
     origin = Path(candlescope_plugin_sdk.__file__).resolve()
     assert SDK_SOURCE in origin.parents
+
+
+def test_repository_cli_bootstraps_sdk_in_clean_child_process() -> None:
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+    environment["PYTHONNOUSERSITE"] = "1"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(BACKEND_ROOT / "scripts" / "candlescope_plugin.py"),
+            "v3",
+            "--help",
+        ],
+        cwd=BACKEND_ROOT.parent,
+        env=environment,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "source-lock-check" in completed.stdout

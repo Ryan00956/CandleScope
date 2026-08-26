@@ -92,7 +92,10 @@ def test_boundary_signal_can_fill_on_first_post_boundary_aggregate_trade() -> No
     assert result.ledger["execution_event_count"] == 3
 
 
-def test_decision_hash_matches_bar_kernel_on_the_same_derived_bars() -> None:
+@pytest.mark.parametrize("scale_stream_decisions", [False, True])
+def test_decision_hash_matches_bar_kernel_on_the_same_derived_bars(
+    scale_stream_decisions: bool,
+) -> None:
     events = tuple(
         _trade(index + 1, index * 60_000 + 1_000, str(100 + index))
         for index in range(6)
@@ -106,8 +109,12 @@ def test_decision_hash_matches_bar_kernel_on_the_same_derived_bars() -> None:
             else []
         )
 
-    bar_result = SimulationKernel(slippage_bps=Decimal("0")).run(bars, target)
-    dual_result = DualClockSimulationKernel("1m").run(events, target)
+    bar_kernel = SimulationKernel(slippage_bps=Decimal("0"))
+    bar_kernel.scale_stream_decisions = scale_stream_decisions
+    bar_result = bar_kernel.run(bars, target)
+    dual_result = DualClockSimulationKernel(
+        "1m", scale_stream_decisions=scale_stream_decisions
+    ).run(events, target)
     assert dual_result.decision_hash == bar_result.decision_hash
     assert dual_result.fill_hash != bar_result.fill_hash
 

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 from pathlib import Path
 
+from tests.source_checkout_testkit import (
+    BACKEND_ROOT,
+    source_checkout_environment,
+)
 
 def test_main_local_profile_starts_only_local_runtime(tmp_path: Path) -> None:
     script = """
@@ -52,13 +55,13 @@ with TestClient(Peer(app, "127.0.0.1")) as client:
     else:
         raise AssertionError("external DNS was not blocked")
 """
-    environment = os.environ.copy()
+    environment = source_checkout_environment()
     environment["CANDLESCOPE_RUNTIME_MODE"] = "LOCAL_OFFLINE"
     environment["CANDLESCOPE_LOCAL_DATA_DIR"] = str(tmp_path / "local-data")
     environment["CANDLE_HOST"] = "0.0.0.0"
     completed = subprocess.run(
         [sys.executable, "-c", script],
-        cwd=Path(__file__).resolve().parents[1],
+        cwd=BACKEND_ROOT,
         env=environment,
         capture_output=True,
         text=True,
@@ -83,7 +86,7 @@ with TestClient(app) as client:
     assert hasattr(app.state, "backtest_runtime")
     assert not hasattr(app.state, "plugin_runtime_host")
 """
-    environment = os.environ.copy()
+    environment = source_checkout_environment()
     environment.update(
         {
             "CANDLESCOPE_RUNTIME_MODE": "LOCAL_OFFLINE",
@@ -96,7 +99,7 @@ with TestClient(app) as client:
     )
     completed = subprocess.run(
         [sys.executable, "-c", script],
-        cwd=Path(__file__).resolve().parents[1],
+        cwd=BACKEND_ROOT,
         env=environment,
         capture_output=True,
         text=True,

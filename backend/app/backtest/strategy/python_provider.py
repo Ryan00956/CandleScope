@@ -72,6 +72,7 @@ class PythonHostProvider:
         parameters: Mapping[str, Any] | None = None,
         mode: str | None = None,
         trusted_confirmed: bool | None = None,
+        bound_transcript: bool | None = None,
     ) -> None:
         if mode is None:
             mode = "TRUSTED_LOCAL"
@@ -80,13 +81,16 @@ class PythonHostProvider:
             trusted_confirmed = mode == "TRUSTED_LOCAL"
         from app.backtest.strategy.python_scale import scale_v1_enabled
 
+        if bound_transcript is None:
+            bound_transcript = scale_v1_enabled()
+
         self.runner = IsolatedPythonRunner(
             bundle_dir,
             entrypoint=entrypoint,
             mode=mode,
             trusted_confirmed=bool(trusted_confirmed),
             step_timeout_s=5.0,
-            bound_transcript=scale_v1_enabled(),
+            bound_transcript=bound_transcript,
         )
         self.entrypoint = entrypoint
         self.parameters = dict(parameters or {})

@@ -19,6 +19,7 @@ from app.plugin_core_v2.runtime import CorePluginPlatform
 from app.plugin_security_v2.management import LocalManagementGuard
 from tests.plugin_marketplace_testkit import (
     INDEX_URL,
+    MARKETPLACE_TEST_NOW,
     SignedMarketplaceBuilder,
     build_marketplace_bundle,
 )
@@ -69,6 +70,7 @@ PLATFORM = CorePluginPlatform(
     marketplace_enabled=True,
     marketplace_roots=(MARKETPLACE_BUILDER.root,),
     marketplace_fetcher=BrowserMarketplaceFetcher(),
+    marketplace_now_provider=lambda: MARKETPLACE_TEST_NOW,
 )
 GUARD = LocalManagementGuard(
     (ORIGIN,),

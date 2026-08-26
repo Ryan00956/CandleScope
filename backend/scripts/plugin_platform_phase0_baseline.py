@@ -29,7 +29,16 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_ROOT = REPOSITORY_ROOT / "backend"
 SDK_SOURCE = REPOSITORY_ROOT / "packages" / "candlescope-plugin-sdk" / "src"
 SCRIPT_PATH = Path(__file__).resolve()
-OFFICIAL_RELEASE_LOCK = BACKEND_ROOT / "app" / "official-plugin-releases.json"
+OFFICIAL_RELEASE_LOCK = (
+    BACKEND_ROOT
+    / "tests"
+    / "fixtures"
+    / "plugin_platform_v2"
+    / "official-plugin-releases-phase0-v1.json"
+)
+CURRENT_OFFICIAL_RELEASE_LOCK = (
+    BACKEND_ROOT / "app" / "official-plugin-releases.json"
+)
 SDK_TRANSCRIPT_FIXTURE = (
     REPOSITORY_ROOT
     / "packages"
@@ -48,6 +57,9 @@ FROZEN_FILE_SHA256 = {
     "indicatorTransport": "sha256:b0db39165b888522ec27055ac1bfaf949b65a34a5d42932728d37aa767d77a47",
     "officialReleaseLock": "sha256:23e03c28a32b42a0d523aefc0bd19db34d33fb840b41cbf44e0348fc263249f2",
 }
+CURRENT_OFFICIAL_RELEASE_LOCK_SHA256 = (
+    "sha256:369c52cdd92a51f939bab295311715323cd6b6baf858ff1d6ff5691d0ea313d6"
+)
 FROZEN_WIRE_SHA256 = {
     "sdkTranscript": "sha256:021825fb264a63555e0eb331f24f6ea0632b0d2a0c962ef89a35673526391ba2",
     "httpCompute": "sha256:b2467295cc14ec0e772e97fce195f236739cecb260e967190d73af305ab6f7ee",
@@ -87,7 +99,7 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 
 def frozen_contracts() -> dict[str, Any]:
-    """Verify and return the exact current v1 contract hashes."""
+    """Verify the immutable Phase 0 files and the current release lock."""
 
     files = {
         "sdkTranscript": SDK_TRANSCRIPT_FIXTURE,
@@ -102,6 +114,14 @@ def frozen_contracts() -> dict[str, Any]:
                 {"expected": FROZEN_FILE_SHA256, "actual": actual_files},
                 sort_keys=True,
             )
+        )
+
+    current_release_lock_sha256 = _sha256_file(CURRENT_OFFICIAL_RELEASE_LOCK)
+    if current_release_lock_sha256 != CURRENT_OFFICIAL_RELEASE_LOCK_SHA256:
+        raise BaselineError(
+            "current official release lock drift detected: "
+            f"expected={CURRENT_OFFICIAL_RELEASE_LOCK_SHA256} "
+            f"actual={current_release_lock_sha256}"
         )
 
     sdk = _read_json(SDK_TRANSCRIPT_FIXTURE)
@@ -123,6 +143,7 @@ def frozen_contracts() -> dict[str, Any]:
     return {
         "status": "verified",
         "fileSha256": actual_files,
+        "currentOfficialReleaseLockSha256": current_release_lock_sha256,
         "wireSha256": actual_wire,
         "schemas": {
             "sdkTranscript": sdk.get("schemaVersion"),

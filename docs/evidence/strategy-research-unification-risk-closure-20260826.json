@@ -1,0 +1,64 @@
+{
+  "schemaVersion": "candlescope.strategy-research-risk-closure.v1",
+  "generatedAt": "2026-08-26T16:57:04+08:00",
+  "baseCommit": "090cea6037f6c47f5de7d481acc910039066818e",
+  "status": "PASS",
+  "gates": {
+    "backendFull": {
+      "status": "PASS",
+      "tests": 3971,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 2437.798,
+      "junit": "backend/output/test-results/backend-full-20260826.xml"
+    },
+    "frontend": {
+      "status": "PASS",
+      "eslintMaxWarnings": 0,
+      "typecheck": "PASS",
+      "tests": 3481,
+      "testFailures": 0,
+      "buildModules": 706
+    },
+    "mixedBrowserSoak": {
+      "status": "PASS",
+      "startedAt": "2026-08-26T15:55:58.4756281+08:00",
+      "completedAt": "2026-08-26T16:56:15.9080627+08:00",
+      "requestedSeconds": 3600,
+      "elapsedSeconds": 3617.432,
+      "healthSamples": 58,
+      "failedSamples": 0,
+      "live": {
+        "runtimeMode": "LIVE",
+        "browserConsoleErrors": 0,
+        "startActiveStreams": 2,
+        "endActiveStreams": 2,
+        "startCacheBars": 1505,
+        "endCacheBars": 1567,
+        "endConnected": true,
+        "endCanvasCount": 9,
+        "endAlertCount": 0
+      },
+      "localOffline": {
+        "runtimeMode": "LOCAL_OFFLINE",
+        "networkPolicy": "loopback_only",
+        "blockedAttempts": 0,
+        "browserConsoleErrors": 0,
+        "datasetId": "local-6ae893092fc94717aa0fc8045fcedb62",
+        "dataEpoch": "sha256:d0332faa07ee11a1ac2a8bf8812e0936c77e1855302940b566eb7d23bdfe3316",
+        "rows": 1000,
+        "gaps": 0,
+        "endCanvasCount": 9,
+        "endAlertCount": 0
+      }
+    }
+  },
+  "cleanup": {
+    "playwrightClosed": true,
+    "stoppedProcessTreeCount": 14,
+    "releasedPorts": [18081, 18082, 15174, 15175]
+  },
+  "remotePush": false,
+  "deployed": false
+}

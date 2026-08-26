@@ -11,7 +11,24 @@ from typing import Mapping
 
 from dotenv import load_dotenv
 
+_ENVIRONMENT_KEYS_BEFORE_DOTENV = frozenset(os.environ)
 load_dotenv()
+_DOTENV_ADDED_VALUES = {
+    key: os.environ[key]
+    for key in os.environ.keys() - _ENVIRONMENT_KEYS_BEFORE_DOTENV
+}
+_DOTENV_PROXY_VALUES = {
+    key: _DOTENV_ADDED_VALUES[key]
+    for key in (
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "https_proxy",
+        "http_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    )
+    if key in _DOTENV_ADDED_VALUES
+}
 
 logger = logging.getLogger("candlescope.config")
 
@@ -311,6 +328,7 @@ class BacktestSettings:
     online_learning_enabled: bool
     multi_market_enabled: bool
     replay_review_bridge_enabled: bool
+    python_scale_v1_enabled: bool
     db_path: Path
     max_active_runs: int
     max_concurrent_studies: int
@@ -424,6 +442,9 @@ def load_backtest_settings(
         ),
         replay_review_bridge_enabled=_strict_replay_bool(
             environment, "BACKTEST_REPLAY_REVIEW_BRIDGE_ENABLED", "1"
+        ),
+        python_scale_v1_enabled=_strict_replay_bool(
+            environment, "BACKTEST_PYTHON_SCALE_V1_ENABLED", "0"
         ),
         db_path=backtest_db_path,
         max_active_runs=values["BACKTEST_MAX_ACTIVE_RUNS"],
@@ -540,9 +561,9 @@ REPLAY_EVENT_SUBSCRIBER_QUEUE = REPLAY_SETTINGS.event_subscriber_queue
 REPLAY_CONTROLLER_TTL_SECONDS = REPLAY_SETTINGS.controller_ttl_seconds
 REPLAY_IDLE_TTL_SECONDS = REPLAY_SETTINGS.idle_ttl_seconds
 
-# Backtest is a default-off research product and owns a database separate from
-# K-lines and replay. Flags stay closed until a later Phase explicitly enables
-# them; environment overrides may only tighten the frozen ceilings.
+# Backtest is a default-on research product and owns a database separate from
+# K-lines and replay. Environment overrides may still disable capabilities or
+# tighten the frozen resource ceilings for rollback and constrained hosts.
 BACKTEST_SETTINGS = load_backtest_settings(
     os.environ,
     data_dir=DATA_DIR,
@@ -960,11 +981,17 @@ def _get_system_proxy() -> str | None:
     """
     env_proxy = (
         os.getenv("HTTPS_PROXY")
+        or _DOTENV_PROXY_VALUES.get("HTTPS_PROXY")
         or os.getenv("HTTP_PROXY")
+        or _DOTENV_PROXY_VALUES.get("HTTP_PROXY")
         or os.getenv("https_proxy")
+        or _DOTENV_PROXY_VALUES.get("https_proxy")
         or os.getenv("http_proxy")
+        or _DOTENV_PROXY_VALUES.get("http_proxy")
         or os.getenv("ALL_PROXY")
+        or _DOTENV_PROXY_VALUES.get("ALL_PROXY")
         or os.getenv("all_proxy")
+        or _DOTENV_PROXY_VALUES.get("all_proxy")
     )
     if env_proxy:
         return env_proxy
@@ -1000,3 +1027,13 @@ def get_effective_proxy() -> str | None:
         return custom_proxy if custom_proxy else None
     # mode == "system"
     return _get_system_proxy()
+
+
+# python-dotenv is used here as a configuration source, not as a process-wide
+# mutation. Remove only keys this module added; explicit caller variables and
+# any concurrent changes are preserved. This keeps isolated release verifiers
+# and child-process tests from inheriting unrelated product defaults.
+for _name, _loaded_value in _DOTENV_ADDED_VALUES.items():
+    if os.environ.get(_name) == _loaded_value:
+        os.environ.pop(_name, None)
+del _DOTENV_ADDED_VALUES, _ENVIRONMENT_KEYS_BEFORE_DOTENV

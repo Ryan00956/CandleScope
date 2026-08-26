@@ -544,10 +544,6 @@ function LiveChartCell({
     toggleAlertsPanel,
   ]);
 
-  // The pure builder only reads declarative view/actions/status fields. Some
-  // runtime contracts also carry opaque refs, which the React lint rule cannot
-  // distinguish from refs that would be dereferenced during render.
-  // eslint-disable-next-line react-hooks/refs
   const model = useMemo(() => buildAppShellViewModel({
     session: {
       view: chartSession.view,

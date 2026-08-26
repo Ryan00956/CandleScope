@@ -25,6 +25,9 @@ def test_phase1_contract_rebuilds_exact_v2_and_v3_generations() -> None:
     contract = phase1.validate_contract()
 
     assert contract["schemaVersion"] == phase1.CONTRACT_SCHEMA_VERSION
+    assert contract["previousContractSha256"] == (
+        "sha256:" + phase1.HISTORICAL_CONTRACT_FILE_SHA256
+    )
     assert contract["protocol"] == {
         "plugin": "candlescope.plugin/2",
         "controlTransport": "jsonl/1",

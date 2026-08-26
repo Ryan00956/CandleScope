@@ -31,6 +31,7 @@ MARKETPLACE_ID = "candlescope.community"
 PUBLISHER_ID = "candlescope"
 INDEX_URL = "https://plugins.example.test/index.json"
 SOURCE_ORIGIN = "https://plugins.example.test"
+MARKETPLACE_TEST_NOW = datetime(2026, 7, 23, 2, 0, tzinfo=UTC)
 
 
 def _timestamp(value: datetime) -> str:

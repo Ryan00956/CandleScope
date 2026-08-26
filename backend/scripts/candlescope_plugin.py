@@ -10,6 +10,13 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
+# The repository CLI is a supported source-checkout entry point. Pin its SDK
+# before importing any app package so a clean child process neither requires an
+# installed wheel nor accidentally imports a sibling worktree's SDK.
+from plugin_sdk_isolation import pin_in_repo_plugin_sdk  # noqa: E402
+
+pin_in_repo_plugin_sdk(BACKEND_ROOT)
+
 
 def main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)

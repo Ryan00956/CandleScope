@@ -12,6 +12,7 @@ from app.plugin_core_v2.runtime import CorePluginPlatform
 from app.plugin_security_v2.management import LocalManagementGuard
 from tests.plugin_marketplace_testkit import (
     MARKETPLACE_ID,
+    MARKETPLACE_TEST_NOW,
     SignedMarketplaceBuilder,
     build_marketplace_bundle,
 )
@@ -234,6 +235,7 @@ async def test_signed_marketplace_artifact_cannot_enter_local_trust_flow(
         host_version="0.4.0",
         marketplace_enabled=True,
         marketplace_roots=(builder.root,),
+        marketplace_now_provider=lambda: MARKETPLACE_TEST_NOW,
         trust_ux_enabled=True,
     )
     platform.marketplace.import_index(
@@ -293,6 +295,7 @@ async def test_trusted_local_to_sandboxed_restarts_process_generation(
         host_version="0.4.0",
         marketplace_enabled=True,
         marketplace_roots=(builder.root,),
+        marketplace_now_provider=lambda: MARKETPLACE_TEST_NOW,
         trust_ux_enabled=True,
     )
     platform.marketplace.import_index(

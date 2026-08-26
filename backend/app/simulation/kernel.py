@@ -171,6 +171,7 @@ class SimulationKernel:
 
     def snapshot(self) -> dict:
         return {
+            "scale_stream_decisions": self.scale_stream_decisions,
             **(
                 {
                     "execution_model_revision": self.execution_model_revision,
@@ -195,6 +196,17 @@ class SimulationKernel:
                     ],
                 }
                 if self.execution_model_revision == EXECUTION_REALISM_V2
+                else {}
+            ),
+            **(
+                {
+                    "decision_chain_hash": self._decision_chain_hash,
+                    "decision_count": self._decision_count,
+                    "equity_curve_event_interval": self.equity_curve_event_interval,
+                    "equity_curve_mode": self.equity_curve_mode,
+                }
+                if self.scale_stream_decisions
+                and self.execution_model_revision != EXECUTION_REALISM_V2
                 else {}
             ),
             **(
@@ -243,6 +255,13 @@ class SimulationKernel:
         }
 
     def restore(self, payload: Mapping[str, object]) -> None:
+        if bool(payload.get("scale_stream_decisions") or False) != bool(
+            self.scale_stream_decisions
+        ):
+            raise MarketDatasetError(
+                "decision stream checkpoint identity changed",
+                code="CHECKPOINT_CORRUPT",
+            )
         if payload.get("equity_curve_mode") != self.equity_curve_mode:
             raise MarketDatasetError(
                 "equity curve checkpoint identity changed", code="CHECKPOINT_CORRUPT"
@@ -332,6 +351,14 @@ class SimulationKernel:
                 )
                 for item in payload.get("fill_source_events") or []  # type: ignore[union-attr]
             ]
+        elif self.scale_stream_decisions:
+            self._decision_chain_hash = str(
+                payload.get("decision_chain_hash") or "sha256:GENESIS"
+            )
+            self._decision_count = int(payload.get("decision_count") or 0)
+            self.equity_curve_event_interval = int(
+                payload.get("equity_curve_event_interval") or 1
+            )
         self.equity_curve = list(payload.get("equity_curve") or [])  # type: ignore[arg-type]
         account = payload.get("account")
         if isinstance(account, Mapping):

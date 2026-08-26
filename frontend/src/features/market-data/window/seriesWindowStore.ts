@@ -27,10 +27,13 @@ import {
 } from "../phase1WindowPolicy.js";
 import { createWindowDelta, WINDOW_DELTA_TYPES } from "./windowDeltas.js";
 
+export type RightTruncatedFuturePolicy = "allow" | "reject";
+
 interface SeriesWindowStoreOptions {
   maxBars?: number;
   intervalSeconds?: number | null;
   seriesKey?: SeriesKey | string | null;
+  rightTruncatedFuturePolicy?: RightTruncatedFuturePolicy;
 }
 interface SnapshotOptions {
   force?: boolean;
@@ -134,11 +137,13 @@ export class SeriesWindowStore {
   private _axisRevision: number;
   private _listeners: Set<SeriesWindowListener>;
   private _rightTruncated: boolean;
+  private readonly rightTruncatedFuturePolicy: RightTruncatedFuturePolicy;
 
   constructor({
     maxBars = MAX_SERIES_BARS,
     intervalSeconds = null,
     seriesKey = null,
+    rightTruncatedFuturePolicy = "allow",
   }: SeriesWindowStoreOptions = {}) {
     this.seriesKey = typeof seriesKey === "string" ? asSeriesKey(seriesKey) : seriesKey;
     this.maxBars = maxBars;
@@ -152,6 +157,7 @@ export class SeriesWindowStore {
     this._axisRevision = 0;
     this._listeners = new Set();
     this._rightTruncated = false;
+    this.rightTruncatedFuturePolicy = rightTruncatedFuturePolicy;
   }
 
   get version(): DataRevision {
@@ -333,8 +339,33 @@ export class SeriesWindowStore {
     rows: readonly KlineBarInput[] | null | undefined,
     meta: WindowDeltaDetail = {},
   ): WindowDelta {
-    const incoming = normalizeRows(rows);
+    let incoming = normalizeRows(rows);
     if (!incoming.length) return createWindowDelta(WINDOW_DELTA_TYPES.NOOP);
+    const originalIncomingBars = incoming.length;
+    const rightBoundaryTime = this._rightTruncated
+      && this.rightTruncatedFuturePolicy === "reject"
+      ? this._lastTime()
+      : null;
+    if (rightBoundaryTime != null) {
+      incoming = incoming.filter((row) => row.time <= rightBoundaryTime);
+      if (!incoming.length) {
+        return createWindowDelta(WINDOW_DELTA_TYPES.NOOP, {
+          ...meta,
+          incomingBars: 0,
+          originalIncomingBars,
+          ignoredRightTruncatedRows: originalIncomingBars,
+          rightBoundaryTime,
+        });
+      }
+    }
+    const ignoredRightTruncatedRows = originalIncomingBars - incoming.length;
+    const rightFenceMeta = ignoredRightTruncatedRows > 0
+      ? {
+          originalIncomingBars,
+          ignoredRightTruncatedRows,
+          ...(rightBoundaryTime == null ? {} : { rightBoundaryTime }),
+        }
+      : {};
     const incomingFirst = incoming.at(0)?.time;
     const incomingLast = incoming.at(-1)?.time;
     if (incomingFirst == null || incomingLast == null) {
@@ -360,7 +391,13 @@ export class SeriesWindowStore {
         break;
       }
     }
-    if (alreadyPresent) return createWindowDelta(WINDOW_DELTA_TYPES.NOOP);
+    if (alreadyPresent) {
+      return createWindowDelta(WINDOW_DELTA_TYPES.NOOP, {
+        ...meta,
+        incomingBars: incoming.length,
+        ...rightFenceMeta,
+      });
+    }
 
     const nextRows: KlineBar[] = [];
     let addedLeft = 0;
@@ -447,6 +484,7 @@ export class SeriesWindowStore {
       retainedIncomingRows,
       changedRanges,
       ...meta,
+      ...rightFenceMeta,
     });
     this._emit(delta);
     return delta;
@@ -466,6 +504,19 @@ export class SeriesWindowStore {
     const lastTime = this._lastTime();
     if (firstTime == null || lastTime == null || time < firstTime) {
       return createWindowDelta(WINDOW_DELTA_TYPES.NOOP);
+    }
+    if (
+      this._rightTruncated
+      && this.rightTruncatedFuturePolicy === "reject"
+      && time > lastTime
+    ) {
+      return createWindowDelta(WINDOW_DELTA_TYPES.NOOP, {
+        ...meta,
+        incomingBars: 0,
+        originalIncomingBars: 1,
+        ignoredRightTruncatedRows: 1,
+        rightBoundaryTime: lastTime,
+      });
     }
 
     const existingRef = this._timeIndex.get(time);

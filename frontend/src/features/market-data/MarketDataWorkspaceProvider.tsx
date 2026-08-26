@@ -71,6 +71,7 @@ export function MarketDataWorkspaceProvider({
       }) : null,
       windowRegistry: new SeriesWindowRegistry({
         maxBars: MAX_SERIES_BARS,
+        rightTruncatedFuturePolicy: "reject",
         sharedSnapshot: workspaceBus?.isNative()
           ? {
               read: (key) => desktopWindowManager.readSeriesSnapshot(key),

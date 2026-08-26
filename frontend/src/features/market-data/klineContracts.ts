@@ -33,6 +33,9 @@ export interface WindowDeltaDetail extends Record<string, unknown> {
   appended?: boolean;
   replaced?: boolean;
   originalBars?: number;
+  originalIncomingBars?: number;
+  ignoredRightTruncatedRows?: number;
+  rightBoundaryTime?: EpochSeconds;
   trimmedLeft?: number;
   trimmedRight?: number;
   changedRanges?: WindowChangedRange[];

@@ -62,6 +62,23 @@ test("registry creates, returns, and evicts stores", () => {
   assert.equal(registry.get(key), null);
 });
 
+test("registry propagates the live right-truncation fence to its stores", () => {
+  const registry = new SeriesWindowRegistry({
+    maxBars: 3,
+    rightTruncatedFuturePolicy: "reject",
+  });
+  const key = buildSeriesWindowKey({ symbol: "BTCUSDT", interval: "1m" });
+  const store = registry.getOrCreate(key, { intervalSeconds: 1 });
+  store.replace([{ time: 4 }, { time: 5 }, { time: 6 }]);
+  store.applyRange([{ time: 1 }, { time: 2 }, { time: 3 }]);
+
+  const delta = store.applyTick({ time: 100 });
+
+  assert.equal(delta.type, "noop");
+  assert.equal(delta.ignoredRightTruncatedRows, 1);
+  assert.deepEqual(store.snapshot().map((row) => row.time), [1, 2, 3]);
+});
+
 test("registry entries include store metadata", () => {
   const registry = new SeriesWindowRegistry();
   const key = buildSeriesWindowKey({ symbol: "ETHUSDT", interval: "5m" });

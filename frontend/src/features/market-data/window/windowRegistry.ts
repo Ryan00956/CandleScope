@@ -1,6 +1,9 @@
 import type { KlineBar, MarketSeries, SeriesKey } from "../marketDataTypes.js";
 import { asSeriesKey } from "../marketDataTypes.js";
-import { SeriesWindowStore } from "./seriesWindowStore.js";
+import {
+  SeriesWindowStore,
+  type RightTruncatedFuturePolicy,
+} from "./seriesWindowStore.js";
 import { canonicalizeIntervalValue } from "../../../utils/intervals.js";
 import { WINDOW_DELTA_TYPES } from "../klineContracts.js";
 
@@ -13,6 +16,7 @@ const SHARED_SNAPSHOT_DELTA_TYPES: ReadonlySet<string> = new Set([
 
 interface SeriesWindowRegistryOptions {
   maxBars?: number;
+  rightTruncatedFuturePolicy?: RightTruncatedFuturePolicy;
   sharedSnapshot?: {
     read(key: string): KlineBar[];
     publish(key: string, rows: readonly KlineBar[]): void;
@@ -26,6 +30,7 @@ interface StoreOptions {
 interface DetachedStoreOptions {
   intervalSeconds?: number | null;
   maxBars?: number;
+  rightTruncatedFuturePolicy?: RightTruncatedFuturePolicy;
 }
 
 export interface SeriesWindowActivation {
@@ -53,10 +58,15 @@ export function buildSeriesWindowKey({
  */
 export function createDetachedSeriesWindowStore(
   key: SeriesKey | string,
-  { intervalSeconds = null, maxBars }: DetachedStoreOptions = {},
+  {
+    intervalSeconds = null,
+    maxBars,
+    rightTruncatedFuturePolicy,
+  }: DetachedStoreOptions = {},
 ): SeriesWindowStore {
   return new SeriesWindowStore({
     ...(maxBars === undefined ? {} : { maxBars }),
+    ...(rightTruncatedFuturePolicy === undefined ? {} : { rightTruncatedFuturePolicy }),
     intervalSeconds,
     seriesKey: key,
   });
@@ -64,13 +74,19 @@ export function createDetachedSeriesWindowStore(
 
 export class SeriesWindowRegistry {
   maxBars: number | undefined;
+  private readonly rightTruncatedFuturePolicy: RightTruncatedFuturePolicy | undefined;
   private readonly sharedSnapshot: SeriesWindowRegistryOptions["sharedSnapshot"];
   private readonly sharedCounts = { hydrations: 0, hydratedBars: 0, publishes: 0, publishErrors: 0 };
   private _stores: Map<string, SeriesWindowStore>;
   private _meta: Map<string, Record<string, unknown>>;
 
-  constructor({ maxBars, sharedSnapshot = null }: SeriesWindowRegistryOptions = {}) {
+  constructor({
+    maxBars,
+    rightTruncatedFuturePolicy,
+    sharedSnapshot = null,
+  }: SeriesWindowRegistryOptions = {}) {
     this.maxBars = maxBars;
+    this.rightTruncatedFuturePolicy = rightTruncatedFuturePolicy;
     this.sharedSnapshot = sharedSnapshot;
     this._stores = new Map();
     this._meta = new Map();
@@ -96,6 +112,9 @@ export class SeriesWindowRegistry {
     if (!store) {
       store = new SeriesWindowStore({
         ...(this.maxBars === undefined ? {} : { maxBars: this.maxBars }),
+        ...(this.rightTruncatedFuturePolicy === undefined
+          ? {}
+          : { rightTruncatedFuturePolicy: this.rightTruncatedFuturePolicy }),
         seriesKey: key,
         intervalSeconds: options.intervalSeconds ?? null,
       });

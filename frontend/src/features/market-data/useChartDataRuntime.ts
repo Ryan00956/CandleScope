@@ -274,7 +274,10 @@ export function useChartDataRuntime({
   const [activeSeriesStore, setActiveSeriesStore] = useState<SeriesWindowStore | null>(null);
   const windowRegistryRef = useRef<SeriesWindowRegistry | null>(null);
   if (windowRegistryRef.current == null) {
-    windowRegistryRef.current = new SeriesWindowRegistry({ maxBars: MAX_SERIES_BARS });
+    windowRegistryRef.current = new SeriesWindowRegistry({
+      maxBars: MAX_SERIES_BARS,
+      rightTruncatedFuturePolicy: "reject",
+    });
   }
   const windowRegistry = configuredWindowRegistry || windowRegistryRef.current;
   const chartDataVersionRef = useRef(0);
@@ -1056,6 +1059,7 @@ export function useChartDataRuntime({
     const detachedStore = createDetachedSeriesWindowStore(key, {
       maxBars: MAX_SERIES_BARS,
       intervalSeconds: parseIntervalSeconds(intv),
+      rightTruncatedFuturePolicy: "reject",
     });
     chartDataRef.current = [];
     setActiveSeriesStore(detachedStore);

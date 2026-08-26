@@ -86,6 +86,120 @@ test("right truncation stays retryable until a successful replacement", () => {
   assert.deepEqual(store.snapshot().map((row) => row.time), [4, 5, 6]);
 });
 
+test("a right-truncated historical window rejects a newer realtime tick", () => {
+  const store = new SeriesWindowStore({
+    intervalSeconds: 1,
+    maxBars: 3,
+    rightTruncatedFuturePolicy: "reject",
+  });
+  store.replace(rows([4, 5, 6]));
+  store.applyRange(rows([1, 2, 3]));
+
+  const delta = store.applyTick(rows([100])[0]);
+
+  assert.equal(delta.type, WINDOW_DELTA_TYPES.NOOP);
+  assert.equal(delta.originalIncomingBars, 1);
+  assert.equal(delta.ignoredRightTruncatedRows, 1);
+  assert.equal(delta.rightBoundaryTime, 3);
+  assert.equal(store.rightTruncated, true);
+  assert.deepEqual(store.snapshot().map((row) => row.time), [1, 2, 3]);
+  assert.deepEqual(store.coverage().gaps, []);
+});
+
+test("a right-truncated historical window rejects newer range rows but keeps in-window corrections", () => {
+  const store = new SeriesWindowStore({
+    intervalSeconds: 1,
+    maxBars: 3,
+    rightTruncatedFuturePolicy: "reject",
+  });
+  store.replace(rows([4, 5, 6]));
+  store.applyRange(rows([1, 2, 3]));
+
+  const delta = store.applyRange([
+    { ...rows([2])[0], close: 777 },
+    ...rows([100, 101]),
+  ]);
+
+  assert.equal(delta.type, WINDOW_DELTA_TYPES.MID_MERGE);
+  assert.equal(delta.incomingBars, 1);
+  assert.equal(delta.originalIncomingBars, 3);
+  assert.equal(delta.ignoredRightTruncatedRows, 2);
+  assert.equal(delta.rightBoundaryTime, 3);
+  assert.equal(store.rightTruncated, true);
+  assert.deepEqual(store.snapshot().map((row) => row.time), [1, 2, 3]);
+  assert.equal(store.getByTime(2)?.close, 777);
+  assert.deepEqual(store.coverage().gaps, []);
+});
+
+test("a right-truncated historical window rejects an entirely newer range patch", () => {
+  const store = new SeriesWindowStore({
+    intervalSeconds: 1,
+    maxBars: 3,
+    rightTruncatedFuturePolicy: "reject",
+  });
+  store.replace(rows([4, 5, 6]));
+  store.applyRange(rows([1, 2, 3]));
+
+  const delta = store.applyRange(rows([100, 101]));
+
+  assert.equal(delta.type, WINDOW_DELTA_TYPES.NOOP);
+  assert.equal(delta.originalIncomingBars, 2);
+  assert.equal(delta.ignoredRightTruncatedRows, 2);
+  assert.equal(delta.rightBoundaryTime, 3);
+  assert.equal(store.rightTruncated, true);
+  assert.deepEqual(store.snapshot().map((row) => row.time), [1, 2, 3]);
+  assert.deepEqual(store.coverage().gaps, []);
+});
+
+test("a right-truncated historical window can keep sliding left", () => {
+  const store = new SeriesWindowStore({
+    intervalSeconds: 1,
+    maxBars: 3,
+    rightTruncatedFuturePolicy: "reject",
+  });
+  store.replace(rows([7, 8, 9]));
+  store.applyRange(rows([4, 5, 6]));
+
+  const delta = store.applyRange(rows([1, 2, 3]));
+
+  assert.equal(delta.type, WINDOW_DELTA_TYPES.PREPEND);
+  assert.equal(delta.trimmedRight, 3);
+  assert.equal(store.rightTruncated, true);
+  assert.deepEqual(store.snapshot().map((row) => row.time), [1, 2, 3]);
+  assert.deepEqual(store.coverage().gaps, []);
+});
+
+test("a right-truncated historical window still accepts a retained tail correction", () => {
+  const store = new SeriesWindowStore({
+    intervalSeconds: 1,
+    maxBars: 3,
+    rightTruncatedFuturePolicy: "reject",
+  });
+  store.replace(rows([4, 5, 6]));
+  store.applyRange(rows([1, 2, 3]));
+
+  const delta = store.applyTick({ ...rows([3])[0], close: 888 });
+
+  assert.equal(delta.type, WINDOW_DELTA_TYPES.TICK);
+  assert.equal(delta.replaced, true);
+  assert.equal(store.rightTruncated, true);
+  assert.equal(store.getByTime(3)?.close, 888);
+  assert.deepEqual(store.snapshot().map((row) => row.time), [1, 2, 3]);
+  assert.deepEqual(store.coverage().gaps, []);
+});
+
+test("a generic right-truncated store keeps authoritative range convergence enabled", () => {
+  const store = new SeriesWindowStore({ intervalSeconds: 1, maxBars: 3 });
+  store.replace(rows([4, 5, 6]));
+  store.applyRange(rows([1, 2, 3]));
+
+  const delta = store.applyRange(rows([4, 5, 6]));
+
+  assert.equal(delta.type, WINDOW_DELTA_TYPES.APPEND);
+  assert.equal(store.rightTruncated, true);
+  assert.deepEqual(store.snapshot().map((row) => row.time), [4, 5, 6]);
+});
+
 test("prepend retention reports incoming rows discarded beyond the window budget", () => {
   const store = new SeriesWindowStore({ intervalSeconds: 1, maxBars: 3 });
   store.replace(rows([5, 6, 7]));

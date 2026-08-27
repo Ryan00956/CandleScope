@@ -147,6 +147,8 @@ from .runtime_pressure import (
     process_memory_snapshot,
     storage_file_snapshot,
 )
+from app.data_engine.manual_history.protection import DurableProtectionRegistry
+from app.data_engine.manual_history.repository import ManualHistoryRepository
 from .storage_intents import PRIORITY_RANK, StorageIntentRegistry, WILDCARD_INTERVAL
 from .stream_policy import StreamEnsurePlanner
 from .warm_start import AggregatorWarmStartService
@@ -362,6 +364,10 @@ class DataManager:
         )
         self.price_cache = PriceSnapshotCache()
         self.storage_intents = StorageIntentRegistry(
+            lock=self._storage_gc_guard,
+            on_change=self._mark_storage_gc_protection_changed,
+        )
+        self.durable_protections = DurableProtectionRegistry(
             lock=self._storage_gc_guard,
             on_change=self._mark_storage_gc_protection_changed,
         )
@@ -753,8 +759,10 @@ class DataManager:
         if self._cfg.cache.ttl_seconds > 0:
             self._ttl_task = asyncio.create_task(self._ttl_loop())
 
-        # Startup DB cleanup (safe — no subscribers yet)
-        await run_storage(self.retention.run_startup_db_cleanup)
+        # Load durable/transient floors before any startup or auto GC.
+        await run_storage(self.reload_durable_protections)
+        if self.retention.storage_row_limits_enabled:
+            await self.run_storage_gc()
 
         # Ephemeral trim loop (every 30 min)
         self._cleanup_task = asyncio.create_task(self.retention.ephemeral_trim_loop())
@@ -2267,7 +2275,7 @@ class DataManager:
         scoring: str = "smart",
     ) -> dict[str, Any]:
         """Return a dry-run plan for SQLite retention cleanup."""
-        protected_keys, storage_intents, protection_epoch = (
+        protected_keys, storage_intents, protection_floors, protection_epoch = (
             self._storage_gc_planning_snapshot()
         )
         report = self.retention.plan_storage_gc(
@@ -2276,6 +2284,7 @@ class DataManager:
             storage_row_limits_enabled=storage_row_limits_enabled,
             protected_keys=protected_keys,
             storage_intents=storage_intents,
+            protection_floors=protection_floors,
             behavior_heat=self.cache_behavior.heat_map(),
             runtime_pressure=self.runtime_pressure_snapshot(file_snapshot=file_snapshot),
             scoring=scoring,
@@ -2295,7 +2304,7 @@ class DataManager:
         scoring: str = "smart",
     ) -> dict[str, Any]:
         """Capture loop-owned protection state before offloading storage planning."""
-        protected_keys, storage_intents, protection_epoch = (
+        protected_keys, storage_intents, protection_floors, protection_epoch = (
             self._storage_gc_planning_snapshot()
         )
         behavior_heat = await run_storage(self.cache_behavior.heat_map)
@@ -2307,6 +2316,7 @@ class DataManager:
             storage_row_limits_enabled=storage_row_limits_enabled,
             protected_keys=protected_keys,
             storage_intents=storage_intents,
+            protection_floors=protection_floors,
             behavior_heat=behavior_heat,
             runtime_pressure=runtime_pressure,
             scoring=scoring,
@@ -2337,7 +2347,7 @@ class DataManager:
 
             storage_path = KLINES_DB_PATH
         fresh_files = storage_file_snapshot(storage_path)
-        protected_keys, storage_intents, protection_epoch = (
+        protected_keys, storage_intents, protection_floors, protection_epoch = (
             self._storage_gc_planning_snapshot()
         )
         report = self.retention.plan_storage_gc(
@@ -2346,6 +2356,7 @@ class DataManager:
             storage_row_limits_enabled=policy.get("storage_row_limits_enabled"),
             protected_keys=protected_keys,
             storage_intents=storage_intents,
+            protection_floors=protection_floors,
             behavior_heat=self.cache_behavior.heat_map(),
             runtime_pressure=self.runtime_pressure_snapshot(
                 file_snapshot=fresh_files,
@@ -3064,14 +3075,25 @@ class DataManager:
                 keys.add(SeriesKey(symbol, interval, exchange=exchange, market_type=market_type))
             return keys
 
-    def _storage_gc_planning_snapshot(self) -> tuple[set[SeriesKey], Any, int]:
+    def _storage_gc_planning_snapshot(self) -> tuple[set[SeriesKey], Any, dict, int]:
         """Capture protection inputs and their diagnostic epoch atomically."""
         with self._storage_gc_guard:
             return (
                 self._protected_storage_keys(),
                 self.storage_intents.clone(),
+                self.durable_protections.clone(),
                 self._storage_gc_protection_epoch,
             )
+
+    def reload_durable_protections(self) -> None:
+        """Restore GC floors from SQLite.  Safe when the schema is absent."""
+        from app.core import config as core_config
+
+        repository = ManualHistoryRepository(core_config.KLINES_DB_PATH)
+        try:
+            self.durable_protections.load_from_repository(repository)
+        except Exception as exc:
+            logger.warning("Durable protection reload skipped: %s", exc)
 
     def _mark_storage_gc_protection_changed(self) -> None:
         self._storage_gc_protection_epoch += 1
@@ -3081,11 +3103,34 @@ class DataManager:
         key: SeriesKey,
         planned_intents: list[dict[str, Any]],
         planned_keep_rows: int | None = None,
+        planned_protected_start_ms: int | None = None,
+        planned_owner_ids: list[str] | tuple[str, ...] | None = None,
     ) -> str | None:
         """Return the current hard protection reason for a storage GC key."""
         with self._storage_gc_guard:
             if key in self._protected_storage_keys():
                 return "series became active, subscribed, or leased after planning"
+            current_floor = self.durable_protections.floor_for(key)
+            current_ms = (
+                None if current_floor is None else int(current_floor.protected_start_ms)
+            )
+            planned_ms = (
+                None
+                if planned_protected_start_ms is None
+                else int(planned_protected_start_ms)
+            )
+            planned_owners = frozenset(str(item) for item in (planned_owner_ids or ()))
+            current_owners = frozenset(
+                str(item) for item in (current_floor.owner_ids if current_floor else ())
+            )
+            if current_ms is not None and (planned_ms is None or current_ms < planned_ms):
+                return "manual-history protection floor became stronger after planning"
+            if planned_ms is not None and (current_ms is None or current_ms > planned_ms):
+                return "manual-history protection floor weakened after planning; replan required"
+            if current_owners - planned_owners:
+                return "series gained a manual-history protection owner after planning"
+            if planned_owners - current_owners:
+                return "manual-history protection owner released after planning; replan required"
             current_intents = [intent.to_dict() for intent in self.storage_intents.match(key)]
             planned_ids = {str(intent.get("id") or "") for intent in planned_intents}
             current_ids = {str(intent.get("id") or "") for intent in current_intents}
@@ -3157,10 +3202,14 @@ class DataManager:
                         (time.perf_counter() - guard_acquired_at) * 1000
                     ),
                 }
+            planned_protected_start_ms = delete_kwargs.get("delete_before_ms")
+            planned_owner_ids = delete_kwargs.get("planned_owner_ids") or ()
             protection_reason = self._storage_gc_protection_reason(
                 key,
                 planned_intents,
                 planned_keep_rows,
+                planned_protected_start_ms=planned_protected_start_ms,
+                planned_owner_ids=planned_owner_ids,
             )
             if protection_reason:
                 return {
@@ -3180,8 +3229,28 @@ class DataManager:
                         (time.perf_counter() - guard_acquired_at) * 1000
                     ),
                 }
+            current_floor = self.durable_protections.floor_for(key)
+            execute_kwargs = dict(delete_kwargs)
+            execute_kwargs.pop("planned_owner_ids", None)
+            if current_floor is None:
+                execute_kwargs.pop("delete_before_ms", None)
+            else:
+                execute_kwargs["delete_before_ms"] = int(current_floor.protected_start_ms)
+            try:
+                accepted = inspect.signature(delete_func).parameters
+            except (TypeError, ValueError):
+                accepted = {}
+            if accepted and not any(
+                param.kind == inspect.Parameter.VAR_KEYWORD
+                for param in accepted.values()
+            ):
+                execute_kwargs = {
+                    key_name: value
+                    for key_name, value in execute_kwargs.items()
+                    if key_name in accepted
+                }
             delete_started_at = time.perf_counter()
-            deleted = int(delete_func(**delete_kwargs) or 0)
+            deleted = int(delete_func(**execute_kwargs) or 0)
             backend_delete_elapsed_ms = (
                 time.perf_counter() - delete_started_at
             ) * 1000.0

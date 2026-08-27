@@ -1540,6 +1540,23 @@ class KlinesRepoAdapter:
             market_type=market_type or self._market_type,
         )
 
+    def count_rows_before(
+        self,
+        symbol: str,
+        interval: str,
+        before_ms: int,
+        exchange: str | None = None,
+        market_type: str | None = None,
+    ) -> int:
+        """Count durable rows strictly earlier than *before_ms*."""
+        return count_klines_before(
+            symbol=symbol,
+            interval=interval,
+            before_ms=before_ms,
+            exchange=exchange or self._exchange,
+            market_type=market_type or self._market_type,
+        )
+
     def delete_oldest_batch(
         self,
         symbol: str,
@@ -1548,6 +1565,7 @@ class KlinesRepoAdapter:
         batch_size: int = 10_000,
         exchange: str | None = None,
         market_type: str | None = None,
+        delete_before_ms: int | None = None,
     ) -> int:
         """Delete one bounded batch of oldest bars while keeping newest rows."""
         return delete_oldest_klines_batch(
@@ -1557,6 +1575,7 @@ class KlinesRepoAdapter:
             batch_size=batch_size,
             exchange=exchange or self._exchange,
             market_type=market_type or self._market_type,
+            delete_before_ms=delete_before_ms,
         )
 
     def wal_checkpoint_truncate(self) -> dict:
@@ -1841,6 +1860,25 @@ def delete_oldest_klines(
         return cur.rowcount
 
 
+def count_klines_before(
+    symbol: str,
+    interval: str,
+    before_ms: int,
+    *,
+    exchange: str = DEFAULT_EXCHANGE,
+    market_type: str = DEFAULT_MARKET_TYPE,
+) -> int:
+    """Count rows with ``open_time`` strictly earlier than *before_ms*."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM klines "
+            "WHERE exchange = ? AND market_type = ? AND symbol = ? AND interval = ? "
+            "AND open_time < ?",
+            (exchange, market_type, symbol, interval, int(before_ms)),
+        ).fetchone()
+    return int(row["cnt"] if row is not None else 0)
+
+
 def delete_oldest_klines_batch(
     symbol: str,
     interval: str,
@@ -1849,11 +1887,13 @@ def delete_oldest_klines_batch(
     *,
     exchange: str = DEFAULT_EXCHANGE,
     market_type: str = DEFAULT_MARKET_TYPE,
+    delete_before_ms: int | None = None,
 ) -> int:
     """Delete at most *batch_size* oldest bars while keeping newest *keep* rows."""
     if keep < 0:
         keep = 0
     batch_size = min(1_000, max(1, int(batch_size or 1)))
+    ceiling_ms = None if delete_before_ms is None else int(delete_before_ms)
 
     # Storage GC is ordered with stream/subscription activation.  Fail fast on
     # lock contention instead of holding that ordering guard through SQLite's
@@ -1873,22 +1913,54 @@ def delete_oldest_klines_batch(
             (exchange, market_type, symbol, interval),
         ).fetchone()
         total = count_row["cnt"] if count_row else 0
-        to_delete = min(batch_size, max(0, total - keep))
+        if ceiling_ms is None:
+            prefix_count = total
+        else:
+            prefix_row = conn.execute(
+                "SELECT COUNT(*) AS cnt FROM klines "
+                "WHERE exchange = ? AND market_type = ? AND symbol = ? "
+                "AND interval = ? AND open_time < ?",
+                (exchange, market_type, symbol, interval, ceiling_ms),
+            ).fetchone()
+            prefix_count = int(prefix_row["cnt"] if prefix_row else 0)
+        to_delete = min(batch_size, prefix_count, max(0, total - keep))
         if to_delete <= 0:
             return 0
 
-        cur = conn.execute(
-            """
-            DELETE FROM klines
-            WHERE rowid IN (
-                SELECT rowid FROM klines
-                WHERE exchange = ? AND market_type = ? AND symbol = ? AND interval = ?
-                ORDER BY open_time ASC
-                LIMIT ?
+        if ceiling_ms is None:
+            cur = conn.execute(
+                """
+                DELETE FROM klines
+                WHERE rowid IN (
+                    SELECT rowid FROM klines
+                    WHERE exchange = ? AND market_type = ? AND symbol = ? AND interval = ?
+                    ORDER BY open_time ASC
+                    LIMIT ?
+                )
+                """,
+                (exchange, market_type, symbol, interval, to_delete),
             )
-            """,
-            (exchange, market_type, symbol, interval, to_delete),
-        )
+        else:
+            cur = conn.execute(
+                """
+                DELETE FROM klines
+                WHERE rowid IN (
+                    SELECT rowid FROM klines
+                    WHERE exchange = ? AND market_type = ? AND symbol = ?
+                      AND interval = ? AND open_time < ?
+                    ORDER BY open_time ASC
+                    LIMIT ?
+                )
+                """,
+                (
+                    exchange,
+                    market_type,
+                    symbol,
+                    interval,
+                    ceiling_ms,
+                    to_delete,
+                ),
+            )
         conn.commit()
         return cur.rowcount
 

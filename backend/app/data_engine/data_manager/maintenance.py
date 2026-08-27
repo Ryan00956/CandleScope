@@ -1023,6 +1023,8 @@ class MaintenanceService:
                         key,
                         list(victim.get("storage_intents") or []),
                         keep_rows,
+                        planned_protected_start_ms=victim.get("protected_start_ms"),
+                        planned_owner_ids=victim.get("protected_owner_ids") or (),
                     )
                     if key is not None and self._storage_gc_protection is not None
                     else None
@@ -1085,6 +1087,8 @@ class MaintenanceService:
                                 key,
                                 list(victim.get("storage_intents") or []),
                                 keep_rows,
+                                planned_protected_start_ms=victim.get("protected_start_ms"),
+                                planned_owner_ids=victim.get("protected_owner_ids") or (),
                             )
                             if key is not None and self._storage_gc_protection is not None
                             else None
@@ -1102,6 +1106,10 @@ class MaintenanceService:
                             "batch_size": step,
                             "exchange": exchange,
                             "market_type": market_type,
+                            "delete_before_ms": victim.get("protected_start_ms"),
+                            "planned_owner_ids": list(
+                                victim.get("protected_owner_ids") or ()
+                            ),
                         }
 
                         def invalidate_completed_batch(batch_result: Any) -> None:

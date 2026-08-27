@@ -91,6 +91,7 @@ class RetentionService:
         storage_row_limits_enabled: bool | None = None,
         protected_keys: set[SeriesKey] | None = None,
         storage_intents: StorageIntentRegistry | None = None,
+        protection_floors: dict[SeriesKey, Any] | None = None,
         behavior_heat: dict[str, dict[str, Any]] | None = None,
         runtime_pressure: dict[str, Any] | None = None,
         scoring: str = "smart",
@@ -178,6 +179,7 @@ class RetentionService:
             }
 
         protected = protected_keys or set()
+        floors = protection_floors or {}
         total_rows = sum(int(item.get("total_count", 0) or 0) for item in series_list)
         storage_bytes = int(
             files.get("physical_size_bytes", files.get("total_size_bytes", 0)) or 0
@@ -207,6 +209,7 @@ class RetentionService:
             and required_klines_relief > 0
         )
         candidates: list[dict[str, Any]] = []
+        blocking_owner_ids_acc: list[str] = []
 
         for item in series_list:
             interval = str(item.get("interval") or "").strip()
@@ -237,6 +240,39 @@ class RetentionService:
                 else base_keep_rows if row_limits_enabled else 0
             )
             current_rows = int(item.get("total_count", 0) or 0)
+            floor = floors.get(key)
+            rows_before_floor = 0
+            floor_keep_rows = 0
+            protected_start_ms = None
+            if floor is not None:
+                protected_start_ms = int(floor.protected_start_ms)
+                count_before = getattr(storage, "count_rows_before", None)
+                if callable(count_before):
+                    try:
+                        rows_before_floor = max(
+                            0,
+                            int(
+                                count_before(
+                                    symbol=symbol,
+                                    interval=interval,
+                                    before_ms=protected_start_ms,
+                                    exchange=exchange,
+                                    market_type=market_type,
+                                )
+                                or 0
+                            ),
+                        )
+                        floor_keep_rows = max(0, current_rows - rows_before_floor)
+                    except Exception:
+                        # Fail closed: if the prefix cannot be counted, keep
+                        # every stored row rather than crossing the floor.
+                        rows_before_floor = 0
+                        floor_keep_rows = current_rows
+                else:
+                    floor_keep_rows = current_rows
+            unclamped_row_limit_keep = row_limit_keep_rows
+            if floor_keep_rows > 0:
+                row_limit_keep_rows = max(row_limit_keep_rows, floor_keep_rows)
             row_limit_delete_rows = 0
             if row_limits_enabled and row_limit_keep_rows > 0 and current_rows > row_limit_keep_rows:
                 row_limit_delete_rows = current_rows - row_limit_keep_rows
@@ -244,13 +280,33 @@ class RetentionService:
             budget_floor_rows = max(1, intent_keep_rows)
             if row_limits_enabled and row_limit_keep_rows > 0:
                 budget_floor_rows = max(budget_floor_rows, row_limit_keep_rows)
+            if floor_keep_rows > 0:
+                budget_floor_rows = max(budget_floor_rows, floor_keep_rows)
             budget_capacity_rows = (
                 max(0, current_rows - budget_floor_rows)
                 if budget_pressure
                 else 0
             )
             max_delete_rows = max(row_limit_delete_rows, budget_capacity_rows)
+            unclamped_delete_rows = 0
+            if row_limits_enabled and unclamped_row_limit_keep > 0 and current_rows > unclamped_row_limit_keep:
+                unclamped_delete_rows = current_rows - unclamped_row_limit_keep
+            if budget_pressure:
+                unclamped_budget = max(0, current_rows - max(1, intent_keep_rows))
+                if row_limits_enabled and unclamped_row_limit_keep > 0:
+                    unclamped_budget = max(
+                        0,
+                        current_rows - max(1, intent_keep_rows, unclamped_row_limit_keep),
+                    )
+                unclamped_delete_rows = max(unclamped_delete_rows, unclamped_budget)
+            blocked_delete_rows = max(0, unclamped_delete_rows - max_delete_rows)
+            protection_clamped = bool(floor is not None and blocked_delete_rows > 0)
             if max_delete_rows <= 0:
+                if floor is not None and blocked_delete_rows > 0:
+                    for owner_id in getattr(floor, "owner_ids", ()) or ():
+                        owner = str(owner_id)
+                        if owner:
+                            blocking_owner_ids_acc.append(owner)
                 continue
 
             risk_flags = self._storage_gc_risk_flags(
@@ -286,8 +342,23 @@ class RetentionService:
                 ),
                 "risk_flags": risk_flags,
                 "storage_intents": matched_intents,
+                "protected_start_ms": protected_start_ms,
+                "protected_owner_count": int(getattr(floor, "owner_count", 0) or 0),
+                "protected_owner_kinds": list(
+                    str(owner_id).split(":", 1)[0]
+                    for owner_id in tuple(getattr(floor, "owner_ids", ()) or ())
+                    if str(owner_id).split(":", 1)[0]
+                ) if floor is not None else [],
+                "protection_clamped": protection_clamped,
+                "rows_before_protected_floor": rows_before_floor,
+                "blocked_delete_rows": blocked_delete_rows,
+                "protected_owner_ids": list(getattr(floor, "owner_ids", ()) or ())
+                if floor is not None else [],
                 "_row_limit_delete_rows": row_limit_delete_rows,
                 "_budget_capacity_rows": budget_capacity_rows,
+                "_blocking_owner_ids": list(getattr(floor, "owner_ids", ()) or ())
+                if floor is not None and (protection_clamped or budget_pressure)
+                else [],
             }
             if scoring == "smart":
                 victim.update(self._storage_gc_scores(
@@ -345,10 +416,26 @@ class RetentionService:
             elif budget_rows > 0:
                 row["reason"] = "sqlite-budget-required-relief"
 
-        victims = [row for row in candidates if int(row.get("would_delete_rows", 0) or 0) > 0]
+        blocking_owners: list[str] = []
+        seen_owners: set[str] = set()
+        for owner in blocking_owner_ids_acc:
+            if owner and owner not in seen_owners:
+                seen_owners.add(owner)
+                blocking_owners.append(owner)
+        for row in candidates:
+            for owner_id in row.get("_blocking_owner_ids") or []:
+                owner = str(owner_id)
+                if owner and owner not in seen_owners:
+                    seen_owners.add(owner)
+                    blocking_owners.append(owner)
+        victims = [
+            row for row in candidates
+            if int(row.get("would_delete_rows", 0) or 0) > 0
+        ]
         for row in victims:
             row.pop("_row_limit_delete_rows", None)
             row.pop("_budget_capacity_rows", None)
+            row.pop("_blocking_owner_ids", None)
             if scoring == "smart":
                 row.update(self._storage_gc_scores(
                     row,
@@ -425,6 +512,7 @@ class RetentionService:
             "estimated_bytes_per_row": round(bytes_per_row, 6),
             "unable_to_reach_budget": budget_gap_bytes > 0,
             "budget_gap_bytes": budget_gap_bytes,
+            "blocking_owners": blocking_owners,
             "vacuum_recommended": bool(
                 watermarks.get("compaction_relief_bytes", 0)
             ) or (
@@ -525,74 +613,15 @@ class RetentionService:
         return 15.0, "ordinary-sqlite-history"
 
     def run_startup_db_cleanup(self) -> None:
-        """One-time DB cleanup at startup. Runs in a thread."""
-        if not self.storage_row_limits_enabled:
-            logger.info("Startup DB cleanup skipped: storage row limits disabled")
-            return
+        """Direct unprotected ``delete_oldest`` startup cleanup is forbidden.
 
-        storage = self._storage_provider()
-        if storage is None:
-            return
-
-        try:
-            series_list = storage.list_series()
-        except Exception as exc:
-            logger.warning("Startup cleanup: failed to list series: %s", exc)
-            return
-
-        total_deleted = 0
-        cleaned_count = 0
-
-        for series in series_list:
-            symbol = series.get("symbol", "")
-            interval = series.get("interval", "")
-            if not symbol or not interval:
-                continue
-
-            if is_ephemeral_interval(interval):
-                continue
-
-            tier = get_tier_for_interval(interval)
-            max_bars = self.db_limits.get(tier, 0)
-            if max_bars == 0:
-                continue
-
-            try:
-                deleted = storage.delete_oldest(
-                    symbol=symbol,
-                    interval=interval,
-                    keep=max_bars,
-                )
-                if deleted > 0:
-                    total_deleted += deleted
-                    cleaned_count += 1
-                    logger.info(
-                        "Startup cleanup: %s@%s deleted %d oldest bars (kept %d)",
-                        symbol,
-                        interval,
-                        deleted,
-                        max_bars,
-                    )
-            except Exception as exc:
-                logger.warning(
-                    "Startup cleanup failed for %s@%s: %s",
-                    symbol,
-                    interval,
-                    exc,
-                )
-
-        if total_deleted > 0:
-            logger.info(
-                "Startup DB cleanup complete: %d bars deleted across %d series",
-                total_deleted,
-                cleaned_count,
-            )
-            print(
-                f"[startup] DB cleanup: {total_deleted} bars deleted "
-                f"across {cleaned_count} series"
-            )
-        else:
-            logger.info("Startup DB cleanup: all series within limits")
+        Startup must load durable protection floors, then run the unified
+        ``plan_storage_gc`` + ``MaintenanceService`` executor.  This method is
+        retained as a no-op trap so older call sites cannot bypass the floor.
+        """
+        logger.info(
+            "Startup DB cleanup skipped: use unified storage GC planner/executor"
+        )
 
     async def ephemeral_trim_loop(self) -> None:
         """Background loop: trim ephemeral cache series every 30 minutes."""

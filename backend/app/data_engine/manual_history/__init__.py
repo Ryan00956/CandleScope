@@ -13,9 +13,11 @@ from .models import (
     RouteKind,
     TargetStatus,
 )
+from .protection import DurableProtectionRegistry
 from .repository import ManualHistoryRepository, init_manual_history_storage
 
 __all__ = [
+    "DurableProtectionRegistry",
     "CollectionStatus",
     "JobState",
     "JobTargetState",

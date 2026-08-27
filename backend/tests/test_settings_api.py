@@ -68,6 +68,15 @@ class _DataManager:
             "mode": "dry-run",
             "owner": "sqlite-storage",
             "would_delete_rows": 0,
+            "unable_to_reach_budget": False,
+            "blocking_owners": [],
+            "series": [{
+                "symbol": "BTCUSDT",
+                "protected_start_ms": None,
+                "protection_clamped": False,
+                "rows_before_protected_floor": 0,
+                "blocked_delete_rows": 0,
+            }],
             "policy": {
                 "db_limits": db_limits or {},
                 "sqlite_budget_bytes": sqlite_budget_bytes,
@@ -519,6 +528,9 @@ def test_storage_gc_dry_run_endpoint_calls_data_manager_plan() -> None:
 
     assert response.status_code == 200
     assert response.json()["owner"] == "sqlite-storage"
+    assert response.json()["unable_to_reach_budget"] is False
+    assert response.json()["blocking_owners"] == []
+    assert response.json()["series"][0]["protection_clamped"] is False
     assert dm.memory_gc_calls[0][0] == "storage-dry-run"
     assert dm.memory_gc_calls[0][1]["db_limits"] == {"minutes": 123}
     assert dm.memory_gc_calls[0][1]["sqlite_budget_bytes"] == 1024

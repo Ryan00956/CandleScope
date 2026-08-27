@@ -1,0 +1,13 @@
+{
+  "schema": "candlescope.manual-history.phase11-rollback.v1",
+  "git_commit": "a750b5c375c88b8d7c8bdeb489dc320c13d8c0da",
+  "protection_aware_floor_commit": "ff0ec9fab77ed79d362a815ed3c7a1f052cb1ee6",
+  "earliest_legal_backend_rollback": "ff0ec9fab77ed79d362a815ed3c7a1f052cb1ee6",
+  "MANUAL_HISTORY_DOWNLOAD_ENABLED_default": 0,
+  "flags": {
+    "disable_manual_download": "stops new jobs; durable protections remain",
+    "disable_history_archive": "ZIP off; REST continuity path remains",
+    "schema": "forward-only; rollback must not DROP protection tables"
+  },
+  "enable_method": "set MANUAL_HISTORY_DOWNLOAD_ENABLED=1 in the process environment and restart the LIVE backend"
+}

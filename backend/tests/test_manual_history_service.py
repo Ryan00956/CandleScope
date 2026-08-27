@@ -358,3 +358,23 @@ async def test_blocked_storage_when_disk_is_critical(monkeypatch, tmp_path) -> N
     created = service.create_from_plan(_plan(), idempotency_key="disk-0")
     result = await service.run_job(created.job.job_id)
     assert result.state.value == "BLOCKED_STORAGE"
+
+
+@pytest.mark.anyio
+async def test_feature_flag_off_keeps_durable_floor(monkeypatch, tmp_path) -> None:
+    _, repo, dm = _setup(monkeypatch, tmp_path)
+    service = ManualHistoryService(
+        repository=repo,
+        data_manager=dm,
+        storage=KlinesRepoAdapter(),
+        fetch_native=_write_range,
+        enabled=True,
+    )
+    created = service.create_from_plan(_plan(), idempotency_key="flag-off-floor")
+    await service.run_job(created.job.job_id)
+    service.enabled = False
+    dm.reload_durable_protections()
+    floors = dm.durable_protections.clone()
+    assert floors
+    collections = repo.list_collections()
+    assert collections[0].collection_id == created.collection.collection_id

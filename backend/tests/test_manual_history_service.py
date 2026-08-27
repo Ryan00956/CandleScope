@@ -220,3 +220,95 @@ async def test_native_fetch_marks_explicit_archive_demand(monkeypatch, tmp_path)
     assert request.reason == "manual_history_download"
     assert request.metadata["archive_explicit_demand"] is True
     assert request.metadata["requires_trusted_finality"] is True
+
+
+@pytest.mark.anyio
+async def test_shared_source_is_fetched_once_for_native_and_derived(monkeypatch, tmp_path) -> None:
+    calls: list[tuple[str, str]] = []
+    aligned = 318_353 * 89 * 60_000
+    source_end = aligned + 88 * 60_000
+
+    async def write_counted(*, symbol: str, interval: str, start_ms: int, end_ms: int, **kwargs) -> int:
+        calls.append((symbol, interval))
+        rows = []
+        open_time = start_ms
+        while open_time <= end_ms:
+            rows.append(_row(open_time))
+            open_time += STEP
+        return klines_repo.upsert_klines(
+            symbol,
+            interval,
+            rows,
+            source="binance",
+            exchange="binance",
+            market_type="spot",
+        )
+
+    _, repo, dm = _setup(monkeypatch, tmp_path)
+    plan = {
+        "can_start": True,
+        "plan_hash": "sha256:phase6-shared",
+        "selection": {
+            "exchange": "binance",
+            "market_type": "spot",
+            "symbols": ["BTCUSDT"],
+            "intervals": ["1m", "89m"],
+            "requested_start_ms": aligned,
+            "target_count": 2,
+        },
+        "targets": [
+            {
+                "symbol": "BTCUSDT",
+                "requested_interval": "1m",
+                "canonical_interval": "1m",
+                "route_kind": "NATIVE",
+                "source_interval": "1m",
+                "effective_start_ms": aligned,
+                "initial_end_open_ms": source_end,
+                "source_strategy": "REST",
+                "estimated_target_rows": 89,
+                "estimated_source_rows": 89,
+                "existing_coverage": "NONE",
+                "error": None,
+                "boundary_reason": None,
+            },
+            {
+                "symbol": "BTCUSDT",
+                "requested_interval": "89m",
+                "canonical_interval": "89m",
+                "route_kind": "DERIVED",
+                "source_interval": "1m",
+                "effective_start_ms": aligned,
+                "initial_end_open_ms": aligned,
+                "source_strategy": "REST",
+                "estimated_target_rows": 1,
+                "estimated_source_rows": 89,
+                "existing_coverage": "NONE",
+                "error": None,
+                "boundary_reason": None,
+            },
+        ],
+        "storage": {},
+    }
+    service = ManualHistoryService(
+        repository=repo,
+        data_manager=dm,
+        storage=KlinesRepoAdapter(),
+        fetch_native=write_counted,
+        enabled=True,
+    )
+    created = service.create_from_plan(plan, idempotency_key="shared-1m")
+    result = await service.run_job(created.job.job_id)
+    assert result.state.value in {"SUCCEEDED", "PARTIAL"}
+    assert calls == [("BTCUSDT", "1m")]
+    states = {item.canonical_interval: item.state.value for item in repo.list_job_targets(created.job.job_id)}
+    assert states["1m"] == "READY"
+    verification = KlinesRepoAdapter().verify_contiguous_range(
+        "BTCUSDT",
+        "1m",
+        aligned,
+        source_end,
+        exchange="binance",
+        market_type="spot",
+    )
+    assert verification["verified_contiguous"] is True

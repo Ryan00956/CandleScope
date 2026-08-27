@@ -134,46 +134,42 @@ class ManualHistoryService:
             targets = self.repository.list_job_targets(job_id)
             ready = 0
             failed = 0
+            groups: dict[tuple[str, str], list[Any]] = {}
             for target in targets:
                 if target.state is JobTargetState.READY:
                     ready += 1
                     continue
-                if target.source_interval != target.canonical_interval:
-                    self.repository.cas_job_target_state(
-                        job_id,
-                        target.symbol,
-                        target.canonical_interval,
-                        from_state=target.state,
-                        to_state=JobTargetState.FAILED,
-                        last_error="derived_not_supported_in_phase4",
-                    )
-                    failed += 1
-                    continue
+                groups.setdefault((target.symbol, target.source_interval), []).append(target)
+            for (symbol, source_interval), group in groups.items():
+                native = [
+                    item for item in group
+                    if item.canonical_interval == source_interval
+                ]
+                derived = [
+                    item for item in group
+                    if item.canonical_interval != source_interval
+                ]
                 try:
-                    await self._run_native_target(collection, job, target)
-                    ready += 1
-                except Exception as exc:
-                    logger.warning("manual history target failed: %s", exc)
-                    current = self.repository.list_job_targets(job_id)
-                    current_target = next(
-                        item for item in current
-                        if item.symbol == target.symbol
-                        and item.canonical_interval == target.canonical_interval
-                    )
-                    if current_target.state not in {
-                        JobTargetState.FAILED,
-                        JobTargetState.CANCELLED,
-                        JobTargetState.READY,
-                    }:
-                        self.repository.cas_job_target_state(
-                            job_id,
-                            target.symbol,
-                            target.canonical_interval,
-                            from_state=current_target.state,
-                            to_state=JobTargetState.FAILED,
-                            last_error=str(exc),
+                    if native:
+                        await self._run_native_target(collection, job, native[0])
+                        ready += 1
+                    elif derived:
+                        await self._fetch_source_group(
+                            collection, job, derived[0], source_interval=source_interval
                         )
-                    failed += 1
+                    for target in derived:
+                        try:
+                            await self._run_derived_target(collection, job, target)
+                            ready += 1
+                        except Exception as exc:
+                            failed += self._fail_target(job_id, target, exc)
+                            logger.warning("manual history derived target failed: %s", exc)
+                except Exception as exc:
+                    logger.warning("manual history source group failed: %s", exc)
+                    for target in group:
+                        if target.state is JobTargetState.READY:
+                            continue
+                        failed += self._fail_target(job_id, target, exc)
             if failed and ready:
                 return self.repository.cas_job_state(
                     job_id,
@@ -201,6 +197,143 @@ class ManualHistoryService:
                 to_state=JobState.SUCCEEDED,
                 stage="done",
             )
+
+    def _fail_target(self, job_id: str, target: Any, exc: Exception) -> int:
+        current = self.repository.list_job_targets(job_id)
+        current_target = next(
+            item for item in current
+            if item.symbol == target.symbol
+            and item.canonical_interval == target.canonical_interval
+        )
+        if current_target.state in {
+            JobTargetState.FAILED,
+            JobTargetState.CANCELLED,
+            JobTargetState.READY,
+        }:
+            return 0 if current_target.state is JobTargetState.READY else 1
+        self.repository.cas_job_target_state(
+            job_id,
+            target.symbol,
+            target.canonical_interval,
+            from_state=current_target.state,
+            to_state=JobTargetState.FAILED,
+            last_error=str(exc),
+        )
+        return 1
+
+    async def _fetch_source_group(
+        self,
+        collection: Any,
+        job: Any,
+        sample_target: Any,
+        *,
+        source_interval: str,
+    ) -> None:
+        job_row = self.repository.get_job(job.job_id)
+        if job_row.cancel_requested:
+            raise RuntimeError("cancel_requested")
+        collection_targets = self.repository.list_collection_targets(collection.collection_id)
+        matching = [
+            item for item in collection_targets
+            if item.symbol == sample_target.symbol
+            and item.source_interval == source_interval
+        ]
+        start_ms = min(item.effective_start_ms for item in matching)
+        end_ms = max(
+            target.initial_end_open_ms
+            for target in self.repository.list_job_targets(job.job_id)
+            if target.symbol == sample_target.symbol
+            and target.source_interval == source_interval
+        )
+        await self._fetch(
+            exchange=collection.exchange,
+            market_type=collection.market_type,
+            symbol=sample_target.symbol,
+            interval=source_interval,
+            target=sample_target,
+            collection=collection,
+            job=job,
+            start_ms=start_ms,
+            end_ms=end_ms,
+        )
+
+    async def _run_derived_target(self, collection: Any, job: Any, target: Any) -> None:
+        from app.data_engine.manual_history.materializer import materialize_closed_target_bars
+        from app.data_engine.storage.klines_repo import query_klines, upsert_klines
+
+        collection_target = next(
+            item for item in self.repository.list_collection_targets(collection.collection_id)
+            if item.symbol == target.symbol
+            and item.canonical_interval == target.canonical_interval
+        )
+        self.repository.cas_job_target_state(
+            job.job_id,
+            target.symbol,
+            target.canonical_interval,
+            from_state=target.state,
+            to_state=JobTargetState.MATERIALIZING,
+        )
+        from app.data_engine.interval_policy import parse_interval_ms
+
+        target_width = parse_interval_ms(target.canonical_interval) or 0
+        source_width = parse_interval_ms(target.source_interval) or 0
+        source_end_ms = int(target.initial_end_open_ms) + max(0, target_width - source_width)
+        components = query_klines(
+            target.symbol,
+            target.source_interval,
+            start_ms=collection_target.effective_start_ms,
+            end_ms=source_end_ms,
+            exchange=collection.exchange,
+            market_type=collection.market_type,
+        )
+        rebuilt = materialize_closed_target_bars(
+            components,
+            target_interval=target.canonical_interval,
+            source_interval=target.source_interval,
+            now_ms=int(target.initial_end_open_ms) + 89 * 60_000,
+        )
+        if rebuilt:
+            upsert_klines(
+                target.symbol,
+                target.canonical_interval,
+                rebuilt,
+                source=collection.exchange,
+                exchange=collection.exchange,
+                market_type=collection.market_type,
+            )
+        self.repository.cas_job_target_state(
+            job.job_id,
+            target.symbol,
+            target.canonical_interval,
+            from_state=JobTargetState.MATERIALIZING,
+            to_state=JobTargetState.VERIFYING,
+        )
+        sealed_end = int(target.initial_end_open_ms)
+        verification = self._verify_range(
+            target.symbol,
+            target.canonical_interval,
+            collection_target.effective_start_ms,
+            sealed_end,
+            exchange=collection.exchange,
+            market_type=collection.market_type,
+        )
+        if verification.get("verified_contiguous") is not True:
+            raise RuntimeError(
+                f"continuity_failed expected={verification.get('expected_open_time')} "
+                f"actual={verification.get('actual_open_time')}"
+            )
+        self.repository.seal_target(
+            job.job_id,
+            target.symbol,
+            target.canonical_interval,
+            sealed_end_open_ms=sealed_end,
+            verified_rows=int(
+                verification.get("expected_count") or verification.get("actual_count") or 0
+            ),
+        )
+        reload = getattr(self.data_manager, "reload_durable_protections", None)
+        if callable(reload):
+            reload()
 
     async def _run_native_target(self, collection: Any, job: Any, target: Any) -> None:
         job_row = self.repository.get_job(job.job_id)
@@ -270,11 +403,27 @@ class ManualHistoryService:
         target: Any,
         collection: Any,
         job: Any,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
     ) -> int:
         collection_target = next(
-            item for item in self.repository.list_collection_targets(collection.collection_id)
-            if item.symbol == symbol and item.canonical_interval == interval
+            (
+                item for item in self.repository.list_collection_targets(collection.collection_id)
+                if item.symbol == symbol and item.canonical_interval == interval
+            ),
+            None,
         )
+        resolved_start = start_ms
+        resolved_end = end_ms
+        if collection_target is not None:
+            if resolved_start is None:
+                resolved_start = collection_target.effective_start_ms
+            if resolved_end is None:
+                resolved_end = target.initial_end_open_ms
+        if resolved_start is None:
+            resolved_start = int(getattr(target, "initial_end_open_ms", 0))
+        if resolved_end is None:
+            resolved_end = int(target.initial_end_open_ms)
         if self._fetch_native is not None:
             return int(
                 await self._fetch_native(
@@ -282,8 +431,8 @@ class ManualHistoryService:
                     market_type=market_type,
                     symbol=symbol,
                     interval=interval,
-                    start_ms=collection_target.effective_start_ms,
-                    end_ms=target.initial_end_open_ms,
+                    start_ms=int(resolved_start),
+                    end_ms=int(resolved_end),
                     job_id=job.job_id,
                     collection_id=collection.collection_id,
                 )
@@ -297,8 +446,8 @@ class ManualHistoryService:
         request = RepairRequest(
             symbol=symbol,
             interval=interval,
-            start_ms=collection_target.effective_start_ms,
-            end_ms=target.initial_end_open_ms,
+            start_ms=int(resolved_start),
+            end_ms=int(resolved_end),
             exchange=exchange,
             market_type=market_type,
             reason="manual_history_download",

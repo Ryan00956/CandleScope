@@ -100,6 +100,7 @@ ALLOWED_JOB_TRANSITIONS: dict[JobState, frozenset[JobState]] = {
 ALLOWED_JOB_TARGET_TRANSITIONS: dict[JobTargetState, frozenset[JobTargetState]] = {
     JobTargetState.QUEUED: frozenset({
         JobTargetState.FETCHING,
+        JobTargetState.MATERIALIZING,
         JobTargetState.CANCELLED,
         JobTargetState.BLOCKED_STORAGE,
         JobTargetState.FAILED,

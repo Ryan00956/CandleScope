@@ -147,8 +147,6 @@ from .runtime_pressure import (
     process_memory_snapshot,
     storage_file_snapshot,
 )
-from app.data_engine.manual_history.protection import DurableProtectionRegistry
-from app.data_engine.manual_history.repository import ManualHistoryRepository
 from .storage_intents import PRIORITY_RANK, StorageIntentRegistry, WILDCARD_INTERVAL
 from .stream_policy import StreamEnsurePlanner
 from .warm_start import AggregatorWarmStartService
@@ -367,6 +365,8 @@ class DataManager:
             lock=self._storage_gc_guard,
             on_change=self._mark_storage_gc_protection_changed,
         )
+        from app.data_engine.manual_history.protection import DurableProtectionRegistry
+
         self.durable_protections = DurableProtectionRegistry(
             lock=self._storage_gc_guard,
             on_change=self._mark_storage_gc_protection_changed,
@@ -3088,6 +3088,7 @@ class DataManager:
     def reload_durable_protections(self) -> None:
         """Restore GC floors from SQLite.  Safe when the schema is absent."""
         from app.core import config as core_config
+        from app.data_engine.manual_history.repository import ManualHistoryRepository
 
         repository = ManualHistoryRepository(core_config.KLINES_DB_PATH)
         try:

@@ -1,0 +1,14 @@
+{
+  "schema": "candlescope.manual-history.phase10-cancel.v1",
+  "git_commit": "a54d59aed07c986ce9ca5fe7415d91713f2b0d6c",
+  "source": "phase10-contract-2026-08-27.json matrix.cancel/blocked_storage",
+  "production_db": false,
+  "cancel": {"state": "CANCELLED"},
+  "blocked_storage": {"state": "BLOCKED_STORAGE"},
+  "recovery": [
+    {
+      "state": "BLOCKED_STORAGE",
+      "recovery_count": 0
+    }
+  ]
+}

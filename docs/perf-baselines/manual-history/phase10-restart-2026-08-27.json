@@ -1,0 +1,25 @@
+{
+  "schema": "candlescope.manual-history.phase10-restart.v1",
+  "git_commit": "a54d59aed07c986ce9ca5fe7415d91713f2b0d6c",
+  "source": "phase10-gc-restart-2026-08-27.json",
+  "production_db": false,
+  "restart_floor_count": 6,
+  "restart_gc_would_delete_rows": 0,
+  "restart_verify": {
+    "symbol": "BTCUSDT",
+    "interval": "1m",
+    "effective_start_ms": 1787844420000,
+    "sealed_end_open_ms": 1787844660000,
+    "verified_contiguous": true,
+    "actual_count": 5,
+    "expected_count": 5
+  },
+  "floors_after_reopen": [
+    {"symbol": "BTCUSDT", "interval": "1h", "durable_owner_count": 1},
+    {"symbol": "BTCUSDT", "interval": "1m", "durable_owner_count": 3},
+    {"symbol": "BTCUSDT", "interval": "45m", "durable_owner_count": 1},
+    {"symbol": "BTCUSDT", "interval": "89m", "durable_owner_count": 1},
+    {"symbol": "ETHUSDT", "interval": "1m", "durable_owner_count": 1},
+    {"symbol": "SOLUSDT", "interval": "1m", "durable_owner_count": 1}
+  ]
+}

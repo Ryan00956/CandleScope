@@ -1,0 +1,39 @@
+{
+  "schema": "candlescope.manual-history.phase10-custom.v1",
+  "git_commit": "a54d59aed07c986ce9ca5fe7415d91713f2b0d6c",
+  "source": "phase10-contract-2026-08-27.json matrix.custom_1h_45m_89m",
+  "production_db": false,
+  "job_state": "SUCCEEDED",
+  "one_m_source_fetches": 1,
+  "one_h_source_fetches": 1,
+  "targets": [
+    {
+      "symbol": "BTCUSDT",
+      "interval": "1h",
+      "effective_start_ms": 1787817600000,
+      "sealed_end_open_ms": 1787842800000,
+      "verified_contiguous": true,
+      "actual_count": 8,
+      "expected_count": 8
+    },
+    {
+      "symbol": "BTCUSDT",
+      "interval": "45m",
+      "effective_start_ms": 1787815800000,
+      "sealed_end_open_ms": 1787840100000,
+      "verified_contiguous": true,
+      "actual_count": 10,
+      "expected_count": 10
+    },
+    {
+      "symbol": "BTCUSDT",
+      "interval": "89m",
+      "effective_start_ms": 1787815980000,
+      "sealed_end_open_ms": 1787837340000,
+      "verified_contiguous": true,
+      "actual_count": 5,
+      "expected_count": 5
+    }
+  ],
+  "same_gate": "storage.verify_contiguous_range"
+}

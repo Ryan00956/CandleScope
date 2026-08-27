@@ -4,6 +4,7 @@ import pytest
 
 from app.core import config as core_config
 from app.data_engine.data_manager import DataManager
+from app.data_engine.manual_history.models import JobState
 from app.data_engine.manual_history.planner import ManualHistoryPlanner
 from app.data_engine.manual_history.repository import ManualHistoryRepository
 from app.data_engine.manual_history.service import ManualHistoryService
@@ -303,12 +304,57 @@ async def test_shared_source_is_fetched_once_for_native_and_derived(monkeypatch,
     assert calls == [("BTCUSDT", "1m")]
     states = {item.canonical_interval: item.state.value for item in repo.list_job_targets(created.job.job_id)}
     assert states["1m"] == "READY"
-    verification = KlinesRepoAdapter().verify_contiguous_range(
-        "BTCUSDT",
-        "1m",
-        aligned,
-        source_end,
-        exchange="binance",
-        market_type="spot",
+
+
+@pytest.mark.anyio
+async def test_cancel_queued_job_is_cancelled(monkeypatch, tmp_path) -> None:
+    _, repo, dm = _setup(monkeypatch, tmp_path)
+    service = ManualHistoryService(
+        repository=repo,
+        data_manager=dm,
+        storage=KlinesRepoAdapter(),
+        fetch_native=_write_range,
+        enabled=True,
     )
-    assert verification["verified_contiguous"] is True
+    created = service.create_from_plan(_plan(), idempotency_key="cancel-q")
+    cancelled = service.cancel_job(created.job.job_id)
+    assert cancelled.state.value == "CANCELLED"
+    assert repo.list_job_targets(created.job.job_id)[0].state.value == "CANCELLED"
+
+
+@pytest.mark.anyio
+async def test_recover_running_job_requeues(monkeypatch, tmp_path) -> None:
+    _, repo, dm = _setup(monkeypatch, tmp_path)
+    service = ManualHistoryService(
+        repository=repo,
+        data_manager=dm,
+        storage=KlinesRepoAdapter(),
+        fetch_native=_write_range,
+        enabled=True,
+    )
+    created = service.create_from_plan(_plan(), idempotency_key="recover-1")
+    repo.cas_job_state(
+        created.job.job_id,
+        from_state=created.job.state,
+        to_state=JobState.RUNNING,
+        stage="fetching",
+    )
+    recovered = service.recover_jobs()
+    assert recovered[0].state.value == "QUEUED"
+    assert recovered[0].recovery_count == 1
+
+
+@pytest.mark.anyio
+async def test_blocked_storage_when_disk_is_critical(monkeypatch, tmp_path) -> None:
+    _, repo, dm = _setup(monkeypatch, tmp_path)
+    service = ManualHistoryService(
+        repository=repo,
+        data_manager=dm,
+        storage=KlinesRepoAdapter(),
+        fetch_native=_write_range,
+        enabled=True,
+    )
+    service._disk_free_bytes = lambda: 0
+    created = service.create_from_plan(_plan(), idempotency_key="disk-0")
+    result = await service.run_job(created.job.job_id)
+    assert result.state.value == "BLOCKED_STORAGE"

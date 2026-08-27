@@ -952,6 +952,46 @@ class ManualHistoryRepository:
                 raise
         return self.get_collection(collection_id)
 
+    def increment_recovery_count(self, job_id: str) -> ManualHistoryJobRecord:
+        now_ms = self._clock()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE manual_history_jobs
+                SET recovery_count = recovery_count + 1,
+                    revision = revision + 1,
+                    updated_at_ms = ?
+                WHERE job_id = ?
+                """,
+                (now_ms, job_id),
+            )
+            conn.commit()
+        return self.get_job(job_id)
+
+    def list_jobs(self, *, limit: int = 50) -> tuple[ManualHistoryJobRecord, ...]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM manual_history_jobs
+                ORDER BY created_at_ms DESC, job_id DESC
+                LIMIT ?
+                """,
+                (max(1, min(int(limit), 200)),),
+            ).fetchall()
+        return tuple(self._job_from_row(row) for row in rows)
+
+    def list_collections(self, *, limit: int = 50) -> tuple[ManualHistoryCollectionRecord, ...]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM manual_history_collections
+                ORDER BY created_at_ms DESC, collection_id DESC
+                LIMIT ?
+                """,
+                (max(1, min(int(limit), 200)),),
+            ).fetchall()
+        return tuple(self._collection_from_row(row) for row in rows)
+
     def list_recoverable_jobs(self) -> tuple[ManualHistoryJobRecord, ...]:
         placeholders = ",".join("?" for _ in RECOVERABLE_JOB_STATES)
         params = tuple(state.value for state in RECOVERABLE_JOB_STATES)

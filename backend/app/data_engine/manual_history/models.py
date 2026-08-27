@@ -74,13 +74,18 @@ class ProtectionState(str, Enum):
 
 
 ALLOWED_JOB_TRANSITIONS: dict[JobState, frozenset[JobState]] = {
-    JobState.QUEUED: frozenset({JobState.RUNNING, JobState.CANCELLING}),
+    JobState.QUEUED: frozenset({
+        JobState.RUNNING,
+        JobState.CANCELLING,
+        JobState.BLOCKED_STORAGE,
+    }),
     JobState.RUNNING: frozenset({
         JobState.SEALING,
         JobState.BLOCKED_STORAGE,
         JobState.CANCELLING,
         JobState.FAILED,
         JobState.PARTIAL,
+        JobState.QUEUED,
     }),
     JobState.SEALING: frozenset({
         JobState.SUCCEEDED,
@@ -88,6 +93,7 @@ ALLOWED_JOB_TRANSITIONS: dict[JobState, frozenset[JobState]] = {
         JobState.FAILED,
         JobState.BLOCKED_STORAGE,
         JobState.CANCELLING,
+        JobState.QUEUED,
     }),
     JobState.BLOCKED_STORAGE: frozenset({JobState.QUEUED, JobState.CANCELLING}),
     JobState.CANCELLING: frozenset({JobState.CANCELLED, JobState.PARTIAL}),

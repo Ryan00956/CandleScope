@@ -51,13 +51,74 @@ class ManualHistoryService:
         self._fetch_native = fetch_native
         self._verify_range = verify_range or self.storage.verify_contiguous_range
         self.enabled = bool(enabled)
+        self._disk_free_bytes: Callable[[], int | None] | None = None
         self._runner_task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
         self._active = asyncio.Lock()
 
+    def recover_jobs(self) -> tuple[Any, ...]:
+        recovered = []
+        for job in self.repository.list_recoverable_jobs():
+            if job.state in {JobState.RUNNING, JobState.SEALING}:
+                self.repository.increment_recovery_count(job.job_id)
+                recovered.append(
+                    self.repository.cas_job_state(
+                        job.job_id,
+                        from_state=job.state,
+                        to_state=JobState.QUEUED,
+                        stage="recovered",
+                    )
+                )
+            else:
+                recovered.append(job)
+        return tuple(recovered)
+
+    def cancel_job(self, job_id: str) -> Any:
+        job = self.repository.get_job(job_id)
+        if job.state in {
+            JobState.SUCCEEDED,
+            JobState.FAILED,
+            JobState.CANCELLED,
+            JobState.PARTIAL,
+        }:
+            return job
+        if job.state is not JobState.CANCELLING:
+            job = self.repository.cas_job_state(
+                job_id,
+                from_state=job.state,
+                to_state=JobState.CANCELLING,
+                stage="cancelling",
+            )
+        ready = 0
+        for target in self.repository.list_job_targets(job_id):
+            if target.state is JobTargetState.READY:
+                ready += 1
+                continue
+            if target.state is JobTargetState.CANCELLED:
+                continue
+            try:
+                self.repository.cas_job_target_state(
+                    job_id,
+                    target.symbol,
+                    target.canonical_interval,
+                    from_state=target.state,
+                    to_state=JobTargetState.CANCELLED,
+                    last_error="cancelled",
+                )
+            except Exception:
+                continue
+        final = JobState.PARTIAL if ready else JobState.CANCELLED
+        return self.repository.cas_job_state(
+            job_id,
+            from_state=JobState.CANCELLING,
+            to_state=final,
+            stage="done",
+        )
+
     async def start(self) -> None:
         if self._runner_task is not None:
             return
+        self.recover_jobs()
         self._stop.clear()
         self._runner_task = asyncio.create_task(self._run_loop(), name="manual-history-runner")
 
@@ -123,6 +184,26 @@ class ManualHistoryService:
     async def run_job(self, job_id: str) -> Any:
         async with self._active:
             job = self.repository.get_job(job_id)
+            if job.cancel_requested:
+                return self.cancel_job(job_id)
+            free = None if self._disk_free_bytes is None else self._disk_free_bytes()
+            if free is not None and int(free) <= 0:
+                if job.state is JobState.QUEUED:
+                    return self.repository.cas_job_state(
+                        job_id,
+                        from_state=JobState.QUEUED,
+                        to_state=JobState.BLOCKED_STORAGE,
+                        stage="blocked_storage",
+                        last_error="disk_critical",
+                    )
+                if job.state is JobState.RUNNING:
+                    return self.repository.cas_job_state(
+                        job_id,
+                        from_state=JobState.RUNNING,
+                        to_state=JobState.BLOCKED_STORAGE,
+                        stage="blocked_storage",
+                        last_error="disk_critical",
+                    )
             if job.state is JobState.QUEUED:
                 job = self.repository.cas_job_state(
                     job_id,

@@ -7,6 +7,7 @@ import {
   type StorageInventoryFilters,
   type StorageInventoryResponse,
 } from "../../services/storageInventoryApi.js";
+import { ManualHistoryDownloadPanel } from "./ManualHistoryDownloadPanel.js";
 
 interface WorkbenchFilters {
   exchange: string;
@@ -221,6 +222,12 @@ export default function DataWorkbenchModal({
               <button className="dw-button dw-button-primary" disabled={loading} onClick={applyFilters} type="button">{loading ? t("workbench.reading", {}, locale) : t("workbench.apply", {}, locale)}</button>
             </div>
           </section>
+
+          <ManualHistoryDownloadPanel
+            exchange={currentExchange}
+            marketType={currentMarketType}
+            symbols={currentSymbol.trim() ? [currentSymbol.trim().toUpperCase()] : []}
+          />
 
           {error ? <div className="dw-notice dw-notice-error">{error}</div> : null}
 

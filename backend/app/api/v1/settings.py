@@ -320,6 +320,31 @@ def _build_storage_inventory_snapshot(
     }
 
 
+def _manual_ownership_snapshot(request: Request) -> dict:
+    """Read-only durable/transient ownership overlay.  Never writes."""
+    dm = _get_data_manager(request)
+    registry = getattr(dm, "durable_protections", None) if dm is not None else None
+    clone = getattr(registry, "clone", None) if registry is not None else None
+    if not callable(clone):
+        return {"available": False, "series": []}
+    floors = clone()
+    series = []
+    for key, floor in list(floors.items())[:500]:
+        series.append({
+            "exchange": key.exchange,
+            "market_type": key.market_type,
+            "symbol": key.symbol,
+            "interval": key.interval,
+            "protected_start_ms": floor.protected_start_ms,
+            "manual_owner_count": floor.owner_count,
+            "manual_protection": (
+                "DURABLE" if floor.durable_owner_count else "TRANSIENT"
+            ),
+            "owners_truncated": False,
+        })
+    return {"available": True, "series": series}
+
+
 async def _storage_integrity_snapshot(request: Request) -> dict:
     """Return known gap-ledger state without running any scan or repair."""
     backfill_coordinator = _get_backfill_coordinator(request)
@@ -789,6 +814,7 @@ async def storage_inventory(
 
     integrity = await _storage_integrity_snapshot(request)
     snapshot = inventory.get("snapshot") or {}
+    ownership = _manual_ownership_snapshot(request)
     return {
         "status": "ok",
         "mode": "live",
@@ -802,6 +828,7 @@ async def storage_inventory(
         },
         **inventory,
         "integrity": integrity,
+        "manual_ownership": ownership,
     }
 
 

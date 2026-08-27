@@ -78,6 +78,12 @@ def test_plan_rejects_user_end_ms() -> None:
     assert response.status_code == 422
 
 
+def test_list_jobs_without_runtime_is_empty() -> None:
+    response = _client().get("/api/v1/settings/storage/manual-downloads")
+    assert response.status_code == 200
+    assert response.json()["jobs"] == []
+
+
 def test_create_remains_closed_after_plan_exists() -> None:
     response = _client().post(
         "/api/v1/settings/storage/manual-downloads",

@@ -146,6 +146,7 @@ class DataEngineRuntime:
     subscription_service: SubscriptionService | None = None
     gap_scan_task: asyncio.Task | None = None
     gap_audit_task: asyncio.Task | None = None
+    manual_history_service: Any = None
 
     def attach_to_app_state(self, state: Any) -> None:
         """Expose stable app.state handles used by API routes."""
@@ -210,6 +211,12 @@ class DataEngineRuntime:
         """Stop runtime-owned components in dependency order."""
         await self._cancel_background_task(self.gap_audit_task, "Gap audit")
         await self._cancel_background_task(self.gap_scan_task, "Gap scan")
+
+        service = self.manual_history_service
+        if service is not None:
+            stop = getattr(service, "stop", None)
+            if callable(stop):
+                await self._shutdown_step("ManualHistoryService", stop(), step_timeout)
 
         await self._shutdown_step(
             "BackfillCoordinator",

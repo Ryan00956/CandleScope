@@ -1,21 +1,76 @@
 {
   "schema": "candlescope.manual-history.phase10-gc-restart.v1",
-  "git_commit": "0cb638a4107dd5fe8fea259a79df8e6a8c5e63bd",
-  "klines_db_path": "E:\\CACHEV~1\\Temp\\manual-history-phase10-ycv08pbv\\klines.db",
+  "git_commit": "515b9c1599d3aa268dd735970f1d33a115d1b008",
+  "klines_db_path": "E:\\CacheVault\\Temp\\manual-history-phase10-4czsxmqu\\klines.db",
   "production_db": false,
-  "rows_before_gc": 5,
-  "gc_would_delete_rows": 0,
-  "floors_before": [
-    {
-      "start": 1787843160000,
-      "durable": 1
-    }
-  ],
+  "rows_before_gc": 1960,
+  "rows_after_gc_in_sealed_range": 5,
+  "prefix_rows_after_gc": 0,
+  "zip_rows_after_gc": 0,
+  "gc_plan_would_delete_rows": 1460,
+  "gc_deleted_rows": 1460,
+  "gc_status": "ok",
+  "protected_start_ms": 1787844420000,
+  "sealed_range_after_gc": {
+    "symbol": "BTCUSDT",
+    "interval": "1m",
+    "effective_start_ms": 1787844420000,
+    "sealed_end_open_ms": 1787844660000,
+    "verified_contiguous": true,
+    "actual_count": 5,
+    "expected_count": 5,
+    "expected_open_time": null,
+    "error": null
+  },
+  "restart_floor_count": 6,
   "floors_after_reopen": [
     {
-      "start": 1787843160000,
-      "durable": 1
+      "symbol": "BTCUSDT",
+      "interval": "1h",
+      "protected_start_ms": 1787817600000,
+      "durable_owner_count": 1
+    },
+    {
+      "symbol": "BTCUSDT",
+      "interval": "1m",
+      "protected_start_ms": 1787814720000,
+      "durable_owner_count": 3
+    },
+    {
+      "symbol": "BTCUSDT",
+      "interval": "45m",
+      "protected_start_ms": 1787815800000,
+      "durable_owner_count": 1
+    },
+    {
+      "symbol": "BTCUSDT",
+      "interval": "89m",
+      "protected_start_ms": 1787815980000,
+      "durable_owner_count": 1
+    },
+    {
+      "symbol": "ETHUSDT",
+      "interval": "1m",
+      "protected_start_ms": 1787844420000,
+      "durable_owner_count": 1
+    },
+    {
+      "symbol": "SOLUSDT",
+      "interval": "1m",
+      "protected_start_ms": 1787844420000,
+      "durable_owner_count": 1
     }
   ],
-  "verified_contiguous": true
+  "restart_gc_would_delete_rows": 0,
+  "restart_verify": {
+    "symbol": "BTCUSDT",
+    "interval": "1m",
+    "effective_start_ms": 1787844420000,
+    "sealed_end_open_ms": 1787844660000,
+    "verified_contiguous": true,
+    "actual_count": 5,
+    "expected_count": 5,
+    "expected_open_time": null,
+    "error": null
+  }
 }

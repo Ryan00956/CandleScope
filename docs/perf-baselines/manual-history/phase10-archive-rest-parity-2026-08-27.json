@@ -1,9 +1,45 @@
 {
   "schema": "candlescope.manual-history.phase10-archive-rest-parity.v1",
-  "git_commit": "0cb638a4107dd5fe8fea259a79df8e6a8c5e63bd",
-  "klines_db_path": "E:\\CACHEV~1\\Temp\\manual-history-phase10-ycv08pbv\\klines.db",
+  "git_commit": "515b9c1599d3aa268dd735970f1d33a115d1b008",
+  "HISTORY_ARCHIVE_ENABLED": 1,
+  "klines_db_path": "E:\\CacheVault\\Temp\\manual-history-phase10-4czsxmqu\\klines.db",
   "production_db": false,
-  "HISTORY_ARCHIVE_ENABLED": 0,
-  "rest_verified_contiguous": true,
-  "note": "Archive disabled; REST-only path reached exact continuity on a live Binance 5-bar fixture."
+  "zip": {
+    "symbol": "BTCUSDT",
+    "interval": "1m",
+    "effective_start_ms": 1717200000000,
+    "sealed_end_open_ms": 1717286340000,
+    "verified_contiguous": true,
+    "actual_count": 1440,
+    "expected_count": 1440,
+    "expected_open_time": null,
+    "error": null
+  },
+  "rest": {
+    "symbol": "BTCUSDT",
+    "interval": "1m",
+    "effective_start_ms": 1787844420000,
+    "sealed_end_open_ms": 1787844660000,
+    "verified_contiguous": true,
+    "actual_count": 5,
+    "expected_count": 5,
+    "expected_open_time": null,
+    "error": null
+  },
+  "same_gate": "storage.verify_contiguous_range",
+  "checksum_rejected": true,
+  "zip_checksum_matched": true,
+  "fallback": {
+    "status": "completed",
+    "priming_status": "completed",
+    "bars_count": 3,
+    "archive_downloads": 1,
+    "rest_requests": 2,
+    "rest_fallback_ranges": 1,
+    "archive_errors": [
+      "binance-public-kline-v1:binance:spot:BTCUSDT:1m:monthly:2024-01: archive download returned HTTP 404"
+    ],
+    "checksum_rejected": true,
+    "completed": true
+  }
 }

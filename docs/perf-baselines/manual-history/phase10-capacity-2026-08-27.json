@@ -1,8 +1,36 @@
 {
   "schema": "candlescope.manual-history.phase10-capacity.v1",
-  "git_commit": "0cb638a4107dd5fe8fea259a79df8e6a8c5e63bd",
-  "klines_db_path": "E:\\CACHEV~1\\Temp\\manual-history-phase10-ycv08pbv\\klines.db",
+  "git_commit": "515b9c1599d3aa268dd735970f1d33a115d1b008",
+  "klines_db_path": "E:\\CacheVault\\Temp\\manual-history-phase10-4czsxmqu\\klines.db",
   "production_db": false,
-  "physical_bytes": 4096,
-  "rows": 5
+  "network": {
+    "rest": 6,
+    "zip": 1,
+    "checksum": 1
+  },
+  "files": {
+    "before_gc": {
+      "physical_size_bytes": 1282808,
+      "db_size_bytes": 454656,
+      "wal_size_bytes": 828152
+    },
+    "after": {
+      "physical_size_bytes": 730008,
+      "db_size_bytes": 577536,
+      "wal_size_bytes": 152472
+    }
+  },
+  "rows": {
+    "rest": 5,
+    "zip_day": 1440,
+    "source_1m": 500,
+    "custom_45m": 10,
+    "custom_89m": 5,
+    "multi": {
+      "BTCUSDT": 5,
+      "ETHUSDT": 5,
+      "SOLUSDT": 5
+    }
+  },
+  "physical_bytes": 730008
 }

@@ -1,0 +1,301 @@
+{
+  "bounded_delete_checkpoint": {
+    "large_1m_series": {
+      "batches": 10,
+      "checkpoint": {
+        "busy": 0,
+        "checkpointed": 0,
+        "log": 0,
+        "mode": "TRUNCATE",
+        "result": [
+          0,
+          0,
+          0
+        ]
+      },
+      "deleted_rows": 0,
+      "elapsed_ms": 59.696,
+      "files_after_checkpoint": {
+        "bytes_per_row_note": "physical_size_bytes / row_count; do not use BAR_ESTIMATED_BYTES=96",
+        "db_size_bytes": 229552128,
+        "file_set_stable": true,
+        "freelist_count": 0,
+        "klines_managed_bytes": 0,
+        "page_count": 56043,
+        "page_size_bytes": 4096,
+        "physical_size_bytes": 229552128,
+        "shm_size_bytes": 32768,
+        "total_size_bytes": 229584896,
+        "wal_size_bytes": 0
+      },
+      "files_after_delete": {
+        "bytes_per_row_note": "physical_size_bytes / row_count; do not use BAR_ESTIMATED_BYTES=96",
+        "db_size_bytes": 229531648,
+        "file_set_stable": true,
+        "freelist_count": 0,
+        "klines_managed_bytes": 0,
+        "page_count": 56043,
+        "page_size_bytes": 4096,
+        "physical_size_bytes": 229642920,
+        "shm_size_bytes": 32768,
+        "total_size_bytes": 229675688,
+        "wal_size_bytes": 111272
+      },
+      "files_before": {
+        "bytes_per_row_note": "physical_size_bytes / row_count; do not use BAR_ESTIMATED_BYTES=96",
+        "db_size_bytes": 229531648,
+        "file_set_stable": true,
+        "freelist_count": 0,
+        "klines_managed_bytes": 0,
+        "page_count": 56043,
+        "page_size_bytes": 4096,
+        "physical_size_bytes": 229642920,
+        "shm_size_bytes": 32768,
+        "total_size_bytes": 229675688,
+        "wal_size_bytes": 111272
+      },
+      "interrupted": "interrupted",
+      "keep": 990000,
+      "native_rows_after": 1000000,
+      "native_rows_before": 1000000,
+      "symbol": "BTCUSDT"
+    },
+    "small_20k_series": {
+      "batches": 10,
+      "checkpoint": {
+        "busy": 0,
+        "checkpointed": 0,
+        "log": 0,
+        "mode": "TRUNCATE",
+        "result": [
+          0,
+          0,
+          0
+        ]
+      },
+      "deleted_rows": 10000,
+      "elapsed_ms": 176.678,
+      "files_after_checkpoint": {
+        "bytes_per_row_note": "physical_size_bytes / row_count; do not use BAR_ESTIMATED_BYTES=96",
+        "db_size_bytes": 234291200,
+        "file_set_stable": true,
+        "freelist_count": 572,
+        "klines_managed_bytes": 0,
+        "page_count": 57200,
+        "page_size_bytes": 4096,
+        "physical_size_bytes": 234291200,
+        "shm_size_bytes": 32768,
+        "total_size_bytes": 234323968,
+        "wal_size_bytes": 0
+      },
+      "files_after_delete": {
+        "bytes_per_row_note": "physical_size_bytes / row_count; do not use BAR_ESTIMATED_BYTES=96",
+        "db_size_bytes": 234291200,
+        "file_set_stable": true,
+        "freelist_count": 572,
+        "klines_managed_bytes": 0,
+        "page_count": 57200,
+        "page_size_bytes": 4096,
+        "physical_size_bytes": 239140472,
+        "shm_size_bytes": 32768,
+        "total_size_bytes": 239173240,
+        "wal_size_bytes": 4849272
+      },
+      "files_before": {
+        "bytes_per_row_note": "physical_size_bytes / row_count; do not use BAR_ESTIMATED_BYTES=96",
+        "db_size_bytes": 234291200,
+        "file_set_stable": true,
+        "freelist_count": 0,
+        "klines_managed_bytes": 0,
+        "page_count": 57200,
+        "page_size_bytes": 4096,
+        "physical_size_bytes": 239140472,
+        "shm_size_bytes": 32768,
+        "total_size_bytes": 239173240,
+        "wal_size_bytes": 4849272
+      },
+      "interrupted": null,
+      "keep": 10000,
+      "native_rows_after": 10000,
+      "native_rows_before": 20000,
+      "symbol": "BENCHUSDT"
+    }
+  },
+  "empty_schema": {
+    "bytes_per_row_note": "physical_size_bytes / row_count; do not use BAR_ESTIMATED_BYTES=96",
+    "db_size_bytes": 4096,
+    "file_set_stable": true,
+    "freelist_count": 0,
+    "klines_managed_bytes": 0,
+    "page_count": 7,
+    "page_size_bytes": 4096,
+    "physical_size_bytes": 45328,
+    "shm_size_bytes": 32768,
+    "total_size_bytes": 78096,
+    "wal_size_bytes": 41232
+  },
+  "hardware": {
+    "cpu_count": 32,
+    "cpu_freq_mhz": null,
+    "filesystem": "NTFS",
+    "git_commit": "d0c2fd0cb17d40eda7a5ed37213fb5d32e748b61",
+    "hostname": "DESKTOP-K6P66JD",
+    "machine": "AMD64",
+    "memory_total_bytes": null,
+    "processor": "Intel64 Family 6 Model 183 Stepping 1, GenuineIntel",
+    "python": "3.13.9 (tags/v3.13.9:8183fa5, Oct 14 2025, 14:09:13) [MSC v.1944 64 bit (AMD64)]",
+    "python_executable": "H:\\program\\CandleScope\\backend\\venv.bak\\Scripts\\python.exe",
+    "recorded_at": "2026-08-27T14:20:48Z",
+    "release": "11",
+    "sqlite": "3.50.4",
+    "system": "Windows"
+  },
+  "klines_db_path": "E:\\CacheVault\\Temp\\manual-history-phase0-dl5gveju\\klines.db",
+  "materialization_1m_to_89m": {
+    "aggregator": "app.data_engine.interval_policy.aggregate_kline_rows",
+    "complete_source_buckets": 11235,
+    "elapsed_ms": 24437.519,
+    "files_after": {
+      "bytes_per_row_note": "physical_size_bytes / row_count; do not use BAR_ESTIMATED_BYTES=96",
+      "db_size_bytes": 229531648,
+      "file_set_stable": true,
+      "freelist_count": 0,
+      "klines_managed_bytes": 0,
+      "page_count": 56043,
+      "page_size_bytes": 4096,
+      "physical_size_bytes": 229642920,
+      "shm_size_bytes": 32768,
+      "total_size_bytes": 229675688,
+      "wal_size_bytes": 111272
+    },
+    "peak_physical_size_bytes": 229642920,
+    "peak_process_memory": {
+      "available": true,
+      "pagefile_bytes": 59154432,
+      "peak_rss_bytes": 100950016,
+      "rss_bytes": 77029376,
+      "source": "windows.GetProcessMemoryInfo"
+    },
+    "rebuilt_rows": 11235,
+    "source_rows": 1000000,
+    "stored_target_rows": 11235,
+    "upsert_reported_changes": 11235
+  },
+  "native_growth": {
+    "10000": {
+      "bar_estimated_bytes_96_used": false,
+      "files": {
+        "bytes_per_row_note": "physical_size_bytes / row_count; do not use BAR_ESTIMATED_BYTES=96",
+        "db_size_bytes": 4096,
+        "file_set_stable": true,
+        "freelist_count": 0,
+        "klines_managed_bytes": 0,
+        "page_count": 555,
+        "page_size_bytes": 4096,
+        "physical_size_bytes": 2319568,
+        "shm_size_bytes": 32768,
+        "total_size_bytes": 2352336,
+        "wal_size_bytes": 2315472
+      },
+      "measured_physical_bytes_per_row": 231.957,
+      "row_count": 10000,
+      "upsert": {
+        "elapsed_ms": 42.71,
+        "requested_rows": 10000,
+        "rows_per_second": 234138.849,
+        "upsert_reported_changes": 10000
+      }
+    },
+    "100000": {
+      "bar_estimated_bytes_96_used": false,
+      "files": {
+        "bytes_per_row_note": "physical_size_bytes / row_count; do not use BAR_ESTIMATED_BYTES=96",
+        "db_size_bytes": 19234816,
+        "file_set_stable": true,
+        "freelist_count": 0,
+        "klines_managed_bytes": 0,
+        "page_count": 5527,
+        "page_size_bytes": 4096,
+        "physical_size_bytes": 22740968,
+        "shm_size_bytes": 32768,
+        "total_size_bytes": 22773736,
+        "wal_size_bytes": 3506152
+      },
+      "measured_physical_bytes_per_row": 227.41,
+      "row_count": 100000,
+      "upsert": {
+        "elapsed_ms": 493.451,
+        "requested_rows": 90000,
+        "rows_per_second": 182388.856,
+        "upsert_reported_changes": 90000
+      }
+    },
+    "1000000": {
+      "bar_estimated_bytes_96_used": false,
+      "files": {
+        "bytes_per_row_note": "physical_size_bytes / row_count; do not use BAR_ESTIMATED_BYTES=96",
+        "db_size_bytes": 226930688,
+        "file_set_stable": true,
+        "freelist_count": 0,
+        "klines_managed_bytes": 0,
+        "page_count": 55403,
+        "page_size_bytes": 4096,
+        "physical_size_bytes": 232711080,
+        "shm_size_bytes": 32768,
+        "total_size_bytes": 232743848,
+        "wal_size_bytes": 5780392
+      },
+      "measured_physical_bytes_per_row": 232.711,
+      "row_count": 1000000,
+      "upsert": {
+        "elapsed_ms": 6725.397,
+        "requested_rows": 900000,
+        "rows_per_second": 133821.086,
+        "upsert_reported_changes": 900000
+      }
+    }
+  },
+  "notes": [
+    "Do not use memory-GC BAR_ESTIMATED_BYTES=96 as SQLite bytes/row.",
+    "Space estimates must use measured physical_size_bytes / row_count.",
+    "This run used a temporary KLINES_DB_PATH and did not open data/candlescope.db."
+  ],
+  "production_klines_db_opened": false,
+  "schema": "candlescope.manual-history.phase0-storage.v1",
+  "upsert_replay": {
+    "files_after": {
+      "bytes_per_row_note": "physical_size_bytes / row_count; do not use BAR_ESTIMATED_BYTES=96",
+      "db_size_bytes": 226930688,
+      "file_set_stable": true,
+      "freelist_count": 0,
+      "klines_managed_bytes": 0,
+      "page_count": 55403,
+      "page_size_bytes": 4096,
+      "physical_size_bytes": 230366800,
+      "shm_size_bytes": 32768,
+      "total_size_bytes": 230399568,
+      "wal_size_bytes": 3436112
+    },
+    "files_before": {
+      "bytes_per_row_note": "physical_size_bytes / row_count; do not use BAR_ESTIMATED_BYTES=96",
+      "db_size_bytes": 226930688,
+      "file_set_stable": true,
+      "freelist_count": 0,
+      "klines_managed_bytes": 0,
+      "page_count": 55403,
+      "page_size_bytes": 4096,
+      "physical_size_bytes": 232711080,
+      "shm_size_bytes": 32768,
+      "total_size_bytes": 232743848,
+      "wal_size_bytes": 5780392
+    },
+    "physical_delta_bytes": -2344280,
+    "replayed_rows": 100000,
+    "upsert": {
+      "elapsed_ms": 858.176,
+      "requested_rows": 100000,
+      "rows_per_second": 116526.187,
+      "upsert_reported_changes": 100000
+    }
+  }
+}

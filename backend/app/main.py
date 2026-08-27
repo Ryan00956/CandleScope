@@ -80,6 +80,7 @@ if RUNTIME_MODE == "LIVE":
     from app.api.v1.market import router as market_router
     from app.api.v1.order_book import router as order_book_router
     from app.api.v1.replay import router as replay_router
+    from app.api.v1.manual_history import router as manual_history_router
     from app.api.v1.settings import router as settings_router
     from app.api.v1.stream import router as stream_router
     from app.api.v1.subscriptions import price_ws_router
@@ -131,6 +132,7 @@ else:
     app.include_router(indicators_router, prefix="/api/v1")
     app.include_router(alerts_router, prefix="/api/v1")
     app.include_router(settings_router, prefix="/api/v1")
+    app.include_router(manual_history_router, prefix="/api/v1")
     app.include_router(exchanges_router, prefix="/api/v1")
     app.include_router(symbols_router, prefix="/api/v1")
     app.include_router(subscriptions_router, prefix="/api/v1")

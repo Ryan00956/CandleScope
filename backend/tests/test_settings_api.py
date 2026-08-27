@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api.v1 import settings as settings_api
+from app.api.v1.manual_history import router as manual_history_router
 from app.api.v1.settings import router as settings_router
+from app.core.config import MANUAL_HISTORY_DOWNLOAD_ENABLED
 from app.data_engine.storage import klines_repo
 
 
@@ -194,6 +198,7 @@ class _Runtime:
 def _client(*, with_runtime: bool = True) -> TestClient:
     app = FastAPI()
     app.include_router(settings_router, prefix="/api/v1")
+    app.include_router(manual_history_router, prefix="/api/v1")
     if with_runtime:
         app.state.data_manager = _DataManager()
         app.state.data_engine_runtime = _Runtime()
@@ -207,9 +212,89 @@ def _client(*, with_runtime: bool = True) -> TestClient:
 def _client_with_dm(dm: _DataManager) -> TestClient:
     app = FastAPI()
     app.include_router(settings_router, prefix="/api/v1")
+    app.include_router(manual_history_router, prefix="/api/v1")
     app.state.data_manager = dm
     app.state.data_engine_runtime = _Runtime()
     return TestClient(app)
+
+
+def _assert_disabled_capabilities(payload: dict) -> None:
+    assert payload["status"] == "ok"
+    assert payload["enabled"] is False
+    assert payload["reason"] == "feature_flag_disabled"
+    assert payload["job_runner_available"] is False
+    assert payload["limits"] == {
+        "max_targets": 64,
+        "active_job_concurrency": 1,
+        "target_concurrency": 2,
+    }
+    assert "archive" in payload
+    assert "enabled" in payload["archive"]
+    assert "okx_enabled" in payload["archive"]
+
+
+def test_manual_history_download_flag_defaults_off() -> None:
+    assert MANUAL_HISTORY_DOWNLOAD_ENABLED is False
+
+
+def test_manual_history_capabilities_disabled_and_stable() -> None:
+    client = _client()
+    first = client.get("/api/v1/settings/storage/manual-downloads/capabilities")
+    second = client.get("/api/v1/settings/storage/manual-downloads/capabilities")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json() == second.json()
+    _assert_disabled_capabilities(first.json())
+
+
+def test_manual_history_create_rejected_when_feature_flag_disabled() -> None:
+    response = _client().post(
+        "/api/v1/settings/storage/manual-downloads",
+        json={
+            "exchange": "binance",
+            "market_type": "spot",
+            "symbols": ["BTCUSDT"],
+            "intervals": ["1m"],
+            "start_ms": 1_700_000_000_000,
+        },
+    )
+
+    assert response.status_code == 403
+    detail = response.json()["detail"]
+    assert detail["status"] == "error"
+    assert detail["reason"] == "feature_flag_disabled"
+
+
+def test_live_app_registers_manual_history_capabilities_route() -> None:
+    main_source = (
+        Path(__file__).resolve().parents[1] / "app" / "main.py"
+    ).read_text(encoding="utf-8")
+    assert (
+        "from app.api.v1.manual_history import router as manual_history_router"
+        in main_source
+    )
+    assert 'app.include_router(manual_history_router, prefix="/api/v1")' in main_source
+
+    client = _client()
+    first = client.get("/api/v1/settings/storage/manual-downloads/capabilities")
+    second = client.get("/api/v1/settings/storage/manual-downloads/capabilities")
+    assert first.status_code == second.status_code == 200
+    assert first.json() == second.json()
+    _assert_disabled_capabilities(first.json())
+
+    create = client.post(
+        "/api/v1/settings/storage/manual-downloads",
+        json={
+            "exchange": "binance",
+            "market_type": "spot",
+            "symbols": ["BTCUSDT"],
+            "intervals": ["1m"],
+            "start_ms": 1_700_000_000_000,
+        },
+    )
+    assert create.status_code == 403
+    assert create.json()["detail"]["reason"] == "feature_flag_disabled"
 
 
 def test_storage_health_returns_backfill_snapshot() -> None:

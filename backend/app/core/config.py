@@ -493,6 +493,25 @@ def _parse_strict_flag(name: str, default: str = "0") -> bool:
     raise ValueError(f"{name} must be 0 or 1")
 
 
+def _parse_positive_int(
+    name: str,
+    default: str,
+    *,
+    minimum: int = 1,
+    maximum: int | None = None,
+) -> int:
+    raw = os.getenv(name, default).strip()
+    try:
+        value = int(raw, 10)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if value < minimum:
+        raise ValueError(f"{name} must be >= {minimum}")
+    if maximum is not None and value > maximum:
+        raise ValueError(f"{name} must be <= {maximum}")
+    return value
+
+
 RESEARCH_DATA_LIBRARY_ENABLED = _parse_strict_flag(
     "CANDLESCOPE_RESEARCH_DATA_LIBRARY_ENABLED",
     "1",
@@ -517,6 +536,29 @@ HISTORY_ARCHIVE_CACHE_MAX_BYTES = int(
 OKX_HISTORY_ARCHIVE_ENABLED = os.getenv(
     "OKX_HISTORY_ARCHIVE_ENABLED", "0"
 ).strip().lower() in {"1", "true", "yes", "on"}
+
+# Manual continuous history download is a default-off write feature.  Closing
+# the flag must stop new jobs; it must not disable later durable GC protection.
+MANUAL_HISTORY_DOWNLOAD_ENABLED = _parse_strict_flag(
+    "MANUAL_HISTORY_DOWNLOAD_ENABLED",
+    "0",
+)
+MANUAL_HISTORY_PLAN_TTL_SECONDS = _parse_positive_int(
+    "MANUAL_HISTORY_PLAN_TTL_SECONDS",
+    "300",
+)
+MANUAL_HISTORY_MAX_TARGETS = _parse_positive_int(
+    "MANUAL_HISTORY_MAX_TARGETS",
+    "64",
+)
+MANUAL_HISTORY_ACTIVE_JOB_CONCURRENCY = _parse_positive_int(
+    "MANUAL_HISTORY_ACTIVE_JOB_CONCURRENCY",
+    "1",
+)
+MANUAL_HISTORY_TARGET_CONCURRENCY = _parse_positive_int(
+    "MANUAL_HISTORY_TARGET_CONCURRENCY",
+    "2",
+)
 
 # Replay is a default-on product and owns a database separate from K-lines.
 # These limits are frozen Phase 0 safety ceilings; environment overrides may

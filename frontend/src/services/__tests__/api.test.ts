@@ -288,6 +288,62 @@ test("exchange endpoints validate the list and capabilities shapes", async (cont
   });
   const capability = exchangeCapability({
     capability_schema_version: 3,
+    support: {
+      provider: "ccxt_primary",
+      routable: true,
+      verification_level: "shadow",
+      qualification: {
+        ccxt_version: "4.5.60",
+        level: "shadow",
+        verified_at: "2026-08-07T01:19:43Z",
+        market_types: ["spot"],
+        channels: ["kline"],
+        evidence_id: "ccxt-shadow-binance-spot-1910-zero-mismatch",
+        event_count: 1910,
+      },
+      qualifications: [{
+        ccxt_version: "4.5.60",
+        level: "shadow",
+        verified_at: "2026-08-07T01:19:43Z",
+        market_types: ["spot"],
+        channels: ["kline"],
+        evidence_id: "ccxt-shadow-binance-spot-1910-zero-mismatch",
+        event_count: 1910,
+      }],
+      products: {
+        markets: {
+          spot: {
+            chart: true,
+            order_book: {
+              supported: true,
+              channel: "depth",
+              mode: "snapshot",
+              snapshot_mode: "live_snapshot",
+              strict_full_depth: true,
+            },
+            trade_flow: {
+              supported: true,
+              channel: "agg_trade",
+              mode: "strict_repairable",
+              sequence_continuity: true,
+              history: true,
+              delivery_mode: "live_stream",
+            },
+            advanced_market_data: {
+              supported: true,
+              channels: {
+                funding_rate: {
+                  supported: true,
+                  realtime: false,
+                  history: true,
+                  delivery_mode: "history_only",
+                },
+              },
+            },
+          },
+        },
+      },
+    },
     channels: [{
       channel: "kline",
       market_types: ["spot"],
@@ -299,12 +355,38 @@ test("exchange endpoints validate the list and capabilities shapes", async (cont
   globalThis.fetch = async (url) => (
     String(url).endsWith("/capabilities")
       ? jsonResponse(capability)
-      : jsonResponse({ count: 1, exchanges: [capability] })
+      : jsonResponse({
+          count: 1,
+          ccxt: {
+            version: "4.5.60",
+            rest_exchange_ids: 105,
+            pro_exchange_ids: 77,
+            watch_ohlcv: 59,
+            watch_trades: 75,
+            watch_order_book: 76,
+            watch_ticker: 67,
+          },
+          exchanges: [capability],
+        })
   );
 
-  const firstExchange = (await fetchExchanges()).exchanges[0];
+  const exchangeList = await fetchExchanges();
+  const firstExchange = exchangeList.exchanges[0];
   assert.ok(firstExchange);
   assert.equal(firstExchange.exchange, "binance");
+  assert.equal(firstExchange.support?.provider, "ccxt_primary");
+  assert.equal(firstExchange.support?.verification_level, "shadow");
+  assert.equal(firstExchange.support?.qualifications[0]?.event_count, 1910);
+  assert.equal(
+    firstExchange.support?.products.markets.spot?.trade_flow.mode,
+    "strict_repairable",
+  );
+  assert.equal(
+    firstExchange.support?.products.markets.spot
+      ?.advanced_market_data.channels.funding_rate?.delivery_mode,
+    "history_only",
+  );
+  assert.equal(exchangeList.ccxt?.pro_exchange_ids, 77);
   const parsedCapability = await fetchExchangeCapabilities();
   assert.deepEqual(parsedCapability.native_intervals, ["1m", "1h"]);
   assert.equal(parsedCapability.capability_schema_version, 3);

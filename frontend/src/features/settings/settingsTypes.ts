@@ -33,7 +33,7 @@ export interface SettingsRuntimeView {
   appearance: ChartAppearancePanelProps;
   proxy: Omit<ProxySettingsPanelProps,
     "onProxyModeChange" | "onCustomProxyChange" | "onProxyTest" | "onProxySave">;
-  exchanges: Omit<ExchangeSettingsPanelProps, "onRefreshExchanges">;
+  exchanges: Omit<ExchangeSettingsPanelProps, "onRefreshExchanges" | "onTestExchangeMarket">;
   cacheLimits: Omit<CacheLimitsPanelProps, "onToggleAdvanced">;
   cacheDiagnostics: CacheDiagnosticsPanelProps;
   maintenance: Omit<StorageMaintenancePanelProps,
@@ -43,7 +43,7 @@ export interface SettingsRuntimeView {
 export interface SettingsRuntimeActions {
   proxy: Pick<ProxySettingsPanelProps,
     "onProxyModeChange" | "onCustomProxyChange" | "onProxyTest" | "onProxySave">;
-  exchanges: Pick<ExchangeSettingsPanelProps, "onRefreshExchanges">;
+  exchanges: Pick<ExchangeSettingsPanelProps, "onRefreshExchanges" | "onTestExchangeMarket">;
   cacheLimits: Pick<CacheLimitsPanelProps, "onToggleAdvanced">;
   cacheDiagnostics: Pick<CacheDiagnosticsPanelProps,
     | "onPlanBackendMemoryGc"

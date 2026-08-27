@@ -1,6 +1,7 @@
 import { t } from "../../i18n/index.js";
 import { parseTradeFlowSocketMessage } from "./tradeFlowParser.js";
 import type {
+  TradeFlowContinuityMode,
   TradeFlowExternalStore,
   TradeFlowIdentity,
 } from "./tradeFlowTypes.js";
@@ -22,6 +23,8 @@ export interface TradeFlowStreamControllerOptions {
   url: string;
   identity: TradeFlowIdentity;
   store: TradeFlowExternalStore;
+  channel?: "agg_trade" | "trade";
+  continuityMode?: TradeFlowContinuityMode;
   recentLimit?: number;
   socketFactory?: (url: string) => TradeFlowSocket;
   reconnectBaseMs?: number;
@@ -37,6 +40,8 @@ export class TradeFlowStreamController {
   private readonly url: string;
   private readonly identity: TradeFlowIdentity;
   private readonly store: TradeFlowExternalStore;
+  private readonly channel: "agg_trade" | "trade";
+  private readonly continuityMode: TradeFlowContinuityMode;
   private readonly recentLimit: number;
   private readonly socketFactory: (url: string) => TradeFlowSocket;
   private readonly reconnectBaseMs: number;
@@ -64,6 +69,8 @@ export class TradeFlowStreamController {
     url,
     identity,
     store,
+    channel = "agg_trade",
+    continuityMode = "strict_repairable",
     recentLimit = 1_000,
     socketFactory = (target) => new WebSocket(target),
     reconnectBaseMs = 1_000,
@@ -77,6 +84,8 @@ export class TradeFlowStreamController {
     this.url = url;
     this.identity = identity;
     this.store = store;
+    this.channel = channel;
+    this.continuityMode = continuityMode;
     this.recentLimit = Math.max(0, Math.min(2_000, Math.floor(recentLimit)));
     this.socketFactory = socketFactory;
     this.reconnectBaseMs = Math.max(0, reconnectBaseMs);
@@ -158,6 +167,7 @@ export class TradeFlowStreamController {
             message.requestId !== this.requestId
             || message.streams.length !== 1
             || !this.matchesStream(message.streams[0])
+            || message.continuityMode !== this.continuityMode
           ) {
             throw new Error("TradeFlow subscription acknowledgement did not match the request");
           }
@@ -165,7 +175,12 @@ export class TradeFlowStreamController {
           return;
         }
         if (message.kind === "recent") {
-          if (!this.subscribed || this.recentReceived || message.requestId !== this.requestId) {
+          if (
+            !this.subscribed
+            || this.recentReceived
+            || message.requestId !== this.requestId
+            || message.continuityMode !== this.continuityMode
+          ) {
             throw new Error("Unexpected TradeFlow recent handoff");
           }
           this.assertIdentity(message.records);
@@ -186,6 +201,9 @@ export class TradeFlowStreamController {
           if (!message.continuity || message.resyncRequired) {
             this.failGap(socket, t("trade.rt.batchDiscontinuous"));
             return;
+          }
+          if (message.continuityMode !== this.continuityMode) {
+            throw new Error("TradeFlow continuity mode changed during the subscription");
           }
           // AppendBatchHub sequence is global and diagnostic. A subscription
           // filtered to one symbol can legitimately skip values when batches
@@ -274,7 +292,7 @@ export class TradeFlowStreamController {
         exchange: this.identity.exchange,
         market_type: this.identity.marketType,
         symbol: this.identity.symbol,
-        channel: "agg_trade",
+        channel: this.channel,
       }],
     }));
     this.clearCommandTimer();
@@ -305,7 +323,7 @@ export class TradeFlowStreamController {
       && String(stream?.exchange || "").toLowerCase() === this.identity.exchange
       && String(stream?.market_type || "").toLowerCase() === this.identity.marketType
       && String(stream?.symbol || "").toUpperCase() === this.identity.symbol
-      && String(stream?.channel || "").toLowerCase() === "agg_trade";
+      && String(stream?.channel || "").toLowerCase() === this.channel;
   }
 
   private failGap(socket: TradeFlowSocket, message: string): void {

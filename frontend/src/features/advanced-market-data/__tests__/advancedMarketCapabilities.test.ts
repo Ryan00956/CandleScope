@@ -42,7 +42,7 @@ test("funding and OI are resolved independently instead of as one bundle", () =>
   assert.equal(snapshot.channels.open_interest.supported, false);
 });
 
-test("metric studies require both realtime and history capability", () => {
+test("realtime-only metric studies remain available without issuing history reads", () => {
   const snapshot = resolveAdvancedMarketCapabilities({
     marketType: "futures",
     raw: { channels: [channel("open_interest", { history: false })] },
@@ -50,8 +50,22 @@ test("metric studies require both realtime and history capability", () => {
 
   assert.equal(snapshot.channels.open_interest.realtime, true);
   assert.equal(snapshot.channels.open_interest.history, false);
-  assert.equal(snapshot.channels.open_interest.supported, false);
-  assert.match(snapshot.channels.open_interest.reason || "", /实时或历史/);
+  assert.equal(snapshot.channels.open_interest.supported, true);
+  assert.equal(snapshot.channels.open_interest.reason, null);
+});
+
+test("history-only metric studies remain available without opening a live stream", () => {
+  const snapshot = resolveAdvancedMarketCapabilities({
+    marketType: "futures",
+    raw: {
+      channels: [channel("funding_rate", { realtime: false, history: true })],
+    },
+  });
+
+  assert.equal(snapshot.channels.funding_rate.realtime, false);
+  assert.equal(snapshot.channels.funding_rate.history, true);
+  assert.equal(snapshot.channels.funding_rate.supported, true);
+  assert.equal(snapshot.channels.funding_rate.reason, null);
 });
 
 test("spot sessions expose a contract-only reason and no market studies", () => {

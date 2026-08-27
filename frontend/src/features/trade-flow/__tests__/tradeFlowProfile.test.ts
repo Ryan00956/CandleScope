@@ -9,6 +9,8 @@ function trade(id: number, price: number, side: "buy" | "sell", quote: number): 
     marketType: "futures",
     symbol: "BTCUSDT",
     aggTradeId: id,
+    tradeId: String(id),
+    continuityMode: "strict_repairable",
     price,
     quantity: quote / price,
     quoteQuantity: quote,

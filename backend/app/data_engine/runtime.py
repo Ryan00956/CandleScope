@@ -78,6 +78,7 @@ from app.data_engine.market_data.liquidation import LiquidationEngine, Normalize
 from app.data_engine.market_data.liquidation_service import LiquidationService
 from app.data_engine.market_data.order_book import OrderBookEngine
 from app.data_engine.market_data.order_book_service import OrderBookService
+from app.data_engine.market_data.public_trade_service import PublicTradeService
 from app.data_engine.market_data.service import MarketDataService
 from app.data_engine.market_data.storage_writer import MarketMetricStorageWriter
 from app.data_engine.market_data.trade_flow import (
@@ -85,6 +86,8 @@ from app.data_engine.market_data.trade_flow import (
     TradeFlowEngine,
 )
 from app.data_engine.market_data.trade_flow_service import TradeFlowService
+from app.data_engine.market_data.trade_tape import ObservedTrade, TradeTapeEngine
+from app.data_engine.market_data.trade_tape_service import TradeTapeService
 from app.data_engine.storage import (
     AsyncKlinesRepoAdapter,
     DisabledRawAggTradeArchive,
@@ -135,7 +138,7 @@ class DataEngineRuntime:
     backfill_engine: BackfillEngine
     backfill_coordinator: BackfillCoordinator
     market_data_service: MarketDataService
-    trade_flow_service: TradeFlowService
+    trade_flow_service: PublicTradeService
     liquidation_service: LiquidationService | None = None
     order_book_service: OrderBookService | None = None
     full_order_book_service: FullOrderBookService | None = None
@@ -392,6 +395,47 @@ def _build_trade_flow_service(
         ),
         archive_forward_queue_size=event_queue_size,
         archive_forward_batch_size=archive_batch_rows,
+        max_streams=max_streams,
+    )
+
+
+def _build_trade_tape_service(
+    ingestion_factory: ExchangeIngestionFactory,
+) -> TradeTapeService:
+    """Construct the non-persistent observational fallback for unified trades."""
+
+    event_queue_size = _positive_int_config(
+        "TRADE_FLOW_EVENT_QUEUE_SIZE",
+        TRADE_FLOW_EVENT_QUEUE_SIZE,
+    )
+    max_batch_size = _positive_int_config(
+        "TRADE_FLOW_MAX_BATCH_SIZE",
+        TRADE_FLOW_MAX_BATCH_SIZE,
+    )
+    max_streams = _positive_int_config(
+        "TRADE_FLOW_MAX_STREAMS",
+        TRADE_FLOW_MAX_STREAMS,
+    )
+    engine = TradeTapeEngine(
+        raw_ring_size=_positive_int_config(
+            "TRADE_FLOW_RAW_RING_SIZE",
+            TRADE_FLOW_RAW_RING_SIZE,
+        ),
+        max_streams=max_streams,
+    )
+    hub = AppendBatchHub[ObservedTrade](
+        max_pending_records=event_queue_size,
+        max_batch_size=max_batch_size,
+        default_subscriber_max_pending_records=event_queue_size,
+    )
+    return TradeTapeService(
+        ingestion_factory,
+        engine=engine,
+        hub=hub,
+        flush_interval_seconds=_positive_float_config(
+            "TRADE_FLOW_BATCH_INTERVAL_SECONDS",
+            TRADE_FLOW_BATCH_INTERVAL_SECONDS,
+        ),
         max_streams=max_streams,
     )
 
@@ -799,7 +843,7 @@ async def start_data_engine() -> DataEngineRuntime:
     transport: TransportLayer | None = None
     price_source: IngestionPriceSource | None = None
     market_data_service: MarketDataService | None = None
-    trade_flow_service: TradeFlowService | None = None
+    trade_flow_service: PublicTradeService | None = None
     liquidation_service: LiquidationService | None = None
     order_book_service: OrderBookService | None = None
     full_order_book_service: FullOrderBookService | None = None
@@ -870,10 +914,22 @@ async def start_data_engine() -> DataEngineRuntime:
         dm.set_market_data_service(market_data_service)
         print("[startup] MarketDataService injected [ok]")
 
-        trade_flow_service = _build_trade_flow_service(ingestion_factory)
+        strict_trade_flow_service = _build_trade_flow_service(ingestion_factory)
+        trade_tape_service: TradeTapeService | None = None
+        try:
+            trade_tape_service = _build_trade_tape_service(ingestion_factory)
+            trade_flow_service = PublicTradeService(
+                strict_trade_flow_service,
+                trade_tape_service,
+            )
+        except Exception:
+            if trade_tape_service is not None:
+                await trade_tape_service.shutdown()
+            await strict_trade_flow_service.shutdown()
+            raise
         dm.set_trade_flow_service(trade_flow_service)
-        await _start_raw_archive_streams(trade_flow_service)
-        print("[startup] TradeFlowService injected [ok]")
+        await _start_raw_archive_streams(strict_trade_flow_service)
+        print("[startup] TradeFlow + observational trade tape injected [ok]")
 
         liquidation_service = _build_liquidation_service(ingestion_factory)
         dm.set_liquidation_service(liquidation_service)
@@ -1153,7 +1209,7 @@ async def _cleanup_partial_start(
     transport: TransportLayer | None,
     price_source: IngestionPriceSource | None,
     market_data_service: MarketDataService | None,
-    trade_flow_service: TradeFlowService | None,
+    trade_flow_service: PublicTradeService | None,
     liquidation_service: LiquidationService | None = None,
     order_book_service: OrderBookService | None = None,
     full_order_book_service: FullOrderBookService | None = None,

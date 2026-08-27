@@ -8,6 +8,11 @@ import { createTradeFlowMarkerSource } from "./tradeFlowMarkerSource.js";
 import { useTradeFlowPreferences } from "./tradeFlowPreferencesStore.js";
 import { createTradeFlowStore } from "./tradeFlowStore.js";
 import { TradeFlowStreamController } from "./tradeFlowStreamController.js";
+import {
+  exchangeMarketProductSupport,
+  supportsTradeFlowProduct,
+} from "../exchange-support/exchangeSupportModel.js";
+import type { ExchangeCapabilityPayload } from "../../services/apiPayloadParsers.js";
 import type { TradeFlowIdentity, TradeFlowRuntime } from "./tradeFlowTypes.js";
 
 export interface UseTradeFlowRuntimeOptions {
@@ -18,6 +23,7 @@ export interface UseTradeFlowRuntimeOptions {
   sellColor: string;
   /** True when tape and/or profile rail views are open. */
   tradeFlowOpen?: boolean;
+  capability: ExchangeCapabilityPayload | null;
 }
 
 function normalizeIdentity(identity: TradeFlowIdentity): TradeFlowIdentity {
@@ -28,10 +34,12 @@ function normalizeIdentity(identity: TradeFlowIdentity): TradeFlowIdentity {
   };
 }
 
-function supportMessage(identity: TradeFlowIdentity): string | null {
-  if (identity.exchange !== "binance") return t("trade.rt.binanceOnly");
-  if (identity.marketType !== "futures" && identity.marketType !== "spot") {
-    return t("trade.rt.binanceMarkets");
+function supportMessage(
+  identity: TradeFlowIdentity,
+  capability: ExchangeCapabilityPayload | null,
+): string | null {
+  if (!supportsTradeFlowProduct(capability, identity.marketType)) {
+    return t("trade.rt.capabilityUnavailable");
   }
   if (!identity.symbol) return t("orderBook.rt.pickSymbol");
   return null;
@@ -44,6 +52,7 @@ export function useTradeFlowRuntime({
   buyColor,
   sellColor,
   tradeFlowOpen,
+  capability,
 }: UseTradeFlowRuntimeOptions): TradeFlowRuntime {
   const { exchange, marketType, symbol } = rawIdentity;
   const identity = useMemo(() => normalizeIdentity({ exchange, marketType, symbol }), [
@@ -57,8 +66,17 @@ export function useTradeFlowRuntime({
   // the remounted realtime stream; it is released normally with the component.
   const [store] = useState(createTradeFlowStore);
   const [retryRevision, setRetryRevision] = useState(0);
-  const message = supportMessage(identity);
+  const productSupport = useMemo(
+    () => exchangeMarketProductSupport(capability, identity.marketType),
+    [capability, identity.marketType],
+  );
+  const message = supportMessage(identity, capability);
   const supported = message === null;
+  const continuityMode = productSupport?.trade_flow.mode === "observational"
+    ? "observational"
+    : "strict_repairable";
+  const tradeChannel = productSupport?.trade_flow.channel === "trade" ? "trade" : "agg_trade";
+  const deliveryMode = productSupport?.trade_flow.delivery_mode || null;
   // Prefer explicit rail open state; fall back to legacy dockView exclusivity.
   const streamOpen = tradeFlowOpen ?? preferences.dockView !== "order-book";
   const enabled = supported && streamOpen;
@@ -76,6 +94,8 @@ export function useTradeFlowRuntime({
       url: `${httpBaseToWsBase(API_BASE)}/stream/trade-flow`,
       identity,
       store,
+      channel: tradeChannel,
+      continuityMode,
     });
     // StrictMode immediately replays effect setup/cleanup in development. By
     // deferring the physical connection one cancellable turn, the rehearsal
@@ -85,7 +105,7 @@ export function useTradeFlowRuntime({
       clearTimeout(startTimer);
       controller.close();
     };
-  }, [identity, message, retryRevision, store, streamOpen, supported]);
+  }, [continuityMode, deliveryMode, identity, message, retryRevision, store, streamOpen, supported, tradeChannel]);
 
   const intervalSeconds = parseIntervalSeconds(interval);
   const markerSource = useMemo(() => (
@@ -117,11 +137,25 @@ export function useTradeFlowRuntime({
       interval,
       supported,
       supportMessage: message,
+      continuityMode,
+      deliveryMode,
       preferences,
       store,
       markerSource,
     },
     actions,
     status: { enabled },
-  }), [actions, enabled, identity, interval, markerSource, message, preferences, store, supported]);
+  }), [
+    actions,
+    continuityMode,
+    deliveryMode,
+    enabled,
+    identity,
+    interval,
+    markerSource,
+    message,
+    preferences,
+    store,
+    supported,
+  ]);
 }

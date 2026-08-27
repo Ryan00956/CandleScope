@@ -109,7 +109,7 @@ def _finite_decimal_product(left: float, right: float) -> tuple[Decimal, float]:
 
 @dataclass(frozen=True, slots=True)
 class NormalizedLiquidation:
-    """Validated futures liquidation snapshot suitable for fanout and rollup."""
+    """Validated contract-market liquidation snapshot suitable for fanout and rollup."""
 
     exchange: str
     market_type: str
@@ -148,8 +148,11 @@ class NormalizedLiquidation:
             label="market type",
             case="lower",
         )
-        if market_type != "futures":
-            raise ValueError("liquidation events require market_type='futures'")
+        if not _is_contract_market_type(market_type):
+            raise ValueError(
+                "liquidation events require a contract market type; "
+                "market_type='futures', 'future', or 'swap'"
+            )
         object.__setattr__(self, "market_type", market_type)
         object.__setattr__(
             self,
@@ -888,9 +891,13 @@ def _normalize_identity(identity: StreamIdentity) -> StreamIdentity:
         _required_text(market_type, label="market type", case="lower"),
         _required_text(symbol, label="symbol", case="upper"),
     )
-    if normalized[1] != "futures":
-        raise ValueError("liquidation identities require market_type='futures'")
+    if not _is_contract_market_type(normalized[1]):
+        raise ValueError("liquidation identities require a contract market type")
     return normalized
+
+
+def _is_contract_market_type(market_type: str) -> bool:
+    return market_type.split(".", 1)[0] in {"futures", "future", "swap"}
 
 
 def _rollup_sort_key(

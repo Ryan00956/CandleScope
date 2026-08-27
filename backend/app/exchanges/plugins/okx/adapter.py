@@ -198,7 +198,7 @@ class OkxExchangeAdapter:
                 "rest.kline.max_limit": 300,
             },
             known_limitations=[
-                "aggTrade, trade, and depth are not exposed by the current OKX plugin",
+                "aggTrade and strict full-depth reconstruction are not exposed by the current OKX plugin",
             ],
         )
 

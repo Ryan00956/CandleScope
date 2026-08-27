@@ -15,6 +15,11 @@ from app.api.v1.order_book_projection import (
     project_order_book_levels,
 )
 from app.data_engine.market_data.models import MarketChannel, MarketStreamKey
+from app.exchanges import bootstrap_default_adapters, get_exchange_registry
+from app.exchanges.products import (
+    snapshot_order_book_mode,
+    supports_snapshot_order_book,
+)
 
 
 PROTOCOL = "orderbook.v1"
@@ -26,6 +31,7 @@ ALLOWED_UPDATE_INTERVALS_BY_MARKET = {
 DEFAULT_UPDATE_INTERVAL_MS_BY_MARKET = {"spot": 1000, "futures": 250}
 ALLOWED_UPDATE_INTERVALS_MS = frozenset().union(
     *ALLOWED_UPDATE_INTERVALS_BY_MARKET.values(),
+    {2000, 3000},
 )
 
 router = APIRouter(prefix="/order-book", tags=["order-book"])
@@ -40,7 +46,7 @@ async def order_book_snapshot(
     market_type: str = Query("futures"),
     depth_levels: int = Query(default=20),
     update_interval_ms: int | None = Query(default=None),
-    wait_ms: int = Query(default=2_000, ge=100, le=5_000),
+    wait_ms: int = Query(default=5_000, ge=100, le=10_000),
 ) -> dict[str, Any]:
     """Return a fresh replaceable partial-book snapshot.
 
@@ -125,27 +131,30 @@ def _key(
 ) -> MarketStreamKey:
     exchange_name = str(exchange).strip().lower()
     market = str(market_type).strip().lower()
-    if exchange_name != "binance" or market not in ALLOWED_UPDATE_INTERVALS_BY_MARKET:
+    contract = order_book_contract(exchange_name, market)
+    allowed_depth_levels = contract["depth_levels"]
+    if depth_levels not in allowed_depth_levels:
         raise HTTPException(
             status_code=422,
-            detail="partial order books currently support binance spot and futures only",
-        )
-    if depth_levels not in ALLOWED_DEPTH_LEVELS:
-        raise HTTPException(
-            status_code=422,
-            detail="depth_levels must be one of 5, 10, or 20",
+            detail=(
+                "depth_levels must be one of "
+                f"{', '.join(str(value) for value in sorted(allowed_depth_levels))}"
+            ),
         )
     resolved_interval_ms = (
-        DEFAULT_UPDATE_INTERVAL_MS_BY_MARKET[market]
+        contract["default_update_interval_ms"]
         if update_interval_ms is None
         else update_interval_ms
     )
-    allowed_intervals = ALLOWED_UPDATE_INTERVALS_BY_MARKET[market]
+    allowed_intervals = contract["update_intervals_ms"]
     if resolved_interval_ms not in allowed_intervals:
         supported = ", ".join(str(value) for value in sorted(allowed_intervals))
         raise HTTPException(
             status_code=422,
-            detail=f"binance {market} update_interval_ms must be one of {supported}",
+            detail=(
+                f"{exchange_name} {market} update_interval_ms must be one of "
+                f"{supported}"
+            ),
         )
     try:
         return MarketStreamKey.build(
@@ -161,6 +170,70 @@ def _key(
         )
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def order_book_contract(exchange: str, market_type: str) -> dict[str, Any]:
+    """Resolve bounded snapshot controls from the authoritative capability."""
+
+    exchange_name = str(exchange).strip().lower()
+    market = str(market_type).strip().lower()
+    bootstrap_default_adapters()
+    try:
+        capabilities = get_exchange_registry().get_plugin(exchange_name).capabilities()
+    except KeyError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if not supports_snapshot_order_book(capabilities, market):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{exchange_name}:{market}:depth does not support the "
+                "snapshot order-book product"
+            ),
+        )
+    capability = capabilities.channel_capability(MarketChannel.DEPTH, market)
+    assert capability is not None
+    raw_levels = capability.params.get("depth_levels", ())
+    declared_levels = frozenset(
+        int(value)
+        for value in raw_levels
+        if isinstance(value, int) and not isinstance(value, bool)
+    )
+    levels = declared_levels & ALLOWED_DEPTH_LEVELS
+    if not levels:
+        levels = ALLOWED_DEPTH_LEVELS
+    declared_intervals = frozenset(
+        int(value)
+        for value in capability.update_intervals_ms
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0
+    )
+    if not declared_intervals:
+        strict_capability = capabilities.channel_capability(
+            MarketChannel.FULL_DEPTH,
+            market,
+        )
+        if strict_capability is not None:
+            declared_intervals = frozenset(
+                int(value)
+                for value in strict_capability.update_intervals_ms
+                if isinstance(value, int) and not isinstance(value, bool) and value > 0
+            )
+    # Unified CCXT books use provider-managed cadence.  1000ms is a stable
+    # logical contract value; it is not presented as an exchange sequence or
+    # guaranteed upstream sampling interval.
+    intervals = declared_intervals or frozenset({1000})
+    preferred = DEFAULT_UPDATE_INTERVAL_MS_BY_MARKET.get(market)
+    default_interval = preferred if preferred in intervals else min(intervals)
+    snapshot_mode = snapshot_order_book_mode(capabilities, market)
+    return {
+        "depth_levels": levels,
+        "update_intervals_ms": intervals,
+        "default_update_interval_ms": default_interval,
+        "cadence_semantics": (
+            "provider_rate_limited"
+            if snapshot_mode == "polling_snapshot"
+            else ("declared" if declared_intervals else "provider_managed")
+        ),
+    }
 
 
 def serialize_record(
@@ -190,4 +263,4 @@ def serialize_record(
     return payload
 
 
-__all__ = ["router", "serialize_record"]
+__all__ = ["order_book_contract", "router", "serialize_record"]

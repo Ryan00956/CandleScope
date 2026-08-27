@@ -47,6 +47,7 @@ _HTTP_FALLBACK_TYPES = {
     StreamType.INDEX_PRICE,
     StreamType.FUNDING_RATE,
     StreamType.OPEN_INTEREST,
+    StreamType.LIQUIDATION,
 }
 
 

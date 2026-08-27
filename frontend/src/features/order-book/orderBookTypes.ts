@@ -1,5 +1,5 @@
 export const PARTIAL_DEPTH_LEVELS = [5, 10, 20] as const;
-export const UPDATE_INTERVALS_MS = [100, 250, 500, 1000] as const;
+export const UPDATE_INTERVALS_MS = [100, 250, 500, 1000, 2000, 3000] as const;
 export const SPOT_UPDATE_INTERVALS_MS = [100, 1000] as const;
 export const FUTURES_UPDATE_INTERVALS_MS = [100, 250, 500] as const;
 export const FULL_OUTPUT_LIMITS = [20, 50, 100] as const;
@@ -7,6 +7,7 @@ export const PARTIAL_PRICE_GROUPINGS = ["auto", "raw", "10"] as const;
 export const FULL_PRICE_GROUPINGS = ["auto", "raw", "10", "100", "1000"] as const;
 
 export type OrderBookMode = "partial" | "full";
+export type OrderBookSnapshotMode = "live_snapshot" | "polling_snapshot";
 export type PartialDepthLevel = (typeof PARTIAL_DEPTH_LEVELS)[number];
 export type OrderBookUpdateIntervalMs = (typeof UPDATE_INTERVALS_MS)[number];
 export type FullOutputLimit = (typeof FULL_OUTPUT_LIMITS)[number];
@@ -105,6 +106,8 @@ export interface OrderBookRuntime {
     identity: OrderBookIdentity;
     supported: boolean;
     supportMessage: string | null;
+    fullModeSupported: boolean;
+    snapshotMode: OrderBookSnapshotMode | null;
     preferences: OrderBookPreferences;
     updateIntervalMs: OrderBookUpdateIntervalMs;
     updateIntervalsMs: readonly OrderBookUpdateIntervalMs[];

@@ -43,6 +43,13 @@ class _IngestionFactory(Protocol):
         on_gap: Any | None = None,
     ) -> Any: ...
 
+    async def fetch_market(
+        self,
+        descriptor: StreamDescriptor,
+        *,
+        limit: int = 1,
+    ) -> list[MarketEvent]: ...
+
 
 @dataclass(frozen=True, slots=True)
 class OrderBookAttachment:
@@ -62,6 +69,7 @@ class OrderBookAttachment:
 class _PhysicalLease:
     handle: Any
     generation: object
+    transport: str = "live_snapshot"
     consumers: set[str] = field(default_factory=set)
     stop_task: asyncio.Task[Any] | None = None
     stop_state: str = "active"
@@ -72,6 +80,19 @@ class _PhysicalLease:
 class _PendingEvent:
     event: MarketEvent
     generation: object
+
+
+@dataclass(slots=True)
+class _PollingHandle:
+    task: asyncio.Task[None]
+
+    async def stop(self) -> None:
+        if not self.task.done():
+            self.task.cancel()
+        try:
+            await self.task
+        except asyncio.CancelledError:
+            pass
 
 
 class OrderBookService:
@@ -134,6 +155,11 @@ class OrderBookService:
             "event_queue_high_water": 0,
             "snapshot_stale_reads": 0,
             "snapshot_wait_timeouts": 0,
+            "rest_poll_requests": 0,
+            "rest_poll_events": 0,
+            "rest_poll_empty": 0,
+            "rest_poll_failures": 0,
+            "last_rest_poll_error": None,
             "physical_stops_attempted": 0,
             "physical_stops_succeeded": 0,
             "physical_stop_timeouts": 0,
@@ -187,9 +213,11 @@ class OrderBookService:
 
             identity = _identity(validated)
             generation = object()
+            snapshot_mode = _snapshot_mode(validated)
             reservation = _PhysicalLease(
                 handle=None,
                 generation=generation,
+                transport=snapshot_mode,
                 stop_state="starting",
             )
             async with self._lifecycle_lock:
@@ -211,10 +239,18 @@ class OrderBookService:
                 self._offer_event(validated, event, generation=generation)
 
             try:
-                handle = await self._factory.start_market(
-                    _descriptor(validated),
-                    _on_event,
-                )
+                descriptor = _descriptor(validated)
+                if snapshot_mode == "polling_snapshot":
+                    handle = self._start_polling_snapshot(
+                        validated,
+                        descriptor,
+                        _on_event,
+                    )
+                else:
+                    handle = await self._factory.start_market(
+                        descriptor,
+                        _on_event,
+                    )
             except BaseException:
                 await drain_cancellation_safe_cleanup(
                     self._cleanup_start_reservation(validated, reservation),
@@ -415,6 +451,7 @@ class OrderBookService:
                     "key": key.to_dict(),
                     "topic": key.topic,
                     "consumers": len(entry.consumers),
+                    "transport": entry.transport,
                     "stop_state": entry.stop_state,
                     "last_event_time_ms": self._last_event_time_ms.get(key),
                     "last_published_at_ms": self._last_published_at_ms.get(key),
@@ -488,6 +525,65 @@ class OrderBookService:
             await self._stop_physical(key, entry)
             async with self._lifecycle_lock:
                 self._retire_entry_locked(key, entry)
+
+    def _start_polling_snapshot(
+        self,
+        key: MarketStreamKey,
+        descriptor: StreamDescriptor,
+        callback: Any,
+    ) -> _PollingHandle:
+        task = asyncio.create_task(
+            self._run_snapshot_poll(key, descriptor, callback),
+            name=f"order-book-poll-{key.exchange}-{key.market_type}-{key.symbol}",
+        )
+        task.add_done_callback(self._consume_task_exception)
+        return _PollingHandle(task)
+
+    async def _run_snapshot_poll(
+        self,
+        key: MarketStreamKey,
+        descriptor: StreamDescriptor,
+        callback: Any,
+    ) -> None:
+        """Continuously fetch replaceable REST snapshots with bounded backoff."""
+
+        interval_seconds = max(1.0, (descriptor.update_interval_ms or 1000) / 1000)
+        consecutive_failures = 0
+        while True:
+            delay_seconds = interval_seconds
+            try:
+                self._metrics["rest_poll_requests"] += 1
+                events = await self._factory.fetch_market(descriptor, limit=1)
+                if not events:
+                    self._metrics["rest_poll_empty"] += 1
+                for event in events:
+                    await callback(event)
+                    self._metrics["rest_poll_events"] += 1
+                consecutive_failures = 0
+                self._metrics["last_rest_poll_error"] = None
+                # Generic CCXT REST snapshots create a bounded provider
+                # session per fetch.  Keep a full cooldown after completion
+                # so a new session cannot burst immediately after the final
+                # request made by the previous session.
+                delay_seconds = interval_seconds
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                consecutive_failures += 1
+                self._metrics["rest_poll_failures"] += 1
+                self._metrics["last_rest_poll_error"] = (
+                    f"{key.topic}: {type(exc).__name__}: {exc}"
+                )
+                delay_seconds = min(
+                    30.0,
+                    interval_seconds * (2 ** min(consecutive_failures - 1, 5)),
+                )
+                logger.warning(
+                    "REST order-book snapshot poll failed for %s; retrying in %.1fs",
+                    key.topic,
+                    delay_seconds,
+                )
+            await asyncio.sleep(delay_seconds)
 
     def _start_worker(self) -> None:
         if self._worker is None:
@@ -801,6 +897,13 @@ class OrderBookService:
             if max_age_ms is None
             else max(1, int(max_age_ms))
         )
+        physical = self._physical.get(record.event.key)
+        if physical is not None and physical.transport == "polling_snapshot":
+            params = dict(record.event.key.params)
+            age_limit = max(
+                age_limit,
+                int(params["update_interval_ms"]) * 3,
+            )
         activation_started_at_ms = self._activation_started_at_ms.get(
             record.event.key,
             0,
@@ -850,6 +953,30 @@ class OrderBookService:
         )
         if depth_levels not in _BINANCE_PARTIAL_LEVELS:
             raise ValueError("partial order-book depth_levels must be one of 5, 10, or 20")
+        from app.exchanges import bootstrap_default_adapters, get_exchange_registry
+        from app.exchanges.products import supports_snapshot_order_book
+
+        bootstrap_default_adapters()
+        try:
+            capabilities = get_exchange_registry().get_plugin(key.exchange).capabilities()
+        except KeyError as exc:
+            raise ValueError(str(exc)) from exc
+        if not supports_snapshot_order_book(capabilities, key.market_type):
+            raise ValueError(
+                f"{key.exchange}:{key.market_type}:depth does not support the "
+                "snapshot order-book product",
+            )
+        capability = capabilities.channel_capability(
+            MarketChannel.DEPTH,
+            key.market_type,
+        )
+        assert capability is not None
+        configured_levels = capability.params.get("depth_levels", ())
+        if configured_levels and depth_levels not in configured_levels:
+            raise ValueError(
+                f"{key.exchange}:{key.market_type}:depth does not support "
+                f"depth_levels={depth_levels}",
+            )
         if key.exchange == "binance":
             allowed_intervals = _BINANCE_UPDATE_INTERVALS_MS.get(key.market_type)
             if allowed_intervals is None:
@@ -863,6 +990,16 @@ class OrderBookService:
                     f"Binance {key.market_type} update_interval_ms must be one of "
                     f"{supported}",
                 )
+        elif capability.update_intervals_ms and (
+            update_interval_ms not in capability.update_intervals_ms
+        ):
+            supported = ", ".join(
+                str(value) for value in sorted(capability.update_intervals_ms)
+            )
+            raise ValueError(
+                f"{key.exchange} {key.market_type} update_interval_ms must be one of "
+                f"{supported}",
+            )
         return key
 
     def _ensure_open(self) -> None:
@@ -883,6 +1020,21 @@ def _identity(key: MarketStreamKey) -> OrderBookIdentity:
         int(params["depth_levels"]),
         int(params["update_interval_ms"]),
     )
+
+
+def _snapshot_mode(key: MarketStreamKey) -> str:
+    from app.exchanges import bootstrap_default_adapters, get_exchange_registry
+    from app.exchanges.products import snapshot_order_book_mode
+
+    bootstrap_default_adapters()
+    capabilities = get_exchange_registry().get_plugin(key.exchange).capabilities()
+    mode = snapshot_order_book_mode(capabilities, key.market_type)
+    if mode is None:
+        raise ValueError(
+            f"{key.exchange}:{key.market_type}:depth does not support the "
+            "snapshot order-book product",
+        )
+    return mode
 
 
 def _descriptor(key: MarketStreamKey) -> StreamDescriptor:

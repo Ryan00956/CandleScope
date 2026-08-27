@@ -174,6 +174,60 @@ def test_order_book_http_supports_spot_with_market_default_cadence() -> None:
     assert dm.release_calls == dm.ensure_calls
 
 
+def test_order_book_http_supports_capability_routed_ccxt_snapshot_market() -> None:
+    dm = _OrderBookDataManager()
+    response = _client(dm).get(
+        "/api/v1/order-book/snapshot",
+        params={
+            "exchange": "bybit",
+            "market_type": "swap.linear",
+            "symbol": "BTC/USDT:USDT",
+        },
+    )
+
+    assert response.status_code == 200
+    key = response.json()["data"]["key"]
+    assert key["exchange"] == "bybit"
+    assert key["market_type"] == "swap.linear"
+    assert key["symbol"] == "BTC/USDT:USDT"
+    assert key["params"]["update_interval_ms"] == "1000"
+    assert dm.release_calls == dm.ensure_calls
+
+
+def test_order_book_http_supports_rest_only_ccxt_snapshot_market() -> None:
+    dm = _OrderBookDataManager()
+    response = _client(dm).get(
+        "/api/v1/order-book/snapshot",
+        params={
+            "exchange": "bigone",
+            "market_type": "spot",
+            "symbol": "BTC/USDT",
+        },
+    )
+
+    assert response.status_code == 200
+    key = response.json()["data"]["key"]
+    assert key["exchange"] == "bigone"
+    assert key["market_type"] == "spot"
+    assert key["params"]["update_interval_ms"] == "1000"
+    assert dm.release_calls == dm.ensure_calls
+
+
+def test_rest_only_snapshot_cadence_respects_slower_ccxt_rate_limit() -> None:
+    dm = _OrderBookDataManager()
+    response = _client(dm).get(
+        "/api/v1/order-book/snapshot",
+        params={
+            "exchange": "bit2c",
+            "market_type": "spot",
+            "symbol": "BTC/NIS",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["key"]["params"]["update_interval_ms"] == "3000"
+
+
 def test_order_book_http_rejects_unsupported_contract_before_leasing() -> None:
     dm = _OrderBookDataManager()
     client = _client(dm)

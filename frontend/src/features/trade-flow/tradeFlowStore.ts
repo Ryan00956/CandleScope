@@ -4,6 +4,7 @@ import type {
   TradeFlowAggregateStats,
   TradeFlowConnectionStatus,
   TradeFlowExternalStore,
+  TradeFlowContinuityMode,
   TradeFlowStoreSnapshot,
 } from "./tradeFlowTypes.js";
 
@@ -38,12 +39,14 @@ function defaultScheduler(): TradeFlowFrameScheduler {
 function initialSnapshot(
   status: TradeFlowConnectionStatus = "idle",
   message: string | null = null,
+  continuityMode: TradeFlowContinuityMode = "strict_repairable",
 ): TradeFlowStoreSnapshot {
   return Object.freeze({
     status,
     records: Object.freeze([]),
     stats: EMPTY_STATS,
     continuity: status !== "gap",
+    continuityMode,
     message,
     error: null,
     version: 0,
@@ -90,6 +93,28 @@ function isStrictlyContinuous(records: readonly AggregateTrade[]): boolean {
   return true;
 }
 
+function recordsMode(records: readonly AggregateTrade[]): TradeFlowContinuityMode {
+  return records[0]?.continuityMode ?? "strict_repairable";
+}
+
+function isModeConsistent(
+  records: readonly AggregateTrade[],
+  mode: TradeFlowContinuityMode,
+): boolean {
+  return records.every((record) => (
+    (record.continuityMode ?? "strict_repairable") === mode
+  ));
+}
+
+function isStrictlyIncreasing(records: readonly AggregateTrade[]): boolean {
+  for (let index = 1; index < records.length; index += 1) {
+    const previous = records[index - 1];
+    const current = records[index];
+    if (!previous || !current || current.aggTradeId <= previous.aggTradeId) return false;
+  }
+  return true;
+}
+
 export function createTradeFlowStore({
   maxRecords = 2_000,
   scheduler = defaultScheduler(),
@@ -125,6 +150,7 @@ export function createTradeFlowStore({
       records,
       stats: aggregateStats(records),
       continuity: true,
+      continuityMode: recordsMode(records),
       message: null,
       error: null,
     });
@@ -140,6 +166,7 @@ export function createTradeFlowStore({
       records: Object.freeze([]),
       stats: EMPTY_STATS,
       continuity: false,
+      continuityMode: current.continuityMode,
       message,
       error: message,
     });
@@ -155,7 +182,13 @@ export function createTradeFlowStore({
     },
     replaceRecent: (records) => {
       if (destroyed) return false;
-      if (!isStrictlyContinuous(records)) {
+      const mode = recordsMode(records);
+      const valid = isModeConsistent(records, mode) && (
+        mode === "strict_repairable"
+          ? isStrictlyContinuous(records)
+          : isStrictlyIncreasing(records)
+      );
+      if (!valid) {
         failGap(t("trade.rt.recentGap"));
         return false;
       }
@@ -166,14 +199,23 @@ export function createTradeFlowStore({
     appendBatch: (records) => {
       if (destroyed || records.length === 0) return !destroyed;
       let lastId = working.at(-1)?.aggTradeId ?? null;
+      const mode = working.at(-1)?.continuityMode ?? recordsMode(records);
       let appended = false;
       for (const record of records) {
+        if ((record.continuityMode ?? "strict_repairable") !== mode) {
+          failGap(t("trade.rt.batchDiscontinuous"));
+          return false;
+        }
         if (lastId !== null && record.aggTradeId <= lastId) {
           if (!appended) continue;
           failGap(t("trade.rt.batchRewind"));
           return false;
         }
-        if (lastId !== null && record.aggTradeId !== lastId + 1) {
+        if (
+          mode === "strict_repairable"
+          && lastId !== null
+          && record.aggTradeId !== lastId + 1
+        ) {
           failGap(t("trade.rt.idGap", { from: lastId + 1, to: record.aggTradeId - 1 }));
           return false;
         }
@@ -194,6 +236,7 @@ export function createTradeFlowStore({
         records,
         stats: aggregateStats(records),
         continuity: status !== "gap",
+        continuityMode: current.continuityMode,
         message: options.message ?? null,
         error: options.error ?? null,
       });
@@ -207,6 +250,7 @@ export function createTradeFlowStore({
         records: Object.freeze([]),
         stats: EMPTY_STATS,
         continuity: true,
+        continuityMode: "strict_repairable",
         message,
         error: null,
       });

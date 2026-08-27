@@ -19,6 +19,8 @@ export type TradeFlowConnectionStatus =
   | "error";
 
 export type TradeFlowSide = "buy" | "sell";
+export type TradeFlowContinuityMode = "strict_repairable" | "observational";
+export type TradeFlowDeliveryMode = "live_stream" | "polling_observational" | null;
 export type TradeFlowSideFilter = "all" | TradeFlowSide;
 export type TradeFlowDockView = "order-book" | "tape" | "profile";
 export type TradeFlowIndicatorId = KlineOrderFlowIndicatorId;
@@ -57,6 +59,8 @@ export interface AggregateTrade {
   source: string;
   firstTradeId: number | null;
   lastTradeId: number | null;
+  tradeId: string | null;
+  continuityMode: TradeFlowContinuityMode;
 }
 
 export interface TradeFlowAggregateStats {
@@ -74,6 +78,7 @@ export interface TradeFlowStoreSnapshot {
   records: readonly AggregateTrade[];
   stats: TradeFlowAggregateStats;
   continuity: boolean;
+  continuityMode: TradeFlowContinuityMode;
   message: string | null;
   error: string | null;
   version: number;
@@ -121,6 +126,8 @@ export interface TradeFlowRuntime {
     interval: string;
     supported: boolean;
     supportMessage: string | null;
+    continuityMode: TradeFlowContinuityMode;
+    deliveryMode: TradeFlowDeliveryMode;
     preferences: TradeFlowPreferences;
     store: TradeFlowExternalStore;
     markerSource: ExternalMarkerSource | null;

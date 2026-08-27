@@ -51,10 +51,12 @@ logger = logging.getLogger("data_engine.market_data")
 _SUMMARY_CHANNELS = frozenset({
     MarketChannel.MARK_PRICE,
     MarketChannel.INDEX_PRICE,
-    MarketChannel.FUNDING_RATE,
     MarketChannel.BASIS,
 })
-_P1_CHANNELS = _SUMMARY_CHANNELS | {MarketChannel.OPEN_INTEREST}
+_P1_CHANNELS = _SUMMARY_CHANNELS | {
+    MarketChannel.FUNDING_RATE,
+    MarketChannel.OPEN_INTEREST,
+}
 _HISTORY_STREAM_TYPES = {
     MarketChannel.FUNDING_RATE: StreamType.FUNDING_RATE,
     MarketChannel.OPEN_INTEREST: StreamType.OPEN_INTEREST,
@@ -694,7 +696,11 @@ class MarketDataService:
         if key.channel == MarketChannel.OPEN_INTEREST and period is not None:
             params = getattr(capability, "params", {}) if capability is not None else {}
             supported_periods = params.get("period", ())
-            if period not in supported_periods:
+            # Native adapters publish an exact period allowlist and stay
+            # fail-closed. Unified CCXT venues often expose OI history
+            # without discoverable timeframe metadata; pass those periods
+            # through to CCXT and let the venue validate them.
+            if supported_periods and period not in supported_periods:
                 raise ValueError(f"unsupported open-interest period: {period}")
 
         current_ms = int(time.time() * 1000)
@@ -2392,31 +2398,104 @@ class MarketDataService:
         )
 
     def _physical_descriptor(self, key: MarketStreamKey) -> StreamDescriptor:
-        if key.channel in _SUMMARY_CHANNELS:
+        stream_type = self._physical_stream_type(key)
+        if stream_type is StreamType.MARK_PRICE:
             return StreamDescriptor(
                 symbol=key.symbol,
                 stream_type=StreamType.MARK_PRICE,
                 exchange=key.exchange,
                 market_type=key.market_type,
             )
+        default_poll_seconds = (
+            self._open_interest_poll_seconds
+            if stream_type is StreamType.OPEN_INTEREST
+            else 5.0
+        )
         return StreamDescriptor(
             symbol=key.symbol,
-            stream_type=StreamType.OPEN_INTEREST,
+            stream_type=stream_type,
             exchange=key.exchange,
             market_type=key.market_type,
-            poll_interval_seconds=self._open_interest_poll_seconds,
+            poll_interval_seconds=self._rest_poll_interval_seconds(
+                key,
+                default_seconds=default_poll_seconds,
+            ),
         )
 
+    def _physical_stream_type(self, key: MarketStreamKey) -> StreamType:
+        if key.channel is MarketChannel.OPEN_INTEREST:
+            return StreamType.OPEN_INTEREST
+        if (
+            key.channel is MarketChannel.FUNDING_RATE
+            and not self._funding_shares_summary(key)
+        ):
+            return StreamType.FUNDING_RATE
+        return StreamType.MARK_PRICE
+
     @staticmethod
-    def _physical_id(key: MarketStreamKey) -> tuple[str, str, str, str]:
-        source = "derivatives_summary" if key.channel in _SUMMARY_CHANNELS else "open_interest"
+    def _capabilities(key: MarketStreamKey) -> Any:
+        bootstrap_default_adapters()
+        return get_exchange_registry().get_plugin(key.exchange).capabilities()
+
+    def _funding_shares_summary(self, key: MarketStreamKey) -> bool:
+        capabilities = self._capabilities(key)
+        funding = capabilities.channel_capability(
+            MarketChannel.FUNDING_RATE,
+            key.market_type,
+        )
+        mark = capabilities.channel_capability(
+            MarketChannel.MARK_PRICE,
+            key.market_type,
+        )
+        return bool(
+            funding is not None
+            and mark is not None
+            and (
+                funding.connection_model == "shared_multiplex"
+                or any(
+                    "shares the mark-price upstream stream" in str(limitation)
+                    for limitation in funding.known_limitations
+                )
+            )
+        )
+
+    def _rest_poll_interval_seconds(
+        self,
+        key: MarketStreamKey,
+        *,
+        default_seconds: float,
+    ) -> float:
+        capabilities = self._capabilities(key)
+        capability = capabilities.channel_capability(key.channel, key.market_type)
+        declared = tuple(
+            int(value)
+            for value in getattr(capability, "update_intervals_ms", ())
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0
+        )
+        rate_limit_ms = getattr(capabilities, "limits", {}).get(
+            "ccxt.rate_limit_ms",
+            0,
+        )
+        safe_ms = max(
+            int(float(default_seconds) * 1000),
+            min(declared) if declared else 0,
+            rate_limit_ms if isinstance(rate_limit_ms, int) else 0,
+        )
+        return max(1.0, safe_ms / 1000.0)
+
+    def _physical_id(self, key: MarketStreamKey) -> tuple[str, str, str, str]:
+        source = {
+            StreamType.MARK_PRICE: "derivatives_summary",
+            StreamType.FUNDING_RATE: "funding_rate",
+            StreamType.OPEN_INTEREST: "open_interest",
+        }[self._physical_stream_type(key)]
         return key.exchange, key.market_type, key.symbol, source
 
     def _physical_capacity_waiter(
         self,
         key: MarketStreamKey,
     ) -> asyncio.Task | None:
-        source = "derivatives_summary" if key.channel in _SUMMARY_CHANNELS else "open_interest"
+        source = self._physical_id(key)[3]
         active = [
             (physical_id, entry)
             for physical_id, entry in self._physical_entries.items()
@@ -2424,7 +2503,7 @@ class MarketDataService:
         ]
         limit = (
             self._max_summary_streams
-            if source == "derivatives_summary"
+            if source in {"derivatives_summary", "funding_rate"}
             else self._max_open_interest_streams
         )
         if len(active) < limit:

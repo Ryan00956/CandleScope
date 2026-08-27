@@ -145,12 +145,14 @@ async def stream_trade_flow(websocket: WebSocket, dm: Any) -> None:
                 "protocol": PROTOCOL,
                 "request_id": request_id,
                 "streams": [key.to_dict() for key in keys],
+                "continuity_mode": _continuity_mode(keys),
             })
             await _send_json({
                 "type": "recent",
                 "protocol": PROTOCOL,
                 "request_id": request_id,
                 "data": recent,
+                "continuity_mode": _continuity_mode(keys),
             })
             return True
 
@@ -180,6 +182,7 @@ async def stream_trade_flow(websocket: WebSocket, dm: Any) -> None:
                 "resync_required": False,
                 "dropped_before": 0,
                 "data": [trade.to_dict() for trade in batch.records],
+                "continuity_mode": _continuity_mode(active),
             })
 
     async def _read_after_subscribe() -> None:
@@ -259,13 +262,16 @@ def _parse_streams(raw_streams: object) -> list[MarketStreamKey]:
         if params not in (None, {}):
             raise ValueError("trade-flow streams do not accept params")
         channel = str(raw.get("channel", MarketChannel.AGG_TRADE.value)).strip().lower()
-        if channel != MarketChannel.AGG_TRADE.value:
-            raise ValueError("trade-flow streams only support channel 'agg_trade'")
+        if channel not in {
+            MarketChannel.AGG_TRADE.value,
+            MarketChannel.TRADE.value,
+        }:
+            raise ValueError("trade-flow streams support channel 'agg_trade' or 'trade'")
         key = MarketStreamKey.build(
             str(raw.get("exchange", "binance")),
             str(raw.get("market_type", raw.get("marketType", "futures"))),
             str(raw.get("symbol", "")),
-            MarketChannel.AGG_TRADE,
+            MarketChannel(channel),
         )
         if key not in seen:
             seen.add(key)
@@ -286,3 +292,11 @@ def _parse_recent_limit(raw: object) -> int:
 
 def _identity(key: MarketStreamKey) -> tuple[str, str, str]:
     return key.exchange, key.market_type, key.symbol
+
+
+def _continuity_mode(keys: list[MarketStreamKey]) -> str:
+    return (
+        "strict_repairable"
+        if keys and keys[0].channel is MarketChannel.AGG_TRADE
+        else "observational"
+    )

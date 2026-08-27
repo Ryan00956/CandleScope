@@ -20,6 +20,25 @@ def test_exchange_capabilities_include_plugin_contract_metadata() -> None:
     payload = response.json()
     assert payload["exchange"] == "binance"
     assert payload["plugin_api_version"] == "1.0"
+    support = payload["support"]
+    assert support["provider"] == "ccxt_primary"
+    assert support["routable"] is True
+    assert support["verification_level"] == "shadow"
+    assert len(support["qualifications"]) == 2
+    assert {item["market_types"][0] for item in support["qualifications"]} == {
+        "spot",
+        "futures",
+    }
+    assert support["products"]["markets"]["futures"]["order_book"] == {
+        "supported": True,
+        "channel": "depth",
+        "mode": "snapshot",
+        "snapshot_mode": "live_snapshot",
+        "strict_full_depth": True,
+    }
+    assert support["products"]["markets"]["futures"]["trade_flow"]["mode"] == (
+        "strict_repairable"
+    )
     assert "protocol_features" in payload
     assert "limits" in payload
     kline = next(
@@ -86,3 +105,50 @@ def test_exchange_list_exposes_pinned_ccxt_catalog() -> None:
     }
     by_id = {item["exchange"]: item for item in payload["exchanges"]}
     assert "provider.ccxt_unified" in by_id["bybit"]["protocol_features"]
+    bybit_support = by_id["bybit"]["support"]
+    assert bybit_support["provider"] == "ccxt_unified"
+    assert bybit_support["routable"] is True
+    assert bybit_support["verification_level"] == "soak"
+    assert bybit_support["qualification"]["duration_seconds"] == 14_400
+    assert bybit_support["qualification"]["evidence_id"] == (
+        "ccxt-unified-bybit-linear-4h-00e670b3-20260807T232805"
+    )
+    assert bybit_support["qualifications"] == [bybit_support["qualification"]]
+    assert bybit_support["products"]["markets"]["swap.linear"]["trade_flow"] == {
+        "supported": True,
+        "channel": "trade",
+        "mode": "observational",
+        "sequence_continuity": False,
+        "history": False,
+        "delivery_mode": "live_stream",
+    }
+    bybit_advanced = bybit_support["products"]["markets"]["swap.linear"][
+        "advanced_market_data"
+    ]
+    assert bybit_advanced["channels"]["funding_rate"] == {
+        "supported": True,
+        "realtime": True,
+        "history": True,
+        "delivery_mode": "polling_snapshot",
+    }
+    assert bybit_advanced["channels"]["open_interest"] == {
+        "supported": True,
+        "realtime": True,
+        "history": True,
+        "delivery_mode": "polling_snapshot",
+    }
+    assert bybit_advanced["channels"]["liquidation"]["delivery_mode"] == (
+        "live_observational"
+    )
+    assert by_id["aster"]["support"] == {
+        "provider": "ccxt_unified",
+        "routable": False,
+        "verification_level": "catalog_only",
+        "qualification": None,
+        "qualifications": [],
+        "products": {"markets": {}},
+    }
+    assert not any(
+        "trade, and depth are not exposed" in limitation
+        for limitation in by_id["okx"]["known_limitations"]
+    )

@@ -251,6 +251,50 @@ async def test_open_interest_uses_rest_poll_physical_descriptor() -> None:
 
 
 @_async_test
+async def test_generic_funding_uses_its_declared_ccxt_funding_route() -> None:
+    factory = _Factory()
+    service = MarketDataService(factory)
+    key = MarketStreamKey.build(
+        "bybit",
+        "swap.linear",
+        "BTC/USDT:USDT",
+        MarketChannel.FUNDING_RATE,
+    )
+
+    await service.ensure_stream(key, consumer_id="funding")
+
+    descriptor = factory.start_calls[0]
+    assert descriptor.stream_type is StreamType.FUNDING_RATE
+    assert descriptor.poll_interval_seconds == 5
+    await service.release_stream(key, consumer_id="funding")
+
+
+@_async_test
+async def test_generic_open_interest_history_passes_through_undeclared_period() -> None:
+    factory = _Factory()
+    service = MarketDataService(factory)
+    key = MarketStreamKey.build(
+        "bybit",
+        "swap.linear",
+        "BTC/USDT:USDT",
+        MarketChannel.OPEN_INTEREST,
+    )
+
+    history = await service.history(
+        key,
+        period="5m",
+        limit=10,
+        start_ms=1_699_999_700_000,
+        end_ms=1_700_000_000_000,
+    )
+
+    assert history[0].data["open_interest"] == 123.5
+    descriptor, kwargs = factory.fetch_calls[0]
+    assert descriptor.interval == "5m"
+    assert kwargs["history"] is True
+
+
+@_async_test
 async def test_start_failure_rolls_back_leases_and_can_retry() -> None:
     factory = _Factory()
     factory.fail_next_start = True

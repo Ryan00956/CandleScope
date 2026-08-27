@@ -20,6 +20,8 @@ function trade(id: number): AggregateTrade {
     source: "websocket",
     firstTradeId: id * 2,
     lastTradeId: id * 2 + 1,
+    tradeId: null,
+    continuityMode: "strict_repairable",
   };
 }
 
@@ -76,4 +78,27 @@ test("TradeFlow store clears derived output on an aggregate-trade ID gap", () =>
   assert.equal(store.getSnapshot().status, "gap");
   assert.equal(store.getSnapshot().records.length, 0);
   assert.equal(store.getSnapshot().continuity, false);
+});
+
+test("observational tape accepts opaque non-contiguous local observations without a false gap", () => {
+  let flush: (() => void) | null = null;
+  const store = createTradeFlowStore({
+    scheduler: {
+      request(callback) { flush = callback; return 1; },
+      cancel() { flush = null; },
+    },
+  });
+  const observed = (id: number): AggregateTrade => ({
+    ...trade(id),
+    aggTradeId: id,
+    tradeId: `opaque-${id}`,
+    continuityMode: "observational",
+  });
+
+  assert.equal(store.replaceRecent([observed(10)]), true);
+  assert.equal(store.appendBatch([observed(99)]), true);
+  (flush as (() => void) | null)?.();
+  assert.deepEqual(store.getSnapshot().records.map((item) => item.aggTradeId), [10, 99]);
+  assert.equal(store.getSnapshot().continuityMode, "observational");
+  assert.equal(store.getSnapshot().status, "live");
 });

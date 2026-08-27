@@ -323,6 +323,11 @@ def build_ccxt_capabilities(entry: CcxtCatalogEntry) -> ExchangeCapabilities:
                 sequence="none",
                 resync="replace_snapshot",
                 params={"depth_levels": [5, 10, 20]},
+                update_intervals_ms=(
+                    ()
+                    if watch_book
+                    else (max(1000, entry.rate_limit_ms),)
+                ),
                 available_fields=(
                     "depth_levels",
                     "update_interval_ms",

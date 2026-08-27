@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "ccxt_version": "4.5.60",
+  "records": [
+    {
+      "exchange": "binance",
+      "level": "shadow",
+      "verified_at": "2026-08-07T01:19:43Z",
+      "market_types": ["futures"],
+      "channels": ["kline"],
+      "evidence_id": "ccxt-shadow-binance-usdm-3546-zero-mismatch",
+      "event_count": 3546
+    },
+    {
+      "exchange": "binance",
+      "level": "shadow",
+      "verified_at": "2026-08-07T01:19:43Z",
+      "market_types": ["spot"],
+      "channels": ["kline"],
+      "evidence_id": "ccxt-shadow-binance-spot-1910-zero-mismatch",
+      "event_count": 1910
+    },
+    {
+      "exchange": "okx",
+      "level": "shadow",
+      "verified_at": "2026-08-07T01:19:43Z",
+      "market_types": ["futures"],
+      "channels": ["kline"],
+      "evidence_id": "ccxt-shadow-okx-swap-1679-zero-mismatch",
+      "event_count": 1679
+    },
+    {
+      "exchange": "okx",
+      "level": "shadow",
+      "verified_at": "2026-08-07T01:19:43Z",
+      "market_types": ["spot"],
+      "channels": ["kline"],
+      "evidence_id": "ccxt-shadow-okx-spot-805-zero-mismatch",
+      "event_count": 805
+    },
+    {
+      "exchange": "bybit",
+      "level": "soak",
+      "verified_at": "2026-08-07T15:28:05Z",
+      "market_types": ["swap.linear"],
+      "channels": ["kline", "trade", "depth", "ticker"],
+      "evidence_id": "ccxt-unified-bybit-linear-4h-00e670b3-20260807T232805",
+      "duration_seconds": 14400
+    }
+  ],
+  "semantics": {
+    "shadow": "Short parallel comparison evidence; not a production-readiness or soak claim.",
+    "soak": "Continuous live provider acceptance bound to the exact pinned CCXT version.",
+    "version_invalidation": "All records become inactive when the installed CCXT version changes."
+  }
+}

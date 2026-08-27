@@ -21,6 +21,7 @@ from app.data_engine.storage.liquidation_store import (
     SQLiteLiquidationRollupStore,
 )
 from app.data_engine.storage.liquidation_writer import LiquidationRollupWriter
+from app.exchanges.products import liquidation_delivery_mode
 
 from .append_hub import AppendBatchHub, AppendBatchSubscription
 from .lifecycle import KeyedAsyncLockPool, drain_cancellation_safe_cleanup
@@ -30,7 +31,7 @@ from .liquidation import (
     NormalizedLiquidation,
     StreamIdentity,
 )
-from .models import DeliveryClass, MarketChannel, MarketStreamKey, TransportMode
+from .models import MarketChannel, MarketStreamKey
 
 
 logger = logging.getLogger("data_engine.market_data.liquidation")
@@ -911,29 +912,10 @@ class LiquidationService:
             raise ValueError(
                 "liquidation capture requires an authoritative capability schema v2",
             )
-        capability = capabilities.channel_capability(
-            MarketChannel.LIQUIDATION,
-            identity[1],
-        )
-        supported = (
-            capability is not None
-            and capability.realtime
-            and not capability.history
-            and capability.delivery is DeliveryClass.APPEND
-            and capability.sequence == "none"
-            and capability.resync == "none"
-            and any(
-                capability.supports_transport(transport)
-                for transport in (
-                    TransportMode.WEBSOCKET,
-                    TransportMode.PLUGIN_STREAM,
-                )
-            )
-        )
-        if not supported:
+        if liquidation_delivery_mode(capabilities, identity[1]) is None:
             raise ValueError(
                 f"{identity[0]}:{identity[1]}:liquidation does not support "
-                "sampled append-only streaming capture",
+                "sampled append-only public capture",
             )
         return identity
 
@@ -967,8 +949,9 @@ def _normalize_identity(key: MarketStreamKey | StreamIdentity) -> StreamIdentity
         _identity_part(market_type, "market_type", lower=True),
         _identity_part(symbol, "symbol", upper=True),
     )
-    if normalized[1] != "futures":
-        raise ValueError("liquidation streams require market_type='futures'")
+    market_family = normalized[1].split(".", 1)[0]
+    if market_family not in {"futures", "swap", "future"}:
+        raise ValueError("liquidation streams require a contract market type")
     return normalized
 
 
@@ -1004,12 +987,29 @@ def _consumer_id(value: str) -> str:
 
 
 def _descriptor(identity: StreamIdentity) -> StreamDescriptor:
+    from app.exchanges import bootstrap_default_adapters, get_exchange_registry
+
     exchange, market_type, symbol = identity
+    bootstrap_default_adapters()
+    capabilities = get_exchange_registry().get_plugin(exchange).capabilities()
+    capability = capabilities.channel_capability(MarketChannel.LIQUIDATION, market_type)
+    declared = tuple(
+        int(value)
+        for value in getattr(capability, "update_intervals_ms", ())
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0
+    )
+    rate_limit_ms = getattr(capabilities, "limits", {}).get("ccxt.rate_limit_ms", 0)
+    poll_interval_ms = max(
+        1000,
+        min(declared) if declared else 0,
+        rate_limit_ms if isinstance(rate_limit_ms, int) else 0,
+    )
     return StreamDescriptor(
         symbol=symbol,
         stream_type=StreamType.LIQUIDATION,
         exchange=exchange,
         market_type=market_type,
+        poll_interval_seconds=poll_interval_ms / 1000.0,
     )
 
 

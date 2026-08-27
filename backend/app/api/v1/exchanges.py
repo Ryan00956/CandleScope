@@ -8,8 +8,16 @@ from app.exchanges import (
     serialize_exchange_capabilities,
 )
 from app.exchanges.ccxt_ext.catalog import ccxt_catalog_summary
+from app.exchanges.support import serialize_exchange_support
 
 router = APIRouter(prefix="/exchanges", tags=["exchanges"])
+
+
+def _serialize_plugin_capabilities(registry: object, plugin: object) -> dict:
+    capabilities = registry.get_capabilities(plugin.id)
+    payload = serialize_exchange_capabilities(capabilities)
+    payload["support"] = serialize_exchange_support(plugin, capabilities)
+    return payload
 
 
 @router.get("/")
@@ -18,7 +26,7 @@ async def list_exchanges() -> dict:
     bootstrap_default_adapters()
     registry = get_exchange_registry()
     exchanges = [
-        serialize_exchange_capabilities(registry.get_capabilities(plugin.id))
+        _serialize_plugin_capabilities(registry, plugin)
         for plugin in registry.list_plugins()
     ]
     return {
@@ -44,4 +52,4 @@ async def get_exchange_capabilities(exchange: str) -> dict:
         plugin = registry.get_plugin(exchange)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return serialize_exchange_capabilities(registry.get_capabilities(plugin.id))
+    return _serialize_plugin_capabilities(registry, plugin)

@@ -13,6 +13,8 @@ function trade(id: number, quoteQuantity: number): AggregateTrade {
     marketType: "futures",
     symbol: "BTCUSDT",
     aggTradeId: id,
+    tradeId: String(id),
+    continuityMode: "strict_repairable",
     price: 60_000 + id,
     quantity: quoteQuantity / (60_000 + id),
     quoteQuantity,

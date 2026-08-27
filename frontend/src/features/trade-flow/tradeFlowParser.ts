@@ -1,5 +1,9 @@
 import { t } from "../../i18n/index.js";
-import type { AggregateTrade, TradeFlowSide } from "./tradeFlowTypes.js";
+import type {
+  AggregateTrade,
+  TradeFlowContinuityMode,
+  TradeFlowSide,
+} from "./tradeFlowTypes.js";
 
 const PROTOCOL = "tradeflow.v1";
 
@@ -14,8 +18,8 @@ type JsonRecord = Record<string, unknown>;
 
 export type ParsedTradeFlowSocketMessage =
   | { kind: "connected"; protocol: string }
-  | { kind: "subscribed"; protocol: string; requestId: string | null; streams: JsonRecord[] }
-  | { kind: "recent"; protocol: string; requestId: string | null; records: AggregateTrade[] }
+  | { kind: "subscribed"; protocol: string; requestId: string | null; streams: JsonRecord[]; continuityMode: TradeFlowContinuityMode }
+  | { kind: "recent"; protocol: string; requestId: string | null; records: AggregateTrade[]; continuityMode: TradeFlowContinuityMode }
   | {
     kind: "batch";
     protocol: string;
@@ -23,6 +27,7 @@ export type ParsedTradeFlowSocketMessage =
     continuity: boolean;
     resyncRequired: boolean;
     records: AggregateTrade[];
+    continuityMode: TradeFlowContinuityMode;
   }
   | { kind: "resync"; protocol: string; message: string }
   | { kind: "error"; requestId: string | null; code: string; detail: string }
@@ -78,6 +83,15 @@ function protocol(value: unknown, path: string): string {
   return parsed;
 }
 
+function continuityMode(value: unknown, path: string): TradeFlowContinuityMode {
+  if (value == null) return "strict_repairable";
+  const parsed = string(value, path);
+  if (parsed !== "strict_repairable" && parsed !== "observational") {
+    throw new TradeFlowPayloadError(path, "expected strict_repairable or observational");
+  }
+  return parsed;
+}
+
 export function parseAggregateTrade(value: unknown, path = "trade"): AggregateTrade {
   const raw = record(value, path);
   const aggressorSide = string(raw.aggressor_side, `${path}.aggressor_side`) as TradeFlowSide;
@@ -104,6 +118,8 @@ export function parseAggregateTrade(value: unknown, path = "trade"): AggregateTr
     source: string(raw.source, `${path}.source`),
     firstTradeId: nullableInteger(raw.first_trade_id, `${path}.first_trade_id`),
     lastTradeId: nullableInteger(raw.last_trade_id, `${path}.last_trade_id`),
+    tradeId: raw.trade_id == null ? null : string(raw.trade_id, `${path}.trade_id`),
+    continuityMode: continuityMode(raw.continuity_mode, `${path}.continuity_mode`),
   };
 }
 
@@ -135,6 +151,7 @@ export function parseTradeFlowSocketMessage(value: unknown): ParsedTradeFlowSock
       protocol: parsedProtocol,
       requestId: typeof raw.request_id === "string" ? raw.request_id : null,
       streams: raw.streams.map((item, index) => record(item, `message.streams[${index}]`)),
+      continuityMode: continuityMode(raw.continuity_mode, "message.continuity_mode"),
     };
   }
   if (type === "recent") {
@@ -143,6 +160,7 @@ export function parseTradeFlowSocketMessage(value: unknown): ParsedTradeFlowSock
       protocol: parsedProtocol,
       requestId: typeof raw.request_id === "string" ? raw.request_id : null,
       records: parseTrades(raw.data, "message.data"),
+      continuityMode: continuityMode(raw.continuity_mode, "message.continuity_mode"),
     };
   }
   if (type === "trade.batch") {
@@ -153,6 +171,7 @@ export function parseTradeFlowSocketMessage(value: unknown): ParsedTradeFlowSock
       continuity: boolean(raw.continuity, "message.continuity"),
       resyncRequired: boolean(raw.resync_required, "message.resync_required"),
       records: parseTrades(raw.data, "message.data"),
+      continuityMode: continuityMode(raw.continuity_mode, "message.continuity_mode"),
     };
   }
   if (type === "resync_required") {

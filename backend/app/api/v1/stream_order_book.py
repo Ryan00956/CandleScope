@@ -13,8 +13,8 @@ from app.api.v1.order_book import (
     ALLOWED_DEPTH_LEVELS,
     ALLOWED_UPDATE_INTERVALS_BY_MARKET,
     ALLOWED_UPDATE_INTERVALS_MS,
-    DEFAULT_UPDATE_INTERVAL_MS_BY_MARKET,
     PROTOCOL,
+    order_book_contract,
     serialize_record,
 )
 from app.api.v1.order_book_projection import cached_price_tick_size
@@ -263,10 +263,11 @@ def _parse_streams(raw_streams: object) -> list[MarketStreamKey]:
         market_type = str(
             raw.get("market_type", raw.get("marketType", "futures")),
         ).strip().lower()
-        if exchange != "binance" or market_type not in ALLOWED_UPDATE_INTERVALS_BY_MARKET:
-            raise ValueError(
-                "partial order books currently support binance spot and futures only",
-            )
+        try:
+            contract = order_book_contract(exchange, market_type)
+        except Exception as exc:
+            detail = getattr(exc, "detail", None)
+            raise ValueError(str(detail if detail is not None else exc)) from exc
         params = raw["params"] if "params" in raw else {}
         if not isinstance(params, dict):
             raise TypeError("order-book stream params must be an object")
@@ -280,17 +281,21 @@ def _parse_streams(raw_streams: object) -> list[MarketStreamKey]:
         update_interval_ms = _integer_param(
             params.get(
                 "update_interval_ms",
-                DEFAULT_UPDATE_INTERVAL_MS_BY_MARKET[market_type],
+                contract["default_update_interval_ms"],
             ),
             "update_interval_ms",
         )
-        if depth_levels not in ALLOWED_DEPTH_LEVELS:
-            raise ValueError("depth_levels must be one of 5, 10, or 20")
-        allowed_intervals = ALLOWED_UPDATE_INTERVALS_BY_MARKET[market_type]
+        allowed_depth_levels = contract["depth_levels"]
+        if depth_levels not in allowed_depth_levels:
+            supported_depth = ", ".join(
+                str(value) for value in sorted(allowed_depth_levels)
+            )
+            raise ValueError(f"depth_levels must be one of {supported_depth}")
+        allowed_intervals = contract["update_intervals_ms"]
         if update_interval_ms not in allowed_intervals:
             supported = ", ".join(str(value) for value in sorted(allowed_intervals))
             raise ValueError(
-                f"binance {market_type} update_interval_ms must be one of {supported}",
+                f"{exchange} {market_type} update_interval_ms must be one of {supported}",
             )
         symbol = raw.get("symbol")
         if not isinstance(symbol, str):

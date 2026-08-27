@@ -47,10 +47,18 @@ test("t interpolates and switches with the locale store", () => {
   withLocale("zh-CN", () => {
     assert.equal(t("shell.replay"), "K 线回放");
     assert.equal(t("status.connectedTo", { exchange: "Binance" }), "已连接 Binance");
+    assert.equal(
+      t("settings.exchange.verification.events", { count: 3546 }),
+      "3546 条事件，零不一致",
+    );
   });
   withLocale("en", () => {
     assert.equal(t("shell.replay"), "Replay");
     assert.equal(t("status.connectedTo", { exchange: "Binance" }), "Connected to Binance");
+    assert.equal(
+      t("settings.exchange.verification.durationHours", { hours: 4 }),
+      "4 hours continuous",
+    );
   });
 });
 

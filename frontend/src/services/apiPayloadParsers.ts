@@ -56,6 +56,100 @@ export interface ExchangeChannelCapabilityPayload extends JsonRecord {
   realtime: boolean;
   history: boolean;
   params: JsonRecord;
+  realtime_transports?: string[];
+  history_transports?: string[];
+  delivery?: string;
+  snapshot?: boolean;
+  delta?: boolean;
+  sequence?: string;
+  resync?: string;
+  update_intervals_ms?: number[];
+  available_fields?: string[];
+  unavailable_fields?: string[];
+  known_limitations?: string[];
+}
+
+export type ExchangeProviderKind = "ccxt_primary" | "ccxt_unified" | "plugin";
+export type ExchangeVerificationLevel = "catalog_only" | "capability_contract" | "shadow" | "soak";
+export type ExchangeQualificationLevel = "shadow" | "soak";
+
+export interface ExchangeQualificationPayload extends JsonRecord {
+  ccxt_version: string;
+  level: ExchangeQualificationLevel;
+  verified_at: string;
+  market_types: string[];
+  channels: string[];
+  evidence_id: string;
+  duration_seconds?: number | null;
+  event_count?: number | null;
+}
+
+export interface ExchangeOrderBookProductPayload extends JsonRecord {
+  supported: boolean;
+  channel: string | null;
+  mode: string | null;
+  snapshot_mode: "live_snapshot" | "polling_snapshot" | null;
+  strict_full_depth: boolean;
+}
+
+export interface ExchangeTradeFlowProductPayload extends JsonRecord {
+  supported: boolean;
+  channel: "agg_trade" | "trade" | null;
+  mode: "strict_repairable" | "observational" | null;
+  sequence_continuity: boolean;
+  history: boolean;
+  delivery_mode: "live_stream" | "polling_observational" | null;
+}
+
+export type ExchangeAdvancedDeliveryMode =
+  | "live_snapshot"
+  | "polling_snapshot"
+  | "history_only"
+  | "live_observational"
+  | "polling_observational"
+  | "derived_live"
+  | "derived_polling";
+
+export interface ExchangeAdvancedChannelProductPayload extends JsonRecord {
+  supported: boolean;
+  realtime: boolean;
+  history: boolean;
+  delivery_mode: ExchangeAdvancedDeliveryMode | null;
+}
+
+export interface ExchangeAdvancedMarketProductPayload extends JsonRecord {
+  supported: boolean;
+  channels: Record<string, ExchangeAdvancedChannelProductPayload>;
+}
+
+export interface ExchangeMarketProductPayload extends JsonRecord {
+  chart: boolean;
+  order_book: ExchangeOrderBookProductPayload;
+  trade_flow: ExchangeTradeFlowProductPayload;
+  advanced_market_data: ExchangeAdvancedMarketProductPayload;
+}
+
+export interface ExchangeProductsPayload extends JsonRecord {
+  markets: Record<string, ExchangeMarketProductPayload>;
+}
+
+export interface ExchangeSupportPayload extends JsonRecord {
+  provider: ExchangeProviderKind;
+  routable: boolean;
+  verification_level: ExchangeVerificationLevel;
+  qualification: ExchangeQualificationPayload | null;
+  qualifications: ExchangeQualificationPayload[];
+  products: ExchangeProductsPayload;
+}
+
+export interface CcxtCatalogSummaryPayload extends JsonRecord {
+  version: string;
+  rest_exchange_ids: number;
+  pro_exchange_ids: number;
+  watch_ohlcv: number;
+  watch_trades: number;
+  watch_order_book: number;
+  watch_ticker: number;
 }
 
 export interface ExchangeCapabilityPayload extends JsonRecord {
@@ -68,11 +162,13 @@ export interface ExchangeCapabilityPayload extends JsonRecord {
   protocol_features: string[];
   limits: JsonRecord;
   known_limitations: string[];
+  support?: ExchangeSupportPayload;
 }
 
 export interface ExchangeListPayload extends JsonRecord {
   exchanges: ExchangeCapabilityPayload[];
   count?: number;
+  ccxt?: CcxtCatalogSummaryPayload;
 }
 
 export type SubscriptionTierPayload = "full" | "price" | "none";
@@ -312,7 +408,7 @@ function parseExchangeChannelCapability(
   path: string,
 ): ExchangeChannelCapabilityPayload {
   const record = expectRecord(value, path);
-  return {
+  const result: ExchangeChannelCapabilityPayload = {
     ...record,
     channel: expectNonEmptyString(record.channel, `${path}.channel`),
     market_types: expectStringArray(record.market_types, `${path}.market_types`),
@@ -320,6 +416,247 @@ function parseExchangeChannelCapability(
     history: expectBoolean(record.history, `${path}.history`),
     params: expectRecord(record.params, `${path}.params`),
   };
+  for (const key of [
+    "realtime_transports",
+    "history_transports",
+    "available_fields",
+    "unavailable_fields",
+    "known_limitations",
+  ] as const) {
+    if (key in record) result[key] = expectStringArray(record[key], `${path}.${key}`);
+  }
+  for (const key of ["delivery", "sequence", "resync"] as const) {
+    if (key in record) result[key] = expectString(record[key], `${path}.${key}`);
+  }
+  for (const key of ["snapshot", "delta"] as const) {
+    if (key in record) result[key] = expectBoolean(record[key], `${path}.${key}`);
+  }
+  if ("update_intervals_ms" in record) {
+    if (!Array.isArray(record.update_intervals_ms)) {
+      throw new ApiPayloadError(`${path}.update_intervals_ms`, "expected an array");
+    }
+    result.update_intervals_ms = record.update_intervals_ms.map((item, index) => (
+      expectNonNegativeInteger(item, `${path}.update_intervals_ms[${index}]`)
+    ));
+  }
+  return result;
+}
+
+function parseExchangeQualification(
+  value: unknown,
+  path: string,
+): ExchangeQualificationPayload {
+  const record = expectRecord(value, path);
+  const level = expectNonEmptyString(record.level, `${path}.level`);
+  if (level !== "shadow" && level !== "soak") {
+    throw new ApiPayloadError(`${path}.level`, "expected shadow or soak");
+  }
+  const result: ExchangeQualificationPayload = {
+    ...record,
+    ccxt_version: expectNonEmptyString(record.ccxt_version, `${path}.ccxt_version`),
+    level,
+    verified_at: expectNonEmptyString(record.verified_at, `${path}.verified_at`),
+    market_types: expectStringArray(record.market_types, `${path}.market_types`),
+    channels: expectStringArray(record.channels, `${path}.channels`),
+    evidence_id: expectNonEmptyString(record.evidence_id, `${path}.evidence_id`),
+  };
+  if ("duration_seconds" in record) {
+    result.duration_seconds = record.duration_seconds == null
+      ? null
+      : expectNonNegativeInteger(record.duration_seconds, `${path}.duration_seconds`);
+  }
+  if ("event_count" in record) {
+    result.event_count = record.event_count == null
+      ? null
+      : expectNonNegativeInteger(record.event_count, `${path}.event_count`);
+  }
+  return result;
+}
+
+function nullableString(value: unknown, path: string): string | null {
+  return value == null ? null : expectNonEmptyString(value, path);
+}
+
+function parseExchangeProducts(value: unknown, path: string): ExchangeProductsPayload {
+  const record = expectRecord(value, path);
+  const rawMarkets = expectRecord(record.markets, `${path}.markets`);
+  const markets: Record<string, ExchangeMarketProductPayload> = {};
+  for (const [marketType, rawMarket] of Object.entries(rawMarkets)) {
+    const marketPath = `${path}.markets.${marketType}`;
+    const market = expectRecord(rawMarket, marketPath);
+    const orderBook = expectRecord(market.order_book, `${marketPath}.order_book`);
+    const tradeFlow = expectRecord(market.trade_flow, `${marketPath}.trade_flow`);
+    const tradeChannel = nullableString(tradeFlow.channel, `${marketPath}.trade_flow.channel`);
+    if (tradeChannel !== null && tradeChannel !== "agg_trade" && tradeChannel !== "trade") {
+      throw new ApiPayloadError(`${marketPath}.trade_flow.channel`, "unsupported trade channel");
+    }
+    const tradeMode = nullableString(tradeFlow.mode, `${marketPath}.trade_flow.mode`);
+    if (tradeMode !== null && tradeMode !== "strict_repairable" && tradeMode !== "observational") {
+      throw new ApiPayloadError(`${marketPath}.trade_flow.mode`, "unsupported trade mode");
+    }
+    const snapshotMode = nullableString(
+      orderBook.snapshot_mode,
+      `${marketPath}.order_book.snapshot_mode`,
+    );
+    if (snapshotMode !== null && snapshotMode !== "live_snapshot" && snapshotMode !== "polling_snapshot") {
+      throw new ApiPayloadError(
+        `${marketPath}.order_book.snapshot_mode`,
+        "unsupported order-book snapshot mode",
+      );
+    }
+    const tradeDeliveryMode = nullableString(
+      tradeFlow.delivery_mode,
+      `${marketPath}.trade_flow.delivery_mode`,
+    );
+    if (tradeDeliveryMode !== null
+      && tradeDeliveryMode !== "live_stream"
+      && tradeDeliveryMode !== "polling_observational") {
+      throw new ApiPayloadError(
+        `${marketPath}.trade_flow.delivery_mode`,
+        "unsupported trade-flow delivery mode",
+      );
+    }
+    const advanced = "advanced_market_data" in market
+      ? expectRecord(market.advanced_market_data, `${marketPath}.advanced_market_data`)
+      : { supported: false, channels: {} };
+    const rawAdvancedChannels = expectRecord(
+      advanced.channels,
+      `${marketPath}.advanced_market_data.channels`,
+    );
+    const advancedChannels: Record<string, ExchangeAdvancedChannelProductPayload> = {};
+    const advancedModes = new Set<string>([
+      "live_snapshot",
+      "polling_snapshot",
+      "history_only",
+      "live_observational",
+      "polling_observational",
+      "derived_live",
+      "derived_polling",
+    ]);
+    for (const [channel, rawChannel] of Object.entries(rawAdvancedChannels)) {
+      const channelPath = `${marketPath}.advanced_market_data.channels.${channel}`;
+      const advancedChannel = expectRecord(rawChannel, channelPath);
+      const deliveryMode = nullableString(
+        advancedChannel.delivery_mode,
+        `${channelPath}.delivery_mode`,
+      );
+      if (deliveryMode !== null && !advancedModes.has(deliveryMode)) {
+        throw new ApiPayloadError(`${channelPath}.delivery_mode`, "unsupported delivery mode");
+      }
+      advancedChannels[channel.toLowerCase()] = {
+        ...advancedChannel,
+        supported: expectBoolean(advancedChannel.supported, `${channelPath}.supported`),
+        realtime: expectBoolean(advancedChannel.realtime, `${channelPath}.realtime`),
+        history: expectBoolean(advancedChannel.history, `${channelPath}.history`),
+        delivery_mode: deliveryMode as ExchangeAdvancedDeliveryMode | null,
+      };
+    }
+    markets[marketType.toLowerCase()] = {
+      ...market,
+      chart: expectBoolean(market.chart, `${marketPath}.chart`),
+      order_book: {
+        ...orderBook,
+        supported: expectBoolean(orderBook.supported, `${marketPath}.order_book.supported`),
+        channel: nullableString(orderBook.channel, `${marketPath}.order_book.channel`),
+        mode: nullableString(orderBook.mode, `${marketPath}.order_book.mode`),
+        snapshot_mode: snapshotMode,
+        strict_full_depth: expectBoolean(
+          orderBook.strict_full_depth,
+          `${marketPath}.order_book.strict_full_depth`,
+        ),
+      },
+      trade_flow: {
+        ...tradeFlow,
+        supported: expectBoolean(tradeFlow.supported, `${marketPath}.trade_flow.supported`),
+        channel: tradeChannel,
+        mode: tradeMode,
+        sequence_continuity: expectBoolean(
+          tradeFlow.sequence_continuity,
+          `${marketPath}.trade_flow.sequence_continuity`,
+        ),
+        history: expectBoolean(tradeFlow.history, `${marketPath}.trade_flow.history`),
+        delivery_mode: tradeDeliveryMode as ExchangeTradeFlowProductPayload["delivery_mode"],
+      },
+      advanced_market_data: {
+        ...advanced,
+        supported: expectBoolean(
+          advanced.supported,
+          `${marketPath}.advanced_market_data.supported`,
+        ),
+        channels: advancedChannels,
+      },
+    };
+  }
+  return { ...record, markets };
+}
+
+function parseExchangeSupport(value: unknown, path: string): ExchangeSupportPayload {
+  const record = expectRecord(value, path);
+  const provider = expectNonEmptyString(record.provider, `${path}.provider`);
+  if (!(["ccxt_primary", "ccxt_unified", "plugin"] as const).includes(
+    provider as ExchangeProviderKind,
+  )) {
+    throw new ApiPayloadError(`${path}.provider`, "unsupported provider kind");
+  }
+  const verificationLevel = expectNonEmptyString(
+    record.verification_level,
+    `${path}.verification_level`,
+  );
+  if (!(["catalog_only", "capability_contract", "shadow", "soak"] as const).includes(
+    verificationLevel as ExchangeVerificationLevel,
+  )) {
+    throw new ApiPayloadError(`${path}.verification_level`, "unsupported verification level");
+  }
+  const qualification = record.qualification == null
+    ? null
+    : parseExchangeQualification(record.qualification, `${path}.qualification`);
+  let qualifications: ExchangeQualificationPayload[];
+  if ("qualifications" in record) {
+    if (!Array.isArray(record.qualifications)) {
+      throw new ApiPayloadError(`${path}.qualifications`, "expected an array");
+    }
+    qualifications = record.qualifications.map((item, index) => (
+      parseExchangeQualification(item, `${path}.qualifications[${index}]`)
+    ));
+  } else {
+    qualifications = qualification ? [qualification] : [];
+  }
+  return {
+    ...record,
+    provider: provider as ExchangeProviderKind,
+    routable: expectBoolean(record.routable, `${path}.routable`),
+    verification_level: verificationLevel as ExchangeVerificationLevel,
+    qualification,
+    qualifications,
+    products: "products" in record
+      ? parseExchangeProducts(record.products, `${path}.products`)
+      : { markets: {} },
+  };
+}
+
+function parseCcxtCatalogSummary(value: unknown, path: string): CcxtCatalogSummaryPayload {
+  const record = expectRecord(value, path);
+  const result: CcxtCatalogSummaryPayload = {
+    ...record,
+    version: expectNonEmptyString(record.version, `${path}.version`),
+    rest_exchange_ids: expectNonNegativeInteger(record.rest_exchange_ids, `${path}.rest_exchange_ids`),
+    pro_exchange_ids: expectNonNegativeInteger(record.pro_exchange_ids, `${path}.pro_exchange_ids`),
+    watch_ohlcv: expectNonNegativeInteger(record.watch_ohlcv, `${path}.watch_ohlcv`),
+    watch_trades: expectNonNegativeInteger(record.watch_trades, `${path}.watch_trades`),
+    watch_order_book: expectNonNegativeInteger(record.watch_order_book, `${path}.watch_order_book`),
+    watch_ticker: expectNonNegativeInteger(record.watch_ticker, `${path}.watch_ticker`),
+  };
+  for (const key of [
+    "watch_mark_price",
+    "watch_funding_rate",
+    "watch_liquidations",
+    "fetch_funding_rate_history",
+    "fetch_open_interest",
+    "fetch_open_interest_history",
+  ]) {
+    if (key in record) result[key] = expectNonNegativeInteger(record[key], `${path}.${key}`);
+  }
+  return result;
 }
 
 export function parseExchangeCapability(
@@ -356,6 +693,9 @@ export function parseExchangeCapability(
       parseExchangeChannelCapability(item, `${path}.channels[${index}]`)
     ));
   }
+  if ("support" in record) {
+    result.support = parseExchangeSupport(record.support, `${path}.support`);
+  }
   return result;
 }
 
@@ -374,6 +714,7 @@ export function parseExchangeListResponse(
     )),
   };
   if ("count" in record) result.count = expectNonNegativeInteger(record.count, `${path}.count`);
+  if ("ccxt" in record) result.ccxt = parseCcxtCatalogSummary(record.ccxt, `${path}.ccxt`);
   return result;
 }
 

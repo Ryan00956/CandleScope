@@ -51,6 +51,16 @@ function orderBookStatusLabel(status: OrderBookConnectionStatus): string {
   return t(ORDER_BOOK_STATUS_KEYS[status]);
 }
 
+function snapshotDeliveryLabel(
+  mode: "partial" | "full",
+  snapshotMode: "live_snapshot" | "polling_snapshot" | null,
+): string {
+  if (mode === "full") return t("orderBook.delivery.strictContinuous");
+  return snapshotMode === "polling_snapshot"
+    ? t("orderBook.delivery.pollingSnapshot")
+    : t("orderBook.delivery.liveSnapshot");
+}
+
 function orderBookStatusDetail(
   status: OrderBookConnectionStatus,
   hostMessage: string | null = null,
@@ -273,6 +283,7 @@ function OrderBookDock({ runtime, height, onRequestClose }: OrderBookDockProps) 
     ? PARTIAL_PRICE_GROUPINGS
     : FULL_PRICE_GROUPINGS;
   const symbol = view.identity.symbol.replace(/USDT$|USDC$/, "");
+  const deliveryLabel = snapshotDeliveryLabel(view.preferences.mode, view.snapshotMode);
 
   return (
     <section
@@ -296,6 +307,9 @@ function OrderBookDock({ runtime, height, onRequestClose }: OrderBookDockProps) 
         )}
         <span className="ob-title">{t("orderBook.title")}</span>
         <span className="ob-symbol">{symbol || view.identity.symbol}</span>
+        <span className="ob-delivery-mode" title={t("orderBook.delivery.title")}>
+          {deliveryLabel}
+        </span>
         <span
           className={`ob-status ob-status-${snapshot.status}`}
           title={orderBookStatusDetail(snapshot.status, view.supportMessage)}
@@ -312,7 +326,9 @@ function OrderBookDock({ runtime, height, onRequestClose }: OrderBookDockProps) 
                 type="button"
                 className={view.preferences.mode === "partial" ? "active" : ""}
                 onClick={() => actions.setMode("partial")}
-                title={t("orderBook.snapshotTitle")}
+                title={view.snapshotMode === "polling_snapshot"
+                  ? t("orderBook.snapshotPollingTitle")
+                  : t("orderBook.snapshotTitle")}
               >
                 {t("orderBook.snapshot")}
               </button>
@@ -320,7 +336,10 @@ function OrderBookDock({ runtime, height, onRequestClose }: OrderBookDockProps) 
                 type="button"
                 className={view.preferences.mode === "full" ? "active" : ""}
                 onClick={() => actions.setMode("full")}
-                title={t("orderBook.continuousTitle")}
+                disabled={!view.fullModeSupported}
+                title={view.fullModeSupported
+                  ? t("orderBook.continuousTitle")
+                  : t("orderBook.continuousUnsupported")}
               >
                 {t("orderBook.continuous")}
               </button>

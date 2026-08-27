@@ -276,19 +276,26 @@ export function useAdvancedMarketDataRuntime({
       .filter(isMarketStateMetricChannel)
   ), [metricCapabilities, metricSelections]);
   const liquidationSelection = metricSelections.find((item) => item.channel === "liquidation");
-  const metricChannelSignature = activeMetricChannels.join("|");
+  const activeRealtimeMetricChannels = useMemo(() => (
+    activeMetricChannels.filter((channel) => capabilitySnapshot.channels[channel].realtime)
+  ), [activeMetricChannels, capabilitySnapshot]);
+  const activeHistoryMetricChannels = useMemo(() => (
+    activeMetricChannels.filter((channel) => capabilitySnapshot.channels[channel].history)
+  ), [activeMetricChannels, capabilitySnapshot]);
+  const metricChannelSignature = activeHistoryMetricChannels.join("|");
   const summaryEnabled = capabilitySnapshot.summarySupported;
   const metricsEnabled = activeMetricChannels.length > 0;
   const requestedChannels = useMemo<AdvancedMarketChannel[]>(() => [
     ...(summaryEnabled ? SUMMARY_CHANNELS : []),
-    ...activeMetricChannels,
-  ], [activeMetricChannels, summaryEnabled]);
+    ...activeRealtimeMetricChannels,
+  ], [activeRealtimeMetricChannels, summaryEnabled]);
   const requestedChannelSignature = requestedChannels.join("|");
-  const enabled = requestedChannels.length > 0;
+  const streamEnabled = requestedChannels.length > 0;
+  const enabled = streamEnabled || activeHistoryMetricChannels.length > 0;
   const historyContextKey = buildAdvancedMarketHistoryContextKey(
     identityKey,
     interval,
-    activeMetricChannels,
+    activeHistoryMetricChannels,
   );
   const seriesReady = String(seriesStore?.seriesKey || "") === seriesKey
     && String(dataMeta.seriesKey || "") === seriesKey;
@@ -307,7 +314,7 @@ export function useAdvancedMarketDataRuntime({
   const [historyRetryToken, setHistoryRetryToken] = useState(0);
   const [connectionState, setConnectionState] = useState<OwnedConnectionState>(() => ({
     identityKey,
-    status: enabled ? "connecting" : "disabled",
+    status: streamEnabled ? "connecting" : "disabled",
   }));
   const [streamErrorState, setStreamErrorState] = useState<OwnedStreamErrorState>(() => ({
     identityKey,
@@ -317,12 +324,12 @@ export function useAdvancedMarketDataRuntime({
     historyContextKey,
     errors: {},
   }));
-  const connectionStatus: AdvancedMarketConnectionStatus = !enabled
+  const connectionStatus: AdvancedMarketConnectionStatus = !streamEnabled
     ? "disabled"
     : connectionState.identityKey !== identityKey || connectionState.status === "disabled"
       ? "connecting"
       : connectionState.status;
-  const streamError = enabled && streamErrorState.identityKey === identityKey
+  const streamError = streamEnabled && streamErrorState.identityKey === identityKey
     ? streamErrorState.error
     : null;
   const historyErrors = historyErrorState.historyContextKey === historyContextKey
@@ -337,7 +344,7 @@ export function useAdvancedMarketDataRuntime({
     identityKey,
     interval,
     historyContextKey,
-    metricChannels: activeMetricChannels,
+    metricChannels: activeHistoryMetricChannels,
     requestedChannels,
     requestedChannelSignature,
     seriesReady,
@@ -360,13 +367,13 @@ export function useAdvancedMarketDataRuntime({
       identityKey,
       interval,
       historyContextKey,
-      metricChannels: activeMetricChannels,
+      metricChannels: activeHistoryMetricChannels,
       requestedChannels,
       requestedChannelSignature,
       seriesReady,
     };
   }, [
-    activeMetricChannels,
+    activeHistoryMetricChannels,
     enabled,
     historyContextKey,
     identity,
@@ -462,10 +469,12 @@ export function useAdvancedMarketDataRuntime({
       direction: "forward" | "backward";
     }> = [];
     if (context.metricChannels.includes("funding_rate")) {
+      const hybrid = context.identity.exchange === "binance"
+        && context.identity.marketType === "futures";
       requests.push({
         channel: "funding_rate" as const,
-        period: context.interval,
-        view: "hybrid",
+        period: hybrid ? context.interval : null,
+        view: hybrid ? "hybrid" : null,
         limit: 1000,
         direction: "forward" as const,
       });
@@ -636,13 +645,13 @@ export function useAdvancedMarketDataRuntime({
     invalidateHistoryRequests(false);
     setConnectionState({
       identityKey,
-      status: enabled ? "connecting" : "disabled",
+      status: streamEnabled ? "connecting" : "disabled",
     });
     setStreamErrorState({ identityKey, error: null });
     setHistoryErrorState({ historyContextKey, errors: {} });
     setRetryToken((value) => value + 1);
     liquidations.retry();
-  }, [enabled, historyContextKey, identityKey, invalidateHistoryRequests, liquidations]);
+  }, [historyContextKey, identityKey, invalidateHistoryRequests, liquidations, streamEnabled]);
 
   useEffect(() => {
     const identityChanged = coverageIdentityRef.current !== identityKey;
@@ -660,7 +669,7 @@ export function useAdvancedMarketDataRuntime({
       && streamGenerationRef.current === generation
       && activeRef.current.identityKey === identityKey;
 
-    if (!enabled) {
+    if (!streamEnabled) {
       streamRef.current = null;
       setConnectionState({ identityKey, status: "disabled" });
       setStreamErrorState({ identityKey, error: null });
@@ -706,14 +715,14 @@ export function useAdvancedMarketDataRuntime({
       if (streamRef.current === stream) streamRef.current = null;
       advancedMarketDataStore.setConnectionStatus(identity, "disconnected");
     };
-  }, [enabled, identity, identityKey, retryToken]);
+  }, [identity, identityKey, retryToken, streamEnabled]);
 
   useEffect(() => {
     streamRef.current?.setChannels(requestedChannels);
   }, [requestedChannelSignature, requestedChannels]);
 
   useEffect(() => {
-    if (!enabled || requestedChannels.length === 0) return undefined;
+    if (!streamEnabled || requestedChannels.length === 0) return undefined;
     const controller = new AbortController();
     const expectedChannelSignature = requestedChannelSignature;
     void fetchAdvancedMarketSnapshot(identity, requestedChannels, controller.signal)
@@ -734,7 +743,7 @@ export function useAdvancedMarketDataRuntime({
         }
       });
     return () => controller.abort();
-  }, [enabled, identity, identityKey, requestedChannelSignature, requestedChannels, retryToken]);
+  }, [identity, identityKey, requestedChannelSignature, requestedChannels, retryToken, streamEnabled]);
 
   useEffect(() => {
     if (!metricsEnabled || !seriesReady) return;
@@ -768,9 +777,14 @@ export function useAdvancedMarketDataRuntime({
       const catalog = marketStudyCatalog(locale)[item.id];
       const capability = metricCapabilities[item.channel];
       const isLiquidation = item.channel === "liquidation";
+      const stateCapability = isMarketStateMetricChannel(item.channel)
+        ? capabilitySnapshot.channels[item.channel]
+        : null;
       const studyError = isLiquidation
         ? liquidations.view.historyError || liquidations.view.error
-        : historyErrors[item.channel] || streamError || null;
+        : (stateCapability?.history ? historyErrors[item.channel] : null)
+          || (stateCapability?.realtime ? streamError : null)
+          || null;
       const error = item.visible ? studyError : null;
       const studyConnectionStatus = isLiquidation
         ? liquidations.view.connectionStatus
@@ -780,6 +794,7 @@ export function useAdvancedMarketDataRuntime({
       else if (!item.added) status = "available";
       else if (!item.visible) status = "hidden";
       else if (error) status = "error";
+      else if (stateCapability?.history && !stateCapability.realtime) status = "active";
       else if (studyConnectionStatus === "live") status = "active";
       else status = "loading";
       return {
@@ -795,6 +810,7 @@ export function useAdvancedMarketDataRuntime({
     })
   ), [
     connectionStatus,
+    capabilitySnapshot,
     historyErrors,
     liquidations.view.connectionStatus,
     liquidations.view.error,

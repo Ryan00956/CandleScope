@@ -103,6 +103,7 @@ export function useSettingsRuntime({
       },
       exchanges: {
         onRefreshExchanges: exchangeRuntime.loadSupportedExchanges,
+        onTestExchangeMarket: exchangeRuntime.testExchangeMarket,
       },
       cacheLimits: {
         onToggleAdvanced: handleToggleAdvanced,

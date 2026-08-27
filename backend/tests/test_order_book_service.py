@@ -8,7 +8,12 @@ from functools import wraps
 import pytest
 
 import app.data_engine.market_data.order_book_service as service_module
-from app.data_engine.ingestion.models import DataSource, MarketEvent, StreamType
+from app.data_engine.ingestion.models import (
+    DataSource,
+    MarketEvent,
+    StreamDescriptor,
+    StreamType,
+)
 from app.data_engine.market_data.models import MarketChannel, MarketStreamKey
 from app.data_engine.market_data.order_book import OrderBookEngine
 from app.data_engine.market_data.order_book_service import OrderBookService
@@ -24,6 +29,7 @@ def _async_test(function):
 
 def _key(
     *,
+    exchange: str = "binance",
     symbol: str = "BTCUSDT",
     market_type: str = "futures",
     depth_levels: int = 20,
@@ -31,7 +37,7 @@ def _key(
     mode: str = "partial",
 ) -> MarketStreamKey:
     return MarketStreamKey.build(
-        "binance",
+        exchange,
         market_type,
         symbol,
         MarketChannel.DEPTH,
@@ -46,6 +52,8 @@ def _key(
 def _event(
     update_id: int,
     *,
+    exchange: str = "binance",
+    market_type: str = "futures",
     symbol: str = "BTCUSDT",
     depth_levels: int = 20,
     update_interval_ms: int = 250,
@@ -57,8 +65,8 @@ def _event(
     return MarketEvent(
         event_type=StreamType.DEPTH,
         symbol=symbol,
-        exchange="binance",
-        market_type="futures",
+        exchange=exchange,
+        market_type=market_type,
         event_time_ms=received - 1,
         received_at_ms=received,
         source=DataSource.WEBSOCKET,
@@ -145,6 +153,31 @@ class _Factory:
         await self.callbacks[identity](event)
 
 
+class _PollingFactory(_Factory):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fetch_calls: list[StreamDescriptor] = []
+        self.fetch_started = asyncio.Event()
+        self.revision = 0
+
+    async def start_market(self, descriptor, callback, *, on_gap=None):
+        raise AssertionError("REST-only depth must not start a live ingestion stream")
+
+    async def fetch_market(self, descriptor, *, limit=1):
+        assert limit == 1
+        self.fetch_calls.append(descriptor)
+        self.fetch_started.set()
+        self.revision += 1
+        return [_event(
+            self.revision,
+            exchange=descriptor.exchange,
+            market_type=descriptor.market_type,
+            symbol=descriptor.symbol,
+            depth_levels=descriptor.depth_levels,
+            update_interval_ms=descriptor.update_interval_ms,
+        )]
+
+
 def _service(factory: _Factory, **kwargs) -> OrderBookService:
     return OrderBookService(
         factory,
@@ -197,6 +230,35 @@ async def test_consumers_share_one_physical_feed_until_last_release() -> None:
     assert service.current(key) is None
     assert service._last_event_time_ms == {}
     assert service._last_published_at_ms == {}
+    await service.shutdown()
+
+
+@_async_test
+async def test_rest_only_snapshot_polling_shares_one_lifecycle_and_stops_on_last_release() -> None:
+    factory = _PollingFactory()
+    service = _service(factory)
+    key = _key(
+        exchange="bigone",
+        market_type="spot",
+        symbol="BTC/USDT",
+        depth_levels=10,
+        update_interval_ms=1000,
+    )
+
+    assert await service.ensure_stream(key, consumer_id="first") is True
+    assert await service.ensure_stream(key, consumer_id="second") is True
+    await factory.fetch_started.wait()
+    await _wait_until(lambda: service.current(key) is not None)
+
+    assert len(factory.fetch_calls) == 1
+    assert factory.start_calls == []
+    assert service.diagnostics()["physical"][0]["transport"] == "polling_snapshot"
+    assert service.diagnostics()["rest_poll_events"] == 1
+
+    assert await service.release_stream(key, consumer_id="first") is True
+    assert service.diagnostics()["physical_streams"] == 1
+    assert await service.release_stream(key, consumer_id="second") is True
+    assert service.diagnostics()["physical_streams"] == 0
     await service.shutdown()
 
 
@@ -306,7 +368,7 @@ async def test_invalid_or_unsupported_keys_fail_before_start() -> None:
         await service.ensure_stream(_key(mode="full"), consumer_id="full")
     with pytest.raises(ValueError, match="mode='partial'"):
         await service.ensure_stream(_key(mode="Partial"), consumer_id="mixed-case")
-    with pytest.raises(ValueError, match="'spot' or 'futures'"):
+    with pytest.raises(ValueError, match="does not support the snapshot order-book"):
         await service.ensure_stream(
             _key(market_type="margin"),
             consumer_id="margin",

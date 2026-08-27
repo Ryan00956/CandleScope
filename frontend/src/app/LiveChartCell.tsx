@@ -465,6 +465,9 @@ function LiveChartCell({
     marketRail.openViewIds.includes(LIVE_RAIL_VIEW_IDS.tape)
     || marketRail.openViewIds.includes(LIVE_RAIL_VIEW_IDS.profile)
   );
+  const activeExchangeCapability = chartSession.view.exchangeCatalog[
+    chartSession.view.exchange.toLowerCase()
+  ]?.raw ?? null;
   const orderBook = useOrderBookRuntime({
     identity: {
       exchange: chartSession.view.exchange,
@@ -472,6 +475,7 @@ function LiveChartCell({
       symbol: chartSession.view.symbol,
     },
     orderBookOpen,
+    capability: activeExchangeCapability,
   });
   const tradeFlow = useTradeFlowRuntime({
     identity: {
@@ -484,6 +488,7 @@ function LiveChartCell({
     buyColor: combinedSettings.upColor,
     sellColor: combinedSettings.downColor,
     tradeFlowOpen,
+    capability: activeExchangeCapability,
   });
 
   const indicatorRuntime = useMemo<IndicatorShellRuntime>(() => ({

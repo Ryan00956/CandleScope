@@ -296,6 +296,20 @@ function TradeFlowDock({
           </button>
         )}
         <span className="ob-title">{mode === "profile" ? t("trade.profile") : t("trade.tape")}</span>
+        <span
+          className="ob-symbol"
+          title={runtime.view.deliveryMode === "polling_observational"
+            ? t("trade.mode.pollingDetail")
+            : runtime.view.continuityMode === "observational"
+              ? t("trade.mode.observationalDetail")
+            : t("trade.mode.strictDetail")}
+        >
+          {runtime.view.deliveryMode === "polling_observational"
+            ? t("trade.mode.polling")
+            : runtime.view.continuityMode === "observational"
+              ? t("trade.mode.observational")
+            : t("trade.mode.strict")}
+        </span>
         <TradeFlowStatus store={runtime.view.store} />
       </header>
 

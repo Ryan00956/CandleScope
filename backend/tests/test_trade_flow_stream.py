@@ -8,15 +8,16 @@ from fastapi.testclient import TestClient
 from app.api.v1.stream import router as stream_router
 from app.data_engine.ingestion.models import DataSource
 from app.data_engine.market_data.append_hub import AppendBatchHub
-from app.data_engine.market_data.models import MarketStreamKey
+from app.data_engine.market_data.models import MarketChannel, MarketStreamKey
 from app.data_engine.market_data.trade_flow import NormalizedAggTrade
+from app.data_engine.market_data.trade_tape import ObservedTrade
 
 
 class _TradeFlowDataManager:
     trade_flow_ready = True
 
     def __init__(self, *, discontinuous: bool = False) -> None:
-        self.hub = AppendBatchHub[NormalizedAggTrade](
+        self.hub = AppendBatchHub[NormalizedAggTrade | ObservedTrade](
             max_pending_records=1 if discontinuous else 16,
         )
         self.discontinuous = discontinuous
@@ -101,7 +102,26 @@ def _stream(symbol: str = "BTCUSDT", *, channel: str = "agg_trade") -> dict[str,
     }
 
 
-def _trade(key: MarketStreamKey, agg_trade_id: int) -> NormalizedAggTrade:
+def _trade(
+    key: MarketStreamKey,
+    agg_trade_id: int,
+) -> NormalizedAggTrade | ObservedTrade:
+    if key.channel is MarketChannel.TRADE:
+        return ObservedTrade(
+            exchange=key.exchange,
+            market_type=key.market_type,
+            symbol=key.symbol,
+            observation_sequence=agg_trade_id,
+            trade_id=f"trade-{agg_trade_id}",
+            exchange_trade_id=str(agg_trade_id),
+            price=60_000.0 + agg_trade_id,
+            quantity=0.1,
+            trade_time_ms=1_700_000_000_000 + agg_trade_id,
+            event_time_ms=1_700_000_000_010 + agg_trade_id,
+            received_at_ms=1_700_000_000_020 + agg_trade_id,
+            aggressor_side="buy",
+            source=DataSource.PLUGIN,
+        )
     return NormalizedAggTrade(
         exchange=key.exchange,
         market_type=key.market_type,
@@ -202,7 +222,7 @@ def test_trade_flow_ws_validates_commands_and_stays_protocol_isolated() -> None:
         ws.send_json({"action": "subscribe", "streams": [_stream(channel="basis")]})
         error = ws.receive_json()
         assert error["code"] == "INVALID_SUBSCRIPTION"
-        assert "only support channel 'agg_trade'" in error["detail"]
+        assert "support channel 'agg_trade' or 'trade'" in error["detail"]
 
         ws.send_json({
             "action": "subscribe",
@@ -250,3 +270,26 @@ def test_trade_flow_ws_unready_and_internal_subscribe_errors_are_safe() -> None:
         assert error["code"] == "SUBSCRIBE_FAILED"
         assert error["detail"] == "trade-flow subscription is temporarily unavailable"
         assert "secret" not in error["detail"]
+
+
+def test_trade_flow_ws_labels_observational_trade_contract() -> None:
+    dm = _TradeFlowDataManager()
+
+    with _client(dm).websocket_connect("/api/v1/stream/trade-flow") as ws:
+        assert ws.receive_json()["type"] == "connected"
+        ws.send_json({
+            "action": "subscribe",
+            "request_id": "observed",
+            "streams": [_stream(channel="trade")],
+        })
+        subscribed = ws.receive_json()
+        recent = ws.receive_json()
+        batch = ws.receive_json()
+        assert subscribed["continuity_mode"] == "observational"
+        assert recent["continuity_mode"] == "observational"
+        assert recent["data"][0]["record_kind"] == "trade"
+        assert recent["data"][0]["continuity_mode"] == "observational"
+        assert batch["continuity_mode"] == "observational"
+        assert batch["data"][0]["trade_id"] == "trade-11"
+        ws.send_json({"action": "unsubscribe"})
+        assert ws.receive_json()["type"] == "unsubscribed"

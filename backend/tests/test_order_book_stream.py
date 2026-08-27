@@ -86,9 +86,10 @@ def _stream(
     depth_levels: object = 20,
     update_interval_ms: object = 250,
     mode: str = "partial",
+    exchange: str = "binance",
 ) -> dict:
     return {
-        "exchange": "binance",
+        "exchange": exchange,
         "market_type": market_type,
         "symbol": symbol,
         "channel": channel,
@@ -148,7 +149,14 @@ def test_order_book_ws_orders_snapshot_before_live_latest_state() -> None:
         assert connected["type"] == "connected"
         assert connected["protocol"] == "orderbook.v1"
         assert connected["allowed_depth_levels"] == [5, 10, 20]
-        assert connected["allowed_update_intervals_ms"] == [100, 250, 500, 1000]
+        assert connected["allowed_update_intervals_ms"] == [
+            100,
+            250,
+            500,
+            1000,
+            2000,
+            3000,
+        ]
         assert connected["allowed_update_intervals_ms_by_market"] == {
             "spot": [100, 1000],
             "futures": [100, 250, 500],
@@ -236,6 +244,31 @@ def test_order_book_ws_accepts_spot_partial_snapshot_stream() -> None:
         assert subscribed["streams"][0]["params"]["update_interval_ms"] == "1000"
         assert snapshot["data"][0]["key"]["market_type"] == "spot"
         assert live["data"]["key"]["market_type"] == "spot"
+        ws.send_json({"action": "unsubscribe"})
+        assert ws.receive_json()["type"] == "unsubscribed"
+
+    assert dm.ensure_calls == dm.release_calls
+
+
+def test_order_book_ws_accepts_capability_routed_ccxt_snapshot_stream() -> None:
+    dm = _OrderBookDataManager()
+    stream = _stream(
+        exchange="bybit",
+        market_type="swap.linear",
+        symbol="BTC/USDT:USDT",
+        update_interval_ms=1000,
+    )
+
+    with _client(dm).websocket_connect("/api/v1/stream/order-book") as ws:
+        assert ws.receive_json()["type"] == "connected"
+        ws.send_json({"action": "subscribe", "request_id": "bybit", "streams": [stream]})
+        subscribed = ws.receive_json()
+        snapshot = ws.receive_json()
+        live = ws.receive_json()
+        assert subscribed["streams"][0]["exchange"] == "bybit"
+        assert subscribed["streams"][0]["market_type"] == "swap.linear"
+        assert snapshot["data"][0]["key"]["symbol"] == "BTC/USDT:USDT"
+        assert live["data"]["key"]["exchange"] == "bybit"
         ws.send_json({"action": "unsubscribe"})
         assert ws.receive_json()["type"] == "unsubscribed"
 

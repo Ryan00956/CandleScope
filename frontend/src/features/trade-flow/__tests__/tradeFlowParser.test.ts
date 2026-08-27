@@ -69,3 +69,28 @@ test("TradeFlow parser preserves the request id on server errors", () => {
     detail: "temporarily unavailable",
   });
 });
+
+test("TradeFlow parser preserves the observational contract without inventing exchange continuity", () => {
+  const parsed = parseTradeFlowSocketMessage({
+    type: "trade.batch",
+    protocol: "tradeflow.v1",
+    continuity_mode: "observational",
+    sequence: 8,
+    continuity: true,
+    resync_required: false,
+    data: [{
+      ...RAW_TRADE,
+      agg_trade_id: 3,
+      trade_id: "opaque-provider-id",
+      first_trade_id: null,
+      last_trade_id: null,
+      continuity_mode: "observational",
+    }],
+  });
+  assert.equal(parsed.kind, "batch");
+  if (parsed.kind === "batch") {
+    assert.equal(parsed.continuityMode, "observational");
+    assert.equal(parsed.records[0]?.tradeId, "opaque-provider-id");
+    assert.equal(parsed.records[0]?.continuityMode, "observational");
+  }
+});

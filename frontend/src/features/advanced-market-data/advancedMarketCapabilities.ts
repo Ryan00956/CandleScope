@@ -21,11 +21,6 @@ export interface AdvancedMarketCapabilitySnapshot {
   summarySupported: boolean;
 }
 
-const METRIC_CHANNELS = new Set<AdvancedMarketChannel>([
-  "funding_rate",
-  "open_interest",
-]);
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -69,23 +64,18 @@ export function resolveAdvancedMarketCapabilities({
 
     const realtime = item.realtime === true;
     const history = item.history === true;
-    const requiresHistory = METRIC_CHANNELS.has(channel);
-    const supported = realtime && (!requiresHistory || history);
+    const supported = realtime || history;
     channels[channel] = {
       supported,
       realtime,
       history,
-      reason: supported
-        ? null
-        : requiresHistory
-          ? t("market.cap.incompleteChannel")
-          : t("market.cap.noRealtime"),
+      reason: supported ? null : t("market.cap.noRealtime"),
     };
   }
 
   const summarySupported = (
-    channels.mark_price.supported
-    && channels.index_price.supported
+    channels.mark_price.realtime
+    && channels.index_price.realtime
   );
   channels.basis = summarySupported
     ? {

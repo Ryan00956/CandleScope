@@ -1027,6 +1027,17 @@ body {
   white-space: nowrap;
 }
 
+.ob-delivery-mode {
+  overflow: hidden;
+  padding: 2px 5px;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  color: var(--text-muted);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .ob-status {
   display: inline-flex;
   align-items: center;

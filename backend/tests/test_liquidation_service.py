@@ -206,6 +206,28 @@ async def _wait_until(predicate, *, timeout: float = 2.0) -> None:
     await asyncio.wait_for(_wait(), timeout=timeout)
 
 
+@_async_test
+async def test_rest_only_ccxt_liquidation_accepts_unified_swap_market(
+    tmp_path: Path,
+) -> None:
+    factory = _Factory()
+    service = _service(factory, tmp_path / "bitfinex-liquidations.db")
+    key = MarketStreamKey.build(
+        "bitfinex",
+        "swap.linear",
+        "BTC/USDT:USDT",
+        MarketChannel.LIQUIDATION,
+    )
+
+    assert await service.ensure_stream(key, consumer_id="browser") is True
+    descriptor = factory.start_calls[0]
+    assert descriptor.stream_type is StreamType.LIQUIDATION
+    assert descriptor.market_type == "swap.linear"
+    assert descriptor.poll_interval_seconds == 1
+    assert await service.release_stream(key, consumer_id="browser") is True
+    await service.shutdown()
+
+
 def _stored_row(
     *,
     bucket_open_ms: int,
@@ -421,7 +443,7 @@ async def test_binance_spot_and_wrong_channel_are_rejected_before_start(
     factory = _Factory()
     service = _service(factory, tmp_path / "liquidation.sqlite")
 
-    with pytest.raises(ValueError, match="market_type='futures'"):
+    with pytest.raises(ValueError, match="contract market type"):
         await service.ensure_stream(_key(market_type="spot"), consumer_id="spot")
     with pytest.raises(ValueError, match="only accepts liquidation keys"):
         await service.ensure_stream(

@@ -112,13 +112,19 @@ test("readPaneHeights rejects an incomplete vector instead of shifting pane inde
 
 test("materializePaneLayout temporarily disables autoSize for one forced resize", () => {
   const calls: Array<[string, ...unknown[]]> = [];
+  const chartElement = structuralMock<HTMLDivElement>({
+    style: { height: "720px", width: "1280px" },
+  });
   const chart = chartFixture({
     applyOptions: (options: unknown) => { calls.push(["applyOptions", options]); },
+    chartElement: () => chartElement,
     options: () => ({ autoSize: true }),
     resize: (...args: unknown[]) => { calls.push(["resize", ...args]); },
   });
 
   assert.equal(materializePaneLayout(chart, containerFixture()), true);
+  assert.equal(chartElement.style.width, "100%");
+  assert.equal(chartElement.style.height, "100%");
   assert.deepEqual(calls, [
     ["applyOptions", { autoSize: false, height: 720, width: 1280 }],
     ["resize", 1278, 720, true],
@@ -129,13 +135,19 @@ test("materializePaneLayout temporarily disables autoSize for one forced resize"
 
 test("materializePaneLayout restores autoSize when the forced resize fails", () => {
   const options: unknown[] = [];
+  const chartElement = structuralMock<HTMLDivElement>({
+    style: { height: "720px", width: "1280px" },
+  });
   const chart = chartFixture({
     applyOptions: (nextOptions: unknown) => { options.push(nextOptions); },
+    chartElement: () => chartElement,
     options: () => ({ autoSize: true }),
     resize: () => { throw new Error("resize failed"); },
   });
 
   assert.equal(materializePaneLayout(chart, containerFixture()), false);
+  assert.equal(chartElement.style.width, "100%");
+  assert.equal(chartElement.style.height, "100%");
   assert.deepEqual(options, [
     { autoSize: false, height: 720, width: 1280 },
     { autoSize: true },

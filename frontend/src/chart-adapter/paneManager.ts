@@ -6,6 +6,21 @@ import type {
 
 type AdapterChart = IChartApiBase<ChartTime>;
 
+function restoreAutoSizeSizing(chart: AdapterChart): void {
+  chart.applyOptions({ autoSize: true });
+  try {
+    // Disabling autoSize writes fixed pixel dimensions to the generated chart
+    // root. Re-enabling it reinstalls the ResizeObserver, but Lightweight Charts
+    // 5.2+ leaves those pixels in place, clipping the chart when its parent grows.
+    const chartElement = chart.chartElement?.();
+    if (!chartElement) return;
+    chartElement.style.width = "100%";
+    chartElement.style.height = "100%";
+  } catch {
+    // The observer has already been restored; root cleanup is best-effort.
+  }
+}
+
 export function ensurePane(
   chart: AdapterChart | null | undefined,
   paneIndex: number,
@@ -118,11 +133,11 @@ export function materializePaneLayout(
     if (nudgeAxis === "height") chart.resize(width, nudgeHeight, true);
     else chart.resize(nudgeWidth, height, true);
     chart.resize(width, height, true);
-    if (restoreAutoSize) chart.applyOptions({ autoSize: true });
+    if (restoreAutoSize) restoreAutoSizeSizing(chart);
     return true;
   } catch {
     if (autoSizeDisabled && restoreAutoSize) {
-      try { chart.applyOptions({ autoSize: true }); } catch { /* best-effort observer restore */ }
+      try { restoreAutoSizeSizing(chart); } catch { /* best-effort observer restore */ }
     }
     return false;
   }

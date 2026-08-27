@@ -1,0 +1,8 @@
+{
+  "schema": "candlescope.manual-history.phase10-capacity.v1",
+  "git_commit": "0cb638a4107dd5fe8fea259a79df8e6a8c5e63bd",
+  "klines_db_path": "E:\\CACHEV~1\\Temp\\manual-history-phase10-ycv08pbv\\klines.db",
+  "production_db": false,
+  "physical_bytes": 4096,
+  "rows": 5
+}

@@ -264,6 +264,7 @@ docs/perf-baselines/plugin-platform-v2/*
 !docs/perf-baselines/manual-history/
 docs/perf-baselines/manual-history/*
 !docs/perf-baselines/manual-history/phase0-*.json
+!docs/perf-baselines/manual-history/phase10-*.json
 
 # CandleScope local-only agent state and construction notes
 .codex

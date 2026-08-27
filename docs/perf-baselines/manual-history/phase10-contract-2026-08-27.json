@@ -1,0 +1,22 @@
+{
+  "schema": "candlescope.manual-history.phase10-contract.v1",
+  "git_commit": "0cb638a4107dd5fe8fea259a79df8e6a8c5e63bd",
+  "recorded_at": "2026-08-27T15:10:22.825442+00:00",
+  "MANUAL_HISTORY_DOWNLOAD_ENABLED": 1,
+  "HISTORY_ARCHIVE_ENABLED": 0,
+  "klines_db_path": "E:\\CACHEV~1\\Temp\\manual-history-phase10-ycv08pbv\\klines.db",
+  "production_db": false,
+  "targets": [
+    {
+      "symbol": "BTCUSDT",
+      "interval": "1m",
+      "effective_start_ms": 1787843160000,
+      "sealed_end_open_ms": 1787843400000,
+      "verified_contiguous": true,
+      "source_route": "REST",
+      "request_count": 1,
+      "rows": 5
+    }
+  ],
+  "job_state": "SUCCEEDED"
+}

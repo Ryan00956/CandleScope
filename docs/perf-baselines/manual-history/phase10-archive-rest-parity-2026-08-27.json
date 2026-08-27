@@ -1,0 +1,9 @@
+{
+  "schema": "candlescope.manual-history.phase10-archive-rest-parity.v1",
+  "git_commit": "0cb638a4107dd5fe8fea259a79df8e6a8c5e63bd",
+  "klines_db_path": "E:\\CACHEV~1\\Temp\\manual-history-phase10-ycv08pbv\\klines.db",
+  "production_db": false,
+  "HISTORY_ARCHIVE_ENABLED": 0,
+  "rest_verified_contiguous": true,
+  "note": "Archive disabled; REST-only path reached exact continuity on a live Binance 5-bar fixture."
+}

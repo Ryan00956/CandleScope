@@ -1,0 +1,21 @@
+{
+  "schema": "candlescope.manual-history.phase10-gc-restart.v1",
+  "git_commit": "0cb638a4107dd5fe8fea259a79df8e6a8c5e63bd",
+  "klines_db_path": "E:\\CACHEV~1\\Temp\\manual-history-phase10-ycv08pbv\\klines.db",
+  "production_db": false,
+  "rows_before_gc": 5,
+  "gc_would_delete_rows": 0,
+  "floors_before": [
+    {
+      "start": 1787843160000,
+      "durable": 1
+    }
+  ],
+  "floors_after_reopen": [
+    {
+      "start": 1787843160000,
+      "durable": 1
+    }
+  ],
+  "verified_contiguous": true
+}

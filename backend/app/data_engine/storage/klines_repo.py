@@ -227,6 +227,10 @@ def init_klines_storage() -> None:
                 "TEXT NOT NULL DEFAULT 'history-archive-import.v1'"
             )
 
+        from app.data_engine.manual_history.repository import init_manual_history_storage
+
+        init_manual_history_storage(conn)
+
 
 def dataframe_to_rows(df: Any) -> list[dict]:
     # Pandas is only needed by this legacy conversion helper.  Keeping it out

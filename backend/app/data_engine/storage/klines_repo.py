@@ -18,6 +18,8 @@ from app.data_engine.history.calendar import (
 )
 from app.data_engine.interval_policy import INTERVAL_SECONDS, VALID_INTERVALS, parse_interval_ms
 
+from .sqlite_runtime import SQLiteConnectionPolicy, open_sqlite
+
 # Valid market types
 VALID_MARKET_TYPES = ("spot", "futures", "swap")
 DEFAULT_EXCHANGE = "binance"
@@ -69,25 +71,16 @@ def _connect(
     configure_journal_mode: bool = True,
     use_row_factory: bool = True,
 ) -> sqlite3.Connection:
-    conn = sqlite3.connect(
-        str(KLINES_DB_PATH),
-        timeout=max(0.0, float(timeout_seconds)),
-        check_same_thread=False,
+    return open_sqlite(
+        KLINES_DB_PATH,
+        policy=SQLiteConnectionPolicy(
+            timeout_seconds=max(0.0, float(timeout_seconds)),
+            busy_timeout_ms=max(0, round(float(timeout_seconds) * 1000)),
+            use_row_factory=use_row_factory,
+            configure_journal_mode=configure_journal_mode,
+        ),
+        logger=logger,
     )
-    if use_row_factory:
-        conn.row_factory = sqlite3.Row
-    if configure_journal_mode:
-        try:
-            conn.execute("PRAGMA journal_mode=WAL;")
-        except sqlite3.OperationalError as exc:
-            logger.warning(
-                "SQLite WAL mode unavailable for %s, falling back to DELETE journal: %s",
-                KLINES_DB_PATH,
-                exc,
-            )
-            conn.execute("PRAGMA journal_mode=DELETE;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
-    return conn
 
 
 def _migrate_add_exchange_market_type(conn: sqlite3.Connection) -> None:

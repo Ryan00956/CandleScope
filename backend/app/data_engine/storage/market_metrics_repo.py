@@ -17,26 +17,14 @@ from typing import Any, Iterable
 
 from app.core.config import KLINES_DB_PATH
 
+from .sqlite_runtime import open_sqlite
+
 
 logger = logging.getLogger("candlescope.storage.market_metrics")
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path), timeout=30, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=30000;")
-    try:
-        conn.execute("PRAGMA journal_mode=WAL;")
-    except sqlite3.OperationalError as exc:
-        logger.warning(
-            "SQLite WAL mode unavailable for %s, falling back to DELETE journal: %s",
-            db_path,
-            exc,
-        )
-        conn.execute("PRAGMA journal_mode=DELETE;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
-    return conn
+    return open_sqlite(db_path, logger=logger)
 
 
 def init_market_metrics_storage(db_path: Path | str | None = None) -> None:

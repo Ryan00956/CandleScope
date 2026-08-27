@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -151,10 +152,11 @@ def _patch_startup_dependencies(
     monkeypatch.setenv("CANDLESCOPE_PLUGIN_PLATFORM_V2_ROOT", str(platform_root))
 
     monkeypatch.setattr(main_module, "EventLoopLagMonitor", _LagMonitor)
-    monkeypatch.setattr(main_module, "init_klines_storage", lambda: None)
-    monkeypatch.setattr(main_module, "init_market_metrics_storage", lambda: None)
-    monkeypatch.setattr(main_module, "init_trade_flow_storage", lambda _path: None)
-    monkeypatch.setattr(main_module, "init_liquidation_storage", lambda _path: None)
+    monkeypatch.setattr(
+        main_module,
+        "initialize_market_storage",
+        lambda **_kwargs: SimpleNamespace(to_dict=lambda: {}),
+    )
 
     async def _init_replay_runtime() -> None:
         main_module.app.state.replay_runtime = None

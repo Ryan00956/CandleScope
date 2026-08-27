@@ -7,6 +7,14 @@ from .models import (
     TransportMode,
     market_channel_for_stream_type,
 )
+from .catalog import MarketDataCatalog, MarketDataProviderDescriptor
+from .ports import (
+    AdvancedMarketDataPort,
+    FullOrderBookPort,
+    LiquidationPort,
+    OrderBookPort,
+    PublicTradePort,
+)
 
 __all__ = [
     "DeliveryClass",
@@ -14,4 +22,11 @@ __all__ = [
     "MarketStreamKey",
     "TransportMode",
     "market_channel_for_stream_type",
+    "MarketDataCatalog",
+    "MarketDataProviderDescriptor",
+    "AdvancedMarketDataPort",
+    "FullOrderBookPort",
+    "LiquidationPort",
+    "OrderBookPort",
+    "PublicTradePort",
 ]

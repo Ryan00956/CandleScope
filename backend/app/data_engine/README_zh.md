@@ -1,6 +1,6 @@
 # Data Engine 架构总览
 
-> CandleScope 后端行情数据层。当前后端已经收口为模块化 Data Engine：`ingestion` 负责接入行情，`bar_aggregator` 负责统一 K 线生命周期，`data_manager` 作为唯一业务门面，`backfill` 负责历史缺口修复，`storage` 负责 SQLite 持久化。
+> CandleScope 后端行情数据层。当前后端已经收口为模块化 Data Engine：`ingestion` 负责接入行情，`bar_aggregator` 负责统一 K 线生命周期，`data_manager` 作为唯一业务门面，`backfill` 负责历史缺口修复，`storage` 按数据通道保留专用持久化语义。
 
 对应英文文档见 [README.md](README.md)。
 
@@ -39,12 +39,38 @@ DataManager cache + EventBus
 |---|---|---|
 | `ingestion` | 交易所 HTTP/WS I/O、WS 生命周期、HTTP fallback、payload 标准化、去重、`GapMarker` 输出 | 不生成业务 K 线、不写 storage、不执行历史修复 |
 | `bar_aggregator` | 统一 bucket、OHLCV merge、forming/closed 生命周期、custom interval 聚合、`BarEvent` 发布 | 不连接交易所、不读写 storage、不管理订阅 |
-| `data_manager` | 统一 query/cache/event/stream/backfill coordination/price/subscription/maintenance 门面 | 不直接实现交易所协议、不手写 backfill pipeline |
+| `data_manager` | 统一 query/cache/event/stream/backfill coordination/price/subscription/maintenance 门面，并通过 MarketDataCatalog 公布通道 owner/能力/存储角色 | 不直接实现交易所协议、不手写 backfill pipeline、不把不同数据压成万能查询 |
 | `backfill` | detect/plan/fetch/reconcile/publish 历史修复 pipeline，输出 `RepairReport` 和 `written_ranges` | 不管理 API/WS、不直接回灌 DataManager cache |
-| `storage` | SQLite K 线表、gap ledger、同步/异步 adapter、范围查询和缺口扫描 | 不作为业务数据门面暴露 |
+| `storage` | K 线/指标/rollup 的 SQLite repo、逐笔 archive、gap ledger、统一 SQLite policy 和 schema manifest | 不作为业务数据门面暴露，不承诺跨后端原子事务 |
 | `interval_policy.py` | 周期规范 identity 与 fixed/week/month timeline 语义 | 不判断交易所是否原生、不访问网络或 storage |
 | `interval_resolution.py` | 按 exchange/market/history-or-realtime 解析 native/derived route 和精确 base | 不计算 bucket、不执行 I/O |
 | `runtime.py` | 应用组合根：构造、注入、启动、关闭 Data Engine | 不承载业务查询逻辑 |
+
+## 统一行情管理边界
+
+统一的是控制面，不是物理数据库：
+
+```text
+API / WS / Indicator / Replay preparation
+                    │
+              DataManager
+       stream / event / typed facade
+                    │
+             MarketDataCatalog
+      owner / access / storage role / health
+          │          │          │
+       bars       trades      order books
+    cache+SQLite  ring+rollup  process memory
+                  +archive     +reconstruction
+```
+
+- `market_data/ports.py` 定义 DataManager 依赖的强类型服务端口；bars、逐笔、清算和订单簿继续保留各自的查询与一致性语义。
+- `market_data/catalog.py` 统一发布 provider、channel owner、访问模式、存储角色和 diagnostics；一个 channel 只能有一个 owner。
+- `storage/sqlite_runtime.py` 统一 DataEngine repository 的 timeout、busy timeout、WAL fallback、row factory 和 synchronous policy。
+- `storage/bootstrap.py` 是行情持久化 schema 的单一启动入口，并在主行情库维护 `market_storage_schema` manifest。
+- 强类型命名空间直接表达各通道语义：`dm.bars`、`dm.market_state`、`dm.trades`、`dm.liquidations`、`dm.books.partial` 和 `dm.books.full`；原有平铺方法保留为兼容包装。
+- `GET /api/v1/settings/storage/health` 在 gap/backfill 健康信息之外，同时返回目录/控制快照与启动期存储 manifest。
+- Replay、Backtest、不可变历史 archive 和 process-local order book 继续保持独立物理边界。
 
 ## 启动组合根
 
@@ -53,8 +79,11 @@ DataManager cache + EventBus
 ```text
 DataEngineRuntime
 ├── DataManager
+│   └── MarketDataCatalog
 ├── KlinesRepoAdapter / AsyncKlinesRepoAdapter
 ├── GapLedger
+├── MarketDataService / PublicTradeService / LiquidationService
+├── OrderBookService / FullOrderBookService
 ├── ExchangeIngestionFactory
 ├── TransportLayer(IngestionConfig)       # backfill REST transport
 ├── BackfillEngine
@@ -67,6 +96,7 @@ DataEngineRuntime
 
 - `app.state.data_engine_runtime`
 - `app.state.data_manager`
+- `app.state.market_storage_bootstrap`（启动期 schema/provider 存储清单）
 - `app.state.indicator_engine` 由 Indicator bridge 创建
 
 不要在 API 层直接持有 `BackfillEngine`、`BarAggregator`、`TransportLayer` 等内部对象。边界测试会保护这一点。

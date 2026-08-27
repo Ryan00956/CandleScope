@@ -706,7 +706,7 @@ async def scan_and_fill_gaps(
 
 @router.get("/storage/health")
 async def storage_health(request: Request) -> dict:
-    """Return gap repair health without triggering new repair work."""
+    """Return storage/control-plane health without triggering repair work."""
     dm = _get_data_manager(request)
     backfill_coordinator = _get_backfill_coordinator(request)
     backfill_engine = _get_backfill_engine(request)
@@ -727,6 +727,16 @@ async def storage_health(request: Request) -> dict:
     )
     open_gaps = snapshot.get("gap_ledger_open") or []
     ledger_health = snapshot.get("gap_ledger_health") or {}
+    control_snapshot = getattr(dm, "market_data_control_snapshot", None)
+    market_data_control = (
+        control_snapshot()
+        if callable(control_snapshot)
+        else {"status": "unavailable"}
+    )
+    storage_bootstrap = getattr(request.app.state, "market_storage_bootstrap", None)
+    bootstrap_serializer = getattr(storage_bootstrap, "to_dict", None)
+    if callable(bootstrap_serializer):
+        storage_bootstrap = bootstrap_serializer()
     return {
         "status": "ok",
         "targets": _call_runtime_list(dm, "prewarm_targets"),
@@ -738,6 +748,8 @@ async def storage_health(request: Request) -> dict:
         "oldest_open_gap_at": ledger_health.get("oldest_open_at"),
         "backfill": snapshot,
         "backfill_engine": engine_snapshot,
+        "market_data_control": market_data_control,
+        "storage_bootstrap": storage_bootstrap,
     }
 
 

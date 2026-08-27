@@ -55,6 +55,16 @@ Common methods on `DataManager`:
 | `scan_and_fill_storage_gaps()` | Manual gap scan and repair |
 | `update_retention_limits()` | Update DB/ephemeral retention settings |
 | `snapshot()` | Full diagnostic snapshot |
+| `market_data_control_snapshot()` | Channel ownership, typed namespaces, readiness, and coverage boundaries |
+
+Channel-specific operations are grouped under typed namespaces:
+
+- `dm.bars`: bar queries, bounds, and stream ensure.
+- `dm.market_state`: ticker/mark/funding/open-interest/basis latest and history.
+- `dm.trades` and `dm.liquidations`: append-only event access with distinct coverage guarantees.
+- `dm.books.partial` and `dm.books.full`: replaceable Top-N versus sequence-gated full-depth books.
+
+The older flat methods remain compatibility wrappers and route through these namespaces.
 
 Example:
 
@@ -83,6 +93,7 @@ The package root exports the stable facade and contracts:
 - Streams: `StreamInfo`, `StreamStatus`
 - Storage protocol: `StorageBackend`
 - Maintenance/subscription: `MaintenanceBusyError`, `MaintenanceUnavailableError`, `SubscriptionTier`
+- Domain facades: `BarDataFacade`, `MarketStateFacade`, `TradeDataFacade`, `LiquidationDataFacade`, `PartialOrderBookFacade`, `FullOrderBookFacade`
 
 ## Timestamp And Identity Rules
 

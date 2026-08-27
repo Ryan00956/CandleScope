@@ -65,12 +65,12 @@ def test_data_manager_order_book_facade_preserves_service_contracts() -> None:
         key = _key()
 
         assert manager.order_book_ready is True
-        assert await manager.ensure_order_book_stream(
+        assert await manager.books.partial.ensure_stream(
             key,
             consumer_id="client",
         ) is True
         assert manager.order_book_snapshot(key) == "snapshot"
-        assert await manager.wait_for_order_book_snapshot(
+        assert await manager.books.partial.wait_for_snapshot(
             key,
             timeout_seconds=1.5,
         ) == "fresh"

@@ -39,6 +39,15 @@ from .models import (
     SubscriptionHandle,
 )
 from .maintenance import MaintenanceBusyError, MaintenanceUnavailableError
+from .facades import (
+    BarDataFacade,
+    FullOrderBookFacade,
+    LiquidationDataFacade,
+    MarketStateFacade,
+    OrderBookFacades,
+    PartialOrderBookFacade,
+    TradeDataFacade,
+)
 from .storage_intents import StorageIntentRegistry
 from .subscriptions import SubscriptionTier
 from .manager import DataManager, StreamCapacityError
@@ -47,6 +56,13 @@ __all__ = [
     # Facade
     "DataManager",
     "StreamCapacityError",
+    "BarDataFacade",
+    "MarketStateFacade",
+    "TradeDataFacade",
+    "LiquidationDataFacade",
+    "PartialOrderBookFacade",
+    "FullOrderBookFacade",
+    "OrderBookFacades",
     # Config
     "DataManagerConfig",
     "CacheConfig",

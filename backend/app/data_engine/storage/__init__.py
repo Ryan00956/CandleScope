@@ -48,6 +48,16 @@ from .trade_flow_store import (
     init_trade_flow_storage,
 )
 from .trade_flow_writer import TradeFlowRollupWriter
+from .bootstrap import (
+    MarketStorageBootstrapReport,
+    MarketStorageComponent,
+    initialize_market_storage,
+)
+from .sqlite_runtime import (
+    DEFAULT_SQLITE_POLICY,
+    SQLiteConnectionPolicy,
+    open_sqlite,
+)
 
 __all__ = [
     "DEFAULT_EXCHANGE",
@@ -93,4 +103,10 @@ __all__ = [
     "TradeFlowRollupStore",
     "TradeFlowRollupWriter",
     "init_trade_flow_storage",
+    "MarketStorageBootstrapReport",
+    "MarketStorageComponent",
+    "initialize_market_storage",
+    "DEFAULT_SQLITE_POLICY",
+    "SQLiteConnectionPolicy",
+    "open_sqlite",
 ]

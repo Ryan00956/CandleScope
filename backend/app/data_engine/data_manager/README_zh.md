@@ -55,6 +55,16 @@ ingestion -> bar_aggregator -> DataManager -> API / WS / Indicator
 | `scan_and_fill_storage_gaps()` | 手动 gap scan + repair |
 | `update_retention_limits()` | 更新 DB/ephemeral retention 设置 |
 | `snapshot()` | 完整诊断快照 |
+| `market_data_control_snapshot()` | 通道 owner、强类型命名空间、就绪状态和 coverage 边界 |
+
+各类行情通过强类型命名空间分组：
+
+- `dm.bars`：K 线查询、边界和 stream ensure。
+- `dm.market_state`：ticker/mark/funding/open-interest/basis 的 latest 与 history。
+- `dm.trades` 和 `dm.liquidations`：不同完备性保证的 append-only 事件访问。
+- `dm.books.partial` 和 `dm.books.full`：可替换 Top-N 快照与 sequence-gated 全量深度簿。
+
+原有平铺方法继续保留为兼容包装，并统一路由到上述命名空间。
 
 示例：
 
@@ -83,6 +93,7 @@ package root 暴露稳定门面和契约：
 - Streams：`StreamInfo`、`StreamStatus`
 - Storage protocol：`StorageBackend`
 - Maintenance/subscription：`MaintenanceBusyError`、`MaintenanceUnavailableError`、`SubscriptionTier`
+- Domain facades：`BarDataFacade`、`MarketStateFacade`、`TradeDataFacade`、`LiquidationDataFacade`、`PartialOrderBookFacade`、`FullOrderBookFacade`
 
 ## 时间戳和身份规则
 

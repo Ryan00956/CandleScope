@@ -53,6 +53,7 @@ from starlette.middleware.gzip import GZipMiddleware
 from app.core.config import (
     CORS_ORIGINS,
     EVENT_LOOP_LAG_INTERVAL_SECONDS,
+    KLINES_DB_PATH,
     LIQUIDATION_DB_PATH,
     LIQUIDATION_ROLLUP_BACKEND,
     BACKTEST_SETTINGS,
@@ -88,12 +89,7 @@ if RUNTIME_MODE == "LIVE":
     from app.api.v1.local_data import router as local_data_router
     from app.data_engine.data_manager.capacity import build_capacity_snapshot
     from app.plugin_core_v2 import create_core_plugin_router
-    from app.data_engine.storage import (
-        init_klines_storage,
-        init_liquidation_storage,
-        init_market_metrics_storage,
-        init_trade_flow_storage,
-    )
+    from app.data_engine.storage import initialize_market_storage
 else:
     from app.api.v1.local_data import router as local_data_router
 
@@ -517,13 +513,15 @@ async def startup_event() -> None:
         print("[startup] LOCAL_OFFLINE runtime [ok]")
         return
 
-    # 1. Initialize SQLite storage
-    init_klines_storage()
-    init_market_metrics_storage()
-    if TRADE_FLOW_ROLLUP_BACKEND == "sqlite":
-        init_trade_flow_storage(TRADE_FLOW_DB_PATH)
-    if LIQUIDATION_ROLLUP_BACKEND == "sqlite":
-        init_liquidation_storage(LIQUIDATION_DB_PATH)
+    # 1. Initialize registered market-storage schemas through one composition root.
+    storage_bootstrap = initialize_market_storage(
+        klines_db_path=KLINES_DB_PATH,
+        trade_flow_backend=TRADE_FLOW_ROLLUP_BACKEND,
+        trade_flow_db_path=TRADE_FLOW_DB_PATH,
+        liquidation_backend=LIQUIDATION_ROLLUP_BACKEND,
+        liquidation_db_path=LIQUIDATION_DB_PATH,
+    )
+    app.state.market_storage_bootstrap = storage_bootstrap.to_dict()
 
     # 2. Restore the validated local symbol snapshot before the API is opened.
     # This is local disk I/O only; optional upstream catalog I/O remains

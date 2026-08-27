@@ -24,6 +24,12 @@ class _DataManager:
             ("okx", "spot", "BTC-USDT", "1m"),
         ]
 
+    def market_data_control_snapshot(self) -> dict:
+        return {
+            "schema": "candlescope.market-data-control/1",
+            "readiness": {"bars": True, "public_trades": True},
+        }
+
     def plan_memory_gc(self, policy: dict) -> dict:
         self.memory_gc_calls.append(("dry-run", policy))
         return {
@@ -191,6 +197,10 @@ def _client(*, with_runtime: bool = True) -> TestClient:
     if with_runtime:
         app.state.data_manager = _DataManager()
         app.state.data_engine_runtime = _Runtime()
+        app.state.market_storage_bootstrap = {
+            "schema": "candlescope.market-storage-bootstrap/1",
+            "components": [{"component": "bars", "initialized": True}],
+        }
     return TestClient(app)
 
 
@@ -224,6 +234,14 @@ def test_storage_health_returns_backfill_snapshot() -> None:
         ["binance:spot:request_weight:ip"]["rule"]
         == "binance_spot_klines"
     )
+    assert payload["market_data_control"] == {
+        "schema": "candlescope.market-data-control/1",
+        "readiness": {"bars": True, "public_trades": True},
+    }
+    assert payload["storage_bootstrap"] == {
+        "schema": "candlescope.market-storage-bootstrap/1",
+        "components": [{"component": "bars", "initialized": True}],
+    }
 
 
 def test_storage_health_requires_data_engine() -> None:

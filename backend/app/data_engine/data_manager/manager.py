@@ -87,7 +87,18 @@ from typing import Any, AsyncIterator, Protocol
 from app.core.executors import run_storage
 from app.data_engine.interval_policy import parse_interval_ms
 from app.data_engine.interval_resolution import IntervalResolver
-from app.data_engine.market_data.models import MarketStreamKey
+from app.data_engine.market_data.catalog import (
+    MarketDataCatalog,
+    MarketDataProviderDescriptor,
+)
+from app.data_engine.market_data.models import MarketChannel, MarketStreamKey
+from app.data_engine.market_data.ports import (
+    AdvancedMarketDataPort,
+    FullOrderBookPort,
+    LiquidationPort,
+    OrderBookPort,
+    PublicTradePort,
+)
 
 from .aggregator_bridge import AggregatorBridge
 from .auto_gc import (
@@ -100,6 +111,15 @@ from .cache import BarCache
 from .config import DataManagerConfig
 from .coordinator import IngestionFactory, StreamCoordinator
 from .event_bus import DataEventBus, MiddlewareHook
+from .facades import (
+    BarDataFacade,
+    FullOrderBookFacade,
+    LiquidationDataFacade,
+    MarketStateFacade,
+    OrderBookFacades,
+    PartialOrderBookFacade,
+    TradeDataFacade,
+)
 from .cache_behavior import CacheAccessEvent, CacheBehaviorStore
 from .gc import execute_memory_gc_plan, plan_memory_gc
 from .daily_open import DailyOpenService
@@ -141,6 +161,63 @@ logger = logging.getLogger("data_manager")
 _CACHE_ACCESS_FLUSH_SECONDS = 0.25
 _CACHE_ACCESS_BATCH_SIZE = 256
 _CACHE_ACCESS_MAX_PENDING_IDENTITIES = 2_048
+
+_BAR_PROVIDER = MarketDataProviderDescriptor(
+    provider_id="bars",
+    channels=(MarketChannel.KLINE,),
+    access_modes=("live", "latest", "history"),
+    storage_roles=("memory_cache", "injected_bar_repository"),
+    delivery="forming_closed_amended_lifecycle",
+    authority="aggregator_then_persisted_history",
+)
+_ADVANCED_PROVIDER = MarketDataProviderDescriptor(
+    provider_id="advanced_market",
+    channels=(
+        MarketChannel.TICKER,
+        MarketChannel.MINI_TICKER,
+        MarketChannel.MARK_PRICE,
+        MarketChannel.INDEX_PRICE,
+        MarketChannel.FUNDING_RATE,
+        MarketChannel.OPEN_INTEREST,
+        MarketChannel.BASIS,
+    ),
+    access_modes=("live", "latest", "history"),
+    storage_roles=("memory_latest", "service_owned_history"),
+    delivery="channel_specific_latest_or_history",
+    authority="exchange_channel_policy",
+)
+_PUBLIC_TRADE_PROVIDER = MarketDataProviderDescriptor(
+    provider_id="public_trades",
+    channels=(MarketChannel.AGG_TRADE, MarketChannel.TRADE),
+    access_modes=("live", "latest", "history", "archive"),
+    storage_roles=("memory_ring", "rollup_store", "optional_raw_archive"),
+    delivery="append_only",
+    authority="strict_agg_trade_or_observational_trade",
+)
+_LIQUIDATION_PROVIDER = MarketDataProviderDescriptor(
+    provider_id="liquidations",
+    channels=(MarketChannel.LIQUIDATION,),
+    access_modes=("live", "latest", "history"),
+    storage_roles=("memory_ring", "rollup_store"),
+    delivery="sampled_append_only",
+    authority="best_effort_public_observation",
+)
+_ORDER_BOOK_PROVIDER = MarketDataProviderDescriptor(
+    provider_id="partial_order_book",
+    channels=(MarketChannel.DEPTH,),
+    access_modes=("live", "latest"),
+    storage_roles=("process_local_snapshot",),
+    delivery="latest_wins_snapshot",
+    authority="replaceable_top_n_snapshot",
+)
+_FULL_ORDER_BOOK_PROVIDER = MarketDataProviderDescriptor(
+    provider_id="full_order_book",
+    channels=(MarketChannel.FULL_DEPTH,),
+    access_modes=("live", "latest"),
+    storage_roles=("process_local_reconstructed_book",),
+    delivery="sequence_gated_ordered_delta",
+    authority="snapshot_plus_contiguous_deltas",
+)
 
 
 class BackfillReconcilerLike(Protocol):
@@ -184,7 +261,7 @@ class StreamCapacityError(RuntimeError):
 
 
 class DataManager:
-    """Unified facade for all K-line data operations.
+    """Unified facade for market-data operations.
 
     This is the **only** class that external code needs to import.
     It composes:
@@ -193,9 +270,12 @@ class DataManager:
       * ``DataEventBus`` — pub/sub event delivery
       * ``StreamCoordinator`` — stream lifecycle management
       * ``BarAggregator`` — L1–L5 aggregation pipeline
+      * ``MarketDataCatalog`` — typed channel ownership and diagnostics
+      * channel-specific service ports for trades, metrics, and order books
 
-    All sub-components are accessible for advanced use cases,
-    but the facade methods cover 95% of needs.
+    The facade keeps unlike consistency models separate: bars, append-only
+    trades, sampled liquidations, and sequence-gated books retain typed methods
+    instead of being flattened into one generic query.
     """
 
     def __init__(self, config: DataManagerConfig | None = None) -> None:
@@ -288,11 +368,30 @@ class DataManager:
         self.cache_behavior = CacheBehaviorStore()
         self._subscriptions: Any = None
         self._price_stream_controller: PriceStreamControllerLike | None = None
-        self._market_data_service: Any = None
-        self._trade_flow_service: Any = None
-        self._liquidation_service: Any = None
-        self._order_book_service: Any = None
-        self._full_order_book_service: Any = None
+        self._market_data_service: AdvancedMarketDataPort | None = None
+        self._trade_flow_service: PublicTradePort | None = None
+        self._liquidation_service: LiquidationPort | None = None
+        self._order_book_service: OrderBookPort | None = None
+        self._full_order_book_service: FullOrderBookPort | None = None
+        self.market_catalog = MarketDataCatalog()
+        self.market_catalog.register(
+            _BAR_PROVIDER,
+            diagnostics=self._bar_provider_diagnostics,
+        )
+        self.bars = BarDataFacade(
+            query=self.query,
+            query_latest=self.query_latest,
+            query_before=self.query_before,
+            get_bounds=self.get_bounds,
+            ensure_stream=self.ensure_stream,
+        )
+        self.market_state = MarketStateFacade(self._require_market_data_service)
+        self.trades = TradeDataFacade(self._require_trade_flow_service)
+        self.liquidations = LiquidationDataFacade(self._require_liquidation_service)
+        self.books = OrderBookFacades(
+            partial=PartialOrderBookFacade(self._require_order_book_service),
+            full=FullOrderBookFacade(self._require_full_order_book_service),
+        )
         self._stream_leases: dict[SeriesKey, _StreamLease] = {}
         self._memory_gc_last_report: dict[str, Any] | None = None
         self._storage_gc_last_report: dict[str, Any] | None = None
@@ -365,81 +464,73 @@ class DataManager:
         """
         self.coordinator.set_ingestion_factory(factory)
 
-    def set_market_data_service(self, service: Any) -> None:
+    def set_market_data_service(self, service: AdvancedMarketDataPort) -> None:
         """Attach the independent advanced market-data service."""
 
-        required = (
-            "ensure_stream",
-            "release_stream",
-            "snapshot",
-            "history",
-            "subscribe",
-            "diagnostics",
-        )
-        if any(not callable(getattr(service, name, None)) for name in required):
+        if not isinstance(service, AdvancedMarketDataPort):
             raise TypeError("market data service does not implement the required facade")
         self._market_data_service = service
+        self.market_catalog.register(
+            _ADVANCED_PROVIDER,
+            diagnostics=service.diagnostics,
+            replace=True,
+        )
 
-    def set_trade_flow_service(self, service: Any) -> None:
+    def set_trade_flow_service(self, service: PublicTradePort) -> None:
         """Attach the append-only aggregate-trade/TradeFlow service."""
 
-        required = (
-            "ensure_stream",
-            "release_stream",
-            "recent",
-            "history",
-            "attach",
-            "archive_coverage",
-            "diagnostics",
-        )
-        if any(not callable(getattr(service, name, None)) for name in required):
+        if not isinstance(service, PublicTradePort):
             raise TypeError("trade flow service does not implement the required facade")
         self._trade_flow_service = service
+        self.market_catalog.register(
+            _PUBLIC_TRADE_PROVIDER,
+            diagnostics=service.diagnostics,
+            replace=True,
+        )
 
-    def set_liquidation_service(self, service: Any) -> None:
+    def set_liquidation_service(self, service: LiquidationPort) -> None:
         """Attach the append-only public-liquidation observation service."""
 
-        required = (
-            "ensure_stream",
-            "release_stream",
-            "recent",
-            "history",
-            "attach",
-            "diagnostics",
-        )
-        if any(not callable(getattr(service, name, None)) for name in required):
+        if not isinstance(service, LiquidationPort):
             raise TypeError("liquidation service does not implement the required facade")
         self._liquidation_service = service
+        self.market_catalog.register(
+            _LIQUIDATION_PROVIDER,
+            diagnostics=service.diagnostics,
+            replace=True,
+        )
 
-    def set_order_book_service(self, service: Any) -> None:
+    def set_order_book_service(self, service: OrderBookPort) -> None:
         """Attach the latest-wins Partial Top-N order-book service."""
 
-        required = (
-            "ensure_stream",
-            "release_stream",
-            "current",
-            "wait_for_snapshot",
-            "attach",
-            "diagnostics",
-        )
-        if any(not callable(getattr(service, name, None)) for name in required):
+        if not isinstance(service, OrderBookPort):
             raise TypeError("order-book service does not implement the required facade")
         self._order_book_service = service
+        self.market_catalog.register(
+            _ORDER_BOOK_PROVIDER,
+            diagnostics=service.diagnostics,
+            replace=True,
+        )
 
-    def set_full_order_book_service(self, service: Any) -> None:
+    def set_full_order_book_service(self, service: FullOrderBookPort) -> None:
         """Attach the sequence-consistent reconstructed order-book service."""
 
-        required = (
-            "ensure_stream",
-            "release_stream",
-            "current",
-            "wait_for_live",
-            "attach",
-            "diagnostics",
-        )
-        if any(not callable(getattr(service, name, None)) for name in required):
+        if not isinstance(service, FullOrderBookPort):
             raise TypeError("full order-book service does not implement the required facade")
         self._full_order_book_service = service
+        self.market_catalog.register(
+            _FULL_ORDER_BOOK_PROVIDER,
+            diagnostics=service.diagnostics,
+            replace=True,
+        )
+
+    def _bar_provider_diagnostics(self) -> dict[str, Any]:
+        storage = self.query_engine.storage
+        return {
+            "ready": storage is not None,
+            "cache": self.cache.health_snapshot(),
+            "storage_backend": type(storage).__name__ if storage is not None else None,
+        }
 
     @property
     def market_data_ready(self) -> bool:
@@ -1210,8 +1301,7 @@ class DataManager:
         *,
         consumer_id: str,
     ) -> bool:
-        service = self._require_market_data_service()
-        return await service.ensure_stream(key, consumer_id=consumer_id)
+        return await self.market_state.ensure_stream(key, consumer_id=consumer_id)
 
     async def release_market_stream(
         self,
@@ -1219,8 +1309,7 @@ class DataManager:
         *,
         consumer_id: str,
     ) -> bool:
-        service = self._require_market_data_service()
-        return await service.release_stream(key, consumer_id=consumer_id)
+        return await self.market_state.release_stream(key, consumer_id=consumer_id)
 
     async def market_snapshot(
         self,
@@ -1228,24 +1317,24 @@ class DataManager:
         *,
         refresh_missing: bool = True,
     ) -> list[Any]:
-        service = self._require_market_data_service()
-        return await service.snapshot(keys, refresh_missing=refresh_missing)
+        return await self.market_state.snapshot(
+            keys,
+            refresh_missing=refresh_missing,
+        )
 
     async def market_history(
         self,
         key: MarketStreamKey,
         **kwargs: Any,
     ) -> list[Any]:
-        service = self._require_market_data_service()
-        return await service.history(key, **kwargs)
+        return await self.market_state.history(key, **kwargs)
 
     async def market_history_page(
         self,
         key: MarketStreamKey,
         **kwargs: Any,
     ) -> Any:
-        service = self._require_market_data_service()
-        return await service.history_page(key, **kwargs)
+        return await self.market_state.history_page(key, **kwargs)
 
     def subscribe_market(
         self,
@@ -1254,10 +1343,13 @@ class DataManager:
         max_pending: int = 64,
         replay: bool = True,
     ) -> Any:
-        service = self._require_market_data_service()
-        return service.subscribe(keys, max_pending=max_pending, replay=replay)
+        return self.market_state.subscribe(
+            keys,
+            max_pending=max_pending,
+            replay=replay,
+        )
 
-    def _require_market_data_service(self) -> Any:
+    def _require_market_data_service(self) -> AdvancedMarketDataPort:
         if self._market_data_service is None:
             raise RuntimeError("advanced market data service is not initialized")
         return self._market_data_service
@@ -1272,8 +1364,7 @@ class DataManager:
         *,
         consumer_id: str,
     ) -> bool:
-        service = self._require_trade_flow_service()
-        return await service.ensure_stream(key, consumer_id=consumer_id)
+        return await self.trades.ensure_stream(key, consumer_id=consumer_id)
 
     async def release_trade_flow_stream(
         self,
@@ -1281,34 +1372,29 @@ class DataManager:
         *,
         consumer_id: str,
     ) -> bool:
-        service = self._require_trade_flow_service()
-        return await service.release_stream(key, consumer_id=consumer_id)
+        return await self.trades.release_stream(key, consumer_id=consumer_id)
 
     def trade_flow_recent(self, key: MarketStreamKey, **kwargs: Any) -> list[Any]:
-        service = self._require_trade_flow_service()
-        return service.recent(key, **kwargs)
+        return self.trades.recent(key, **kwargs)
 
     async def trade_flow_history(
         self,
         key: MarketStreamKey,
         **kwargs: Any,
     ) -> list[Any]:
-        service = self._require_trade_flow_service()
-        return await service.history(key, **kwargs)
+        return await self.trades.history(key, **kwargs)
 
     def attach_trade_flow(self, keys: list[MarketStreamKey], **kwargs: Any) -> Any:
-        service = self._require_trade_flow_service()
-        return service.attach(keys, **kwargs)
+        return self.trades.attach(keys, **kwargs)
 
     async def trade_flow_archive_coverage(
         self,
         key: MarketStreamKey,
         **kwargs: Any,
     ) -> Any:
-        service = self._require_trade_flow_service()
-        return await service.archive_coverage(key, **kwargs)
+        return await self.trades.archive_coverage(key, **kwargs)
 
-    def _require_trade_flow_service(self) -> Any:
+    def _require_trade_flow_service(self) -> PublicTradePort:
         if self._trade_flow_service is None:
             raise RuntimeError("trade flow service is not initialized")
         return self._trade_flow_service
@@ -1323,8 +1409,7 @@ class DataManager:
         *,
         consumer_id: str,
     ) -> bool:
-        service = self._require_liquidation_service()
-        return await service.ensure_stream(key, consumer_id=consumer_id)
+        return await self.liquidations.ensure_stream(key, consumer_id=consumer_id)
 
     async def release_liquidation_stream(
         self,
@@ -1332,26 +1417,22 @@ class DataManager:
         *,
         consumer_id: str,
     ) -> bool:
-        service = self._require_liquidation_service()
-        return await service.release_stream(key, consumer_id=consumer_id)
+        return await self.liquidations.release_stream(key, consumer_id=consumer_id)
 
     def liquidation_recent(self, key: MarketStreamKey, **kwargs: Any) -> list[Any]:
-        service = self._require_liquidation_service()
-        return service.recent(key, **kwargs)
+        return self.liquidations.recent(key, **kwargs)
 
     async def liquidation_history(
         self,
         key: MarketStreamKey,
         **kwargs: Any,
     ) -> list[Any]:
-        service = self._require_liquidation_service()
-        return await service.history(key, **kwargs)
+        return await self.liquidations.history(key, **kwargs)
 
     def attach_liquidations(self, keys: list[MarketStreamKey], **kwargs: Any) -> Any:
-        service = self._require_liquidation_service()
-        return service.attach(keys, **kwargs)
+        return self.liquidations.attach(keys, **kwargs)
 
-    def _require_liquidation_service(self) -> Any:
+    def _require_liquidation_service(self) -> LiquidationPort:
         if self._liquidation_service is None:
             raise RuntimeError("liquidation service is not initialized")
         return self._liquidation_service
@@ -1366,8 +1447,7 @@ class DataManager:
         *,
         consumer_id: str,
     ) -> bool:
-        service = self._require_order_book_service()
-        return await service.ensure_stream(key, consumer_id=consumer_id)
+        return await self.books.partial.ensure_stream(key, consumer_id=consumer_id)
 
     async def release_order_book_stream(
         self,
@@ -1375,12 +1455,10 @@ class DataManager:
         *,
         consumer_id: str,
     ) -> bool:
-        service = self._require_order_book_service()
-        return await service.release_stream(key, consumer_id=consumer_id)
+        return await self.books.partial.release_stream(key, consumer_id=consumer_id)
 
     def order_book_snapshot(self, key: MarketStreamKey) -> Any:
-        service = self._require_order_book_service()
-        return service.current(key)
+        return self.books.partial.snapshot(key)
 
     async def wait_for_order_book_snapshot(
         self,
@@ -1388,17 +1466,15 @@ class DataManager:
         *,
         timeout_seconds: float,
     ) -> Any:
-        service = self._require_order_book_service()
-        return await service.wait_for_snapshot(
+        return await self.books.partial.wait_for_snapshot(
             key,
             timeout_seconds=timeout_seconds,
         )
 
     def attach_order_books(self, keys: list[MarketStreamKey], **kwargs: Any) -> Any:
-        service = self._require_order_book_service()
-        return service.attach(keys, **kwargs)
+        return self.books.partial.attach(keys, **kwargs)
 
-    def _require_order_book_service(self) -> Any:
+    def _require_order_book_service(self) -> OrderBookPort:
         if self._order_book_service is None:
             raise RuntimeError("order-book service is not initialized")
         return self._order_book_service
@@ -1413,8 +1489,7 @@ class DataManager:
         *,
         consumer_id: str,
     ) -> bool:
-        service = self._require_full_order_book_service()
-        return await service.ensure_stream(key, consumer_id=consumer_id)
+        return await self.books.full.ensure_stream(key, consumer_id=consumer_id)
 
     async def release_full_order_book_stream(
         self,
@@ -1422,12 +1497,10 @@ class DataManager:
         *,
         consumer_id: str,
     ) -> bool:
-        service = self._require_full_order_book_service()
-        return await service.release_stream(key, consumer_id=consumer_id)
+        return await self.books.full.release_stream(key, consumer_id=consumer_id)
 
     def full_order_book_snapshot(self, key: MarketStreamKey) -> Any:
-        service = self._require_full_order_book_service()
-        return service.current(key, require_live=True)
+        return self.books.full.snapshot(key)
 
     async def wait_for_full_order_book_snapshot(
         self,
@@ -1435,18 +1508,19 @@ class DataManager:
         *,
         timeout_seconds: float,
     ) -> Any:
-        service = self._require_full_order_book_service()
-        return await service.wait_for_live(key, timeout_seconds=timeout_seconds)
+        return await self.books.full.wait_for_snapshot(
+            key,
+            timeout_seconds=timeout_seconds,
+        )
 
     def attach_full_order_books(
         self,
         keys: list[MarketStreamKey],
         **kwargs: Any,
     ) -> Any:
-        service = self._require_full_order_book_service()
-        return service.attach(keys, **kwargs)
+        return self.books.full.attach(keys, **kwargs)
 
-    def _require_full_order_book_service(self) -> Any:
+    def _require_full_order_book_service(self) -> FullOrderBookPort:
         if self._full_order_book_service is None:
             raise RuntimeError("full order-book service is not initialized")
         return self._full_order_book_service
@@ -2785,6 +2859,57 @@ class DataManager:
     #  Diagnostics
     # ═══════════════════════════════════════════════════════════
 
+    def market_data_control_snapshot(self) -> dict[str, Any]:
+        """Describe the unified control plane without flattening data semantics."""
+        return {
+            "schema": "candlescope.market-data-control/1",
+            "physical_unification": False,
+            "cross_backend_atomicity": False,
+            "access_namespaces": {
+                "bars": "bars",
+                "market_state": "market_state",
+                "public_trades": "trades",
+                "liquidations": "liquidations",
+                "partial_order_book": "books.partial",
+                "full_order_book": "books.full",
+            },
+            "readiness": {
+                "bars": self.query_engine.storage is not None,
+                "market_state": self.market_data_ready,
+                "public_trades": self.trade_flow_ready,
+                "liquidations": self.liquidation_ready,
+                "partial_order_book": self.order_book_ready,
+                "full_order_book": self.full_order_book_ready,
+            },
+            "coverage_contracts": {
+                "bars": {
+                    "history": "storage_bounds_plus_gap_ledger",
+                    "completeness": "interval_aligned_when_gap_ledger_is_clear",
+                },
+                "market_state": {
+                    "history": "channel_specific",
+                    "completeness": "provider_policy",
+                },
+                "public_trades": {
+                    "history": "memory_ring_plus_rollup_store",
+                    "raw_archive_coverage": "agg_trade_only_when_archive_enabled",
+                },
+                "liquidations": {
+                    "history": "memory_ring_plus_rollup_store",
+                    "completeness": "sampled_public_observations_not_guaranteed",
+                },
+                "partial_order_book": {
+                    "history": "unsupported",
+                    "completeness": "replaceable_top_n_live_snapshot",
+                },
+                "full_order_book": {
+                    "history": "unsupported",
+                    "completeness": "live_only_after_snapshot_and_contiguous_deltas",
+                },
+            },
+            "catalog": self.market_catalog.snapshot(),
+        }
+
     def snapshot(self) -> dict:
         """Full diagnostic snapshot of the Data Manager."""
         return {
@@ -2826,6 +2951,8 @@ class DataManager:
                 if self._full_order_book_service is not None
                 else {"status": "not_initialized"}
             ),
+            "market_catalog": self.market_catalog.snapshot(),
+            "market_data_control": self.market_data_control_snapshot(),
             "auto_gc": self.auto_gc_snapshot(),
             "memory_gc": self._memory_gc_last_report or {
                 "mode": "not-run",

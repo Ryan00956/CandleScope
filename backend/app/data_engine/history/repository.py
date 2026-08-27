@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import time
 from dataclasses import replace
@@ -18,6 +19,10 @@ from app.data_engine.history.models import (
     StoredHistoryBoundary,
     TimeBound,
 )
+from app.data_engine.storage.sqlite_runtime import open_sqlite
+
+
+logger = logging.getLogger("candlescope.storage.history_boundaries")
 
 
 def _now_ms() -> int:
@@ -38,15 +43,7 @@ class HistoryBoundaryRepository:
         self.init_storage()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(
-            str(self._db_path),
-            timeout=30,
-            check_same_thread=False,
-        )
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
-        return conn
+        return open_sqlite(self._db_path, logger=logger)
 
     def init_storage(self) -> None:
         with self._connect() as conn:

@@ -784,10 +784,11 @@ def test_startup_initializes_data_manager_before_catalog_schedule(monkeypatch) -
         return None
 
     monkeypatch.setattr(main_module, "EventLoopLagMonitor", lambda **kwargs: _LagMonitor())
-    monkeypatch.setattr(main_module, "init_klines_storage", lambda: None)
-    monkeypatch.setattr(main_module, "init_market_metrics_storage", lambda: None)
-    monkeypatch.setattr(main_module, "init_trade_flow_storage", lambda *args: None)
-    monkeypatch.setattr(main_module, "init_liquidation_storage", lambda *args: None)
+    monkeypatch.setattr(
+        main_module,
+        "initialize_market_storage",
+        lambda **_kwargs: SimpleNamespace(to_dict=lambda: {}),
+    )
     monkeypatch.setattr(main_module, "_init_replay_runtime", init_replay_runtime)
     monkeypatch.setattr(main_module, "_init_data_manager", init_data_manager)
     monkeypatch.setattr(main_module, "_schedule_symbol_catalog_refresh", schedule_catalog)

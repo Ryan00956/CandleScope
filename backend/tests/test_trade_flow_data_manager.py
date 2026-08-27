@@ -58,16 +58,16 @@ def test_data_manager_trade_flow_facade_preserves_sync_and_async_contracts() -> 
         key = _key()
 
         assert manager.trade_flow_ready is True
-        assert await manager.ensure_trade_flow_stream(
+        assert await manager.trades.ensure_stream(
             key,
             consumer_id="client",
         ) is True
         assert manager.trade_flow_recent(key, limit=10) == ["raw"]
-        assert await manager.trade_flow_history(key, limit=20) == ["rollup"]
+        assert await manager.trades.history(key, limit=20) == ["rollup"]
         assert manager.attach_trade_flow([key], recent_limit=5).subscription == (
             "subscription"
         )
-        assert await manager.trade_flow_archive_coverage(
+        assert await manager.trades.archive_coverage(
             key,
             expected_start_agg_trade_id=1,
         ) == {"enabled": False}

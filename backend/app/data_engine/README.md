@@ -1,6 +1,6 @@
 # Data Engine Architecture Overview
 
-> CandleScope backend market-data layer. The current backend is organized around a modular Data Engine: `ingestion` receives exchange data, `bar_aggregator` owns K-line lifecycle, `data_manager` is the public business facade, `backfill` repairs historical gaps, and `storage` persists K-lines in SQLite.
+> CandleScope backend market-data layer. The current backend is organized around a modular Data Engine: `ingestion` receives exchange data, `bar_aggregator` owns K-line lifecycle, `data_manager` is the public business facade, `backfill` repairs historical gaps, and `storage` preserves channel-specific persistence semantics.
 
 中文文档见 [README_zh.md](README_zh.md).
 
@@ -43,12 +43,38 @@ DataManager cache + EventBus
 |---|---|---|
 | `ingestion` | Exchange HTTP/WS I/O, WS lifecycle, HTTP fallback, payload normalization, deduplication, `GapMarker` output | Business K-line generation, storage writes, historical repair |
 | `bar_aggregator` | Bucket calculation, OHLCV merge, forming/closed lifecycle, custom interval aggregation, `BarEvent` publishing | Exchange connectivity, storage I/O, subscription management |
-| `data_manager` | Unified query/cache/event/stream/backfill coordination/price/subscription/maintenance facade | Exchange protocol details, hand-written backfill pipeline |
+| `data_manager` | Unified query/cache/event/stream/backfill coordination/price/subscription/maintenance facade plus MarketDataCatalog channel ownership and capability metadata | Exchange protocol details, hand-written backfill pipeline, or flattening unlike data into one generic query |
 | `backfill` | Historical detect/plan/fetch/reconcile/publish pipeline, `RepairReport`, `written_ranges` | API/WS management, direct DataManager cache mutation |
-| `storage` | SQLite K-line tables, gap ledger, sync/async adapters, range queries, gap scans | Business facade responsibilities |
+| `storage` | SQLite repositories for bars/metrics/rollups, raw trade archives, gap ledger, shared SQLite policy, and schema manifest | Business facade responsibilities or cross-backend atomicity |
 | `interval_policy.py` | Canonical interval identity and fixed/week/month timeline semantics | Exchange-native decisions, network, or storage access |
 | `interval_resolution.py` | Native/derived route and exact base selection by exchange, market, and history/realtime purpose | Bucket calculation or I/O |
 | `runtime.py` | Application composition root: construct, inject, start, and shut down Data Engine | Business query logic |
+
+## Unified Market-Data Boundary
+
+The control plane is unified; the physical stores are not:
+
+```text
+API / WS / Indicator / Replay preparation
+                    │
+              DataManager
+       stream / event / typed facade
+                    │
+             MarketDataCatalog
+      owner / access / storage role / health
+          │          │          │
+       bars       trades      order books
+    cache+SQLite  ring+rollup  process memory
+                  +archive     +reconstruction
+```
+
+- `market_data/ports.py` defines typed service ports while preserving channel-specific consistency and query semantics.
+- `market_data/catalog.py` publishes provider ownership, access modes, storage roles, and diagnostics; one channel has one owner.
+- `storage/sqlite_runtime.py` centralizes timeout, busy timeout, WAL fallback, row factory, and synchronous policy.
+- `storage/bootstrap.py` is the single startup entrypoint for market-storage schemas and records the `market_storage_schema` manifest.
+- Typed namespaces expose the supported semantics directly: `dm.bars`, `dm.market_state`, `dm.trades`, `dm.liquidations`, `dm.books.partial`, and `dm.books.full`. Existing flat methods remain compatibility wrappers.
+- `GET /api/v1/settings/storage/health` reports the catalog/control snapshot and startup storage manifest alongside gap/backfill health.
+- Replay, Backtest, immutable archives, and process-local order books retain separate physical boundaries.
 
 ## Composition Root
 
@@ -57,8 +83,11 @@ Production wiring is centralized in [runtime.py](runtime.py). `app/main.py` only
 ```text
 DataEngineRuntime
 ├── DataManager
+│   └── MarketDataCatalog
 ├── KlinesRepoAdapter / AsyncKlinesRepoAdapter
 ├── GapLedger
+├── MarketDataService / PublicTradeService / LiquidationService
+├── OrderBookService / FullOrderBookService
 ├── ExchangeIngestionFactory
 ├── TransportLayer(IngestionConfig)       # backfill REST transport
 ├── BackfillEngine
@@ -71,6 +100,7 @@ Stable app-state handles:
 
 - `app.state.data_engine_runtime`
 - `app.state.data_manager`
+- `app.state.market_storage_bootstrap`, the startup schema/provider storage manifest
 - `app.state.indicator_engine`, created by the Indicator bridge
 
 API modules should not hold internal objects such as `BackfillEngine`, `BarAggregator`, or `TransportLayer` directly. The architecture boundary tests enforce this.

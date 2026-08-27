@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -42,6 +43,7 @@ class ManualHistoryService:
         fetch_native: FetchNative | None = None,
         verify_range: VerifyRange | None = None,
         enabled: bool = False,
+        clock_ms: Callable[[], int] | None = None,
     ) -> None:
         self.repository = repository
         self.planner = planner or ManualHistoryPlanner()
@@ -51,10 +53,24 @@ class ManualHistoryService:
         self._fetch_native = fetch_native
         self._verify_range = verify_range or self.storage.verify_contiguous_range
         self.enabled = bool(enabled)
+        self._clock_ms = clock_ms
         self._disk_free_bytes: Callable[[], int | None] | None = None
         self._runner_task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
         self._active = asyncio.Lock()
+
+    def _now_ms(self) -> int:
+        if self._clock_ms is not None:
+            return int(self._clock_ms())
+        return int(time.time() * 1000)
+
+    def _seal_end_open_ms(self, interval: str, *, fallback: int) -> int:
+        from app.data_engine.interval_policy import last_closed_bar_open_ms
+
+        closed = last_closed_bar_open_ms(self._now_ms(), interval)
+        if closed is None:
+            return int(fallback)
+        return max(int(fallback), int(closed))
 
     def recover_jobs(self) -> tuple[Any, ...]:
         recovered = []
@@ -320,12 +336,13 @@ class ManualHistoryService:
             and item.source_interval == source_interval
         ]
         start_ms = min(item.effective_start_ms for item in matching)
-        end_ms = max(
+        planned_end = max(
             target.initial_end_open_ms
             for target in self.repository.list_job_targets(job.job_id)
             if target.symbol == sample_target.symbol
             and target.source_interval == source_interval
         )
+        end_ms = self._seal_end_open_ms(source_interval, fallback=int(planned_end))
         await self._fetch(
             exchange=collection.exchange,
             market_type=collection.market_type,
@@ -356,9 +373,13 @@ class ManualHistoryService:
         )
         from app.data_engine.interval_policy import parse_interval_ms
 
+        sealed_end = self._seal_end_open_ms(
+            target.canonical_interval,
+            fallback=int(target.initial_end_open_ms),
+        )
         target_width = parse_interval_ms(target.canonical_interval) or 0
         source_width = parse_interval_ms(target.source_interval) or 0
-        source_end_ms = int(target.initial_end_open_ms) + max(0, target_width - source_width)
+        source_end_ms = int(sealed_end) + max(0, target_width - source_width)
         components = query_klines(
             target.symbol,
             target.source_interval,
@@ -371,7 +392,7 @@ class ManualHistoryService:
             components,
             target_interval=target.canonical_interval,
             source_interval=target.source_interval,
-            now_ms=int(target.initial_end_open_ms) + 89 * 60_000,
+            now_ms=self._now_ms(),
         )
         if rebuilt:
             upsert_klines(
@@ -389,7 +410,6 @@ class ManualHistoryService:
             from_state=JobTargetState.MATERIALIZING,
             to_state=JobTargetState.VERIFYING,
         )
-        sealed_end = int(target.initial_end_open_ms)
         verification = self._verify_range(
             target.symbol,
             target.canonical_interval,
@@ -427,6 +447,12 @@ class ManualHistoryService:
             from_state=target.state,
             to_state=JobTargetState.FETCHING,
         )
+        from app.data_engine.interval_policy import parse_interval_ms
+
+        fetch_end = self._seal_end_open_ms(
+            target.canonical_interval,
+            fallback=int(target.initial_end_open_ms),
+        )
         await self._fetch(
             exchange=collection.exchange,
             market_type=collection.market_type,
@@ -435,7 +461,25 @@ class ManualHistoryService:
             target=target,
             collection=collection,
             job=job,
+            end_ms=fetch_end,
         )
+        sealed_end = self._seal_end_open_ms(
+            target.canonical_interval,
+            fallback=fetch_end,
+        )
+        if sealed_end > fetch_end:
+            step = parse_interval_ms(target.canonical_interval) or 1
+            await self._fetch(
+                exchange=collection.exchange,
+                market_type=collection.market_type,
+                symbol=target.symbol,
+                interval=target.canonical_interval,
+                target=target,
+                collection=collection,
+                job=job,
+                start_ms=fetch_end + step,
+                end_ms=sealed_end,
+            )
         self.repository.cas_job_target_state(
             job.job_id,
             target.symbol,
@@ -448,7 +492,6 @@ class ManualHistoryService:
             if item.symbol == target.symbol
             and item.canonical_interval == target.canonical_interval
         )
-        sealed_end = int(target.initial_end_open_ms)
         verification = self._verify_range(
             target.symbol,
             target.canonical_interval,
@@ -500,11 +543,17 @@ class ManualHistoryService:
             if resolved_start is None:
                 resolved_start = collection_target.effective_start_ms
             if resolved_end is None:
-                resolved_end = target.initial_end_open_ms
+                resolved_end = self._seal_end_open_ms(
+                    interval,
+                    fallback=int(target.initial_end_open_ms),
+                )
         if resolved_start is None:
             resolved_start = int(getattr(target, "initial_end_open_ms", 0))
         if resolved_end is None:
-            resolved_end = int(target.initial_end_open_ms)
+            resolved_end = self._seal_end_open_ms(
+                interval,
+                fallback=int(target.initial_end_open_ms),
+            )
         if self._fetch_native is not None:
             return int(
                 await self._fetch_native(

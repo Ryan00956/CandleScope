@@ -97,3 +97,99 @@ def test_create_remains_closed_after_plan_exists() -> None:
     )
     assert response.status_code == 403
     assert response.json()["detail"]["reason"] == "feature_flag_disabled"
+
+
+def test_create_uses_factory_runtime_service_not_hand_built(monkeypatch, tmp_path) -> None:
+    import inspect
+
+    from app.core import config as core_config
+    from app.data_engine.data_manager import DataManager
+    from app.data_engine.runtime import attach_manual_history_service, start_data_engine
+    from app.data_engine.storage import klines_repo
+    from app.data_engine.storage.klines_repo import KlinesRepoAdapter
+    from tests.test_manual_history_planner import FakeResolver, NOW_MS as PLAN_NOW
+
+    source = inspect.getsource(start_data_engine)
+    assert "attach_manual_history_service" in source
+    assert "manual_history_service=manual_history_service" in source
+
+    db_path = tmp_path / "klines.db"
+    monkeypatch.setattr(klines_repo, "KLINES_DB_PATH", db_path)
+    monkeypatch.setattr(core_config, "KLINES_DB_PATH", db_path)
+    monkeypatch.setattr(
+        "app.data_engine.runtime.KLINES_DB_PATH",
+        db_path,
+    )
+    monkeypatch.setattr(
+        "app.api.v1.manual_history.MANUAL_HISTORY_DOWNLOAD_ENABLED",
+        True,
+    )
+    monkeypatch.setattr(
+        "app.data_engine.runtime.MANUAL_HISTORY_DOWNLOAD_ENABLED",
+        True,
+    )
+    klines_repo.init_klines_storage()
+    dm = DataManager()
+    dm.set_storage(KlinesRepoAdapter())
+
+    class _Coordinator:
+        async def request_and_wait(self, request):
+            del request
+
+    service = attach_manual_history_service(
+        data_manager=dm,
+        coordinator=_Coordinator(),  # type: ignore[arg-type]
+        enabled=True,
+    )
+    assert service.coordinator is not None
+
+    def fake_build_planner(*, feature_enabled: bool):
+        from app.data_engine.manual_history.planner import ManualHistoryPlanner
+
+        return ManualHistoryPlanner(
+            resolver=FakeResolver(),
+            clock_ms=lambda: PLAN_NOW,
+            feature_enabled=feature_enabled,
+            normalize_symbol_fn=lambda symbol, **kw: str(symbol).strip().upper(),
+            disk_snapshot=lambda: {
+                "physical_size_bytes": 1_000,
+                "free_bytes": 50_000_000_000,
+            },
+            sqlite_budget_bytes=10_000_000_000,
+        )
+
+    monkeypatch.setattr("app.api.v1.manual_history._build_planner", fake_build_planner)
+    app = FastAPI()
+    app.include_router(manual_history_router, prefix="/api/v1")
+    runtime = type("Runtime", (), {})()
+    runtime.manual_history_service = service
+    runtime.data_manager = dm
+    app.state.data_engine_runtime = runtime
+    app.state.data_manager = dm
+    client = TestClient(app)
+    plan = client.post(
+        "/api/v1/settings/storage/manual-downloads/plan",
+        json={
+            "exchange": "binance",
+            "market_type": "spot",
+            "symbols": ["BTCUSDT"],
+            "intervals": ["1m"],
+            "start_ms": START_MS,
+        },
+    )
+    assert plan.status_code == 200
+    created = client.post(
+        "/api/v1/settings/storage/manual-downloads",
+        json={
+            "exchange": "binance",
+            "market_type": "spot",
+            "symbols": ["BTCUSDT"],
+            "intervals": ["1m"],
+            "start_ms": START_MS,
+            "plan_hash": plan.json()["plan_hash"],
+            "idempotency_key": "factory-runtime-create-1",
+        },
+    )
+    assert created.status_code == 200, created.text
+    assert created.json()["status"] == "accepted"
+    assert created.json()["job"]["state"] in {"QUEUED", "RUNNING", "SUCCEEDED"}

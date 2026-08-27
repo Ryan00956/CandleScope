@@ -1,9 +1,32 @@
 {
   "schema": "candlescope.manual-history.phase11-rollback.v1",
-  "git_commit": "a750b5c375c88b8d7c8bdeb489dc320c13d8c0da",
+  "git_commit": "3b8e1ad15be9da79cc812940d891fa7bb495ec58",
   "protection_aware_floor_commit": "ff0ec9fab77ed79d362a815ed3c7a1f052cb1ee6",
   "earliest_legal_backend_rollback": "ff0ec9fab77ed79d362a815ed3c7a1f052cb1ee6",
   "MANUAL_HISTORY_DOWNLOAD_ENABLED_default": 0,
+  "klines_db_path": "E:\\CacheVault\\Temp\\manual-history-phase11-0gron34y\\klines.db",
+  "production_db": false,
+  "job_state": "SUCCEEDED",
+  "sealed_before_flag_off": {
+    "verified_contiguous": true,
+    "actual_count": 5,
+    "expected_count": 5,
+    "expected_open_time": null
+  },
+  "floors_after_restart": 1,
+  "gc_deleted_rows": 20,
+  "sealed_after_gc_flag_off": {
+    "verified_contiguous": true,
+    "actual_count": 5,
+    "expected_count": 5,
+    "expected_open_time": null
+  },
+  "collections_readable_after_reenable": [
+    {
+      "collection_id": "col:298f9a59-a1da-432d-b752-4b0b2edd77ce",
+      "status": "BUILDING"
+    }
+  ],
   "flags": {
     "disable_manual_download": "stops new jobs; durable protections remain",
     "disable_history_archive": "ZIP off; REST continuity path remains",

@@ -76,6 +76,13 @@ def _setup(monkeypatch, tmp_path):
     return db_path, repo, dm
 
 
+def _service(repo, dm, **kwargs):
+    kwargs.setdefault("clock_ms", lambda: START + BARS * STEP)
+    kwargs.setdefault("enabled", True)
+    kwargs.setdefault("storage", KlinesRepoAdapter())
+    return ManualHistoryService(repository=repo, data_manager=dm, **kwargs)
+
+
 async def _write_range(*, start_ms: int, end_ms: int, skip: int | None = None, **_kwargs) -> int:
     rows = []
     open_time = start_ms
@@ -96,13 +103,10 @@ async def _write_range(*, start_ms: int, end_ms: int, skip: int | None = None, *
 @pytest.mark.anyio
 async def test_native_job_seals_when_range_is_contiguous(monkeypatch, tmp_path) -> None:
     db_path, repo, dm = _setup(monkeypatch, tmp_path)
-    service = ManualHistoryService(
-        repository=repo,
+    service = _service(
+        repo, dm,
         planner=ManualHistoryPlanner(resolver=FakeResolver()),
-        data_manager=dm,
-        storage=KlinesRepoAdapter(),
         fetch_native=_write_range,
-        enabled=True,
     )
     created = service.create_from_plan(_plan(), idempotency_key="k1")
     result = await service.run_job(created.job.job_id)
@@ -133,13 +137,7 @@ async def test_gap_prevents_ready(monkeypatch, tmp_path) -> None:
     async def write_with_gap(**kwargs) -> int:
         return await _write_range(skip=START + STEP, **kwargs)
 
-    service = ManualHistoryService(
-        repository=repo,
-        data_manager=dm,
-        storage=KlinesRepoAdapter(),
-        fetch_native=write_with_gap,
-        enabled=True,
-    )
+    service = _service(repo, dm, fetch_native=write_with_gap)
     created = service.create_from_plan(_plan(), idempotency_key="gap")
     result = await service.run_job(created.job.job_id)
     assert result.state.value == "FAILED"
@@ -150,13 +148,7 @@ async def test_gap_prevents_ready(monkeypatch, tmp_path) -> None:
 @pytest.mark.anyio
 async def test_duplicate_create_reuses_job(monkeypatch, tmp_path) -> None:
     _, repo, dm = _setup(monkeypatch, tmp_path)
-    service = ManualHistoryService(
-        repository=repo,
-        data_manager=dm,
-        storage=KlinesRepoAdapter(),
-        fetch_native=_write_range,
-        enabled=True,
-    )
+    service = _service(repo, dm, fetch_native=_write_range)
     first = service.create_from_plan(_plan(), idempotency_key="dup")
     second = service.create_from_plan(_plan(), idempotency_key="dup")
     assert second.reused_existing is True
@@ -166,13 +158,7 @@ async def test_duplicate_create_reuses_job(monkeypatch, tmp_path) -> None:
 @pytest.mark.anyio
 async def test_replay_does_not_corrupt_existing_contiguous_range(monkeypatch, tmp_path) -> None:
     _, repo, dm = _setup(monkeypatch, tmp_path)
-    service = ManualHistoryService(
-        repository=repo,
-        data_manager=dm,
-        storage=KlinesRepoAdapter(),
-        fetch_native=_write_range,
-        enabled=True,
-    )
+    service = _service(repo, dm, fetch_native=_write_range)
     created = service.create_from_plan(_plan(), idempotency_key="replay")
     await service.run_job(created.job.job_id)
     again = service.create_from_plan(_plan(), idempotency_key="replay-2")
@@ -201,10 +187,8 @@ async def test_native_fetch_marks_explicit_archive_demand(monkeypatch, tmp_path)
             captured.append(request)
 
     _, repo, dm = _setup(monkeypatch, tmp_path)
-    service = ManualHistoryService(
-        repository=repo,
-        data_manager=dm,
-        storage=KlinesRepoAdapter(),
+    service = _service(
+        repo, dm,
         coordinator=_Coordinator(),
         fetch_native=None,
         verify_range=lambda *args, **kwargs: {
@@ -291,13 +275,7 @@ async def test_shared_source_is_fetched_once_for_native_and_derived(monkeypatch,
         ],
         "storage": {},
     }
-    service = ManualHistoryService(
-        repository=repo,
-        data_manager=dm,
-        storage=KlinesRepoAdapter(),
-        fetch_native=write_counted,
-        enabled=True,
-    )
+    service = _service(repo, dm, fetch_native=write_counted)
     created = service.create_from_plan(plan, idempotency_key="shared-1m")
     result = await service.run_job(created.job.job_id)
     assert result.state.value in {"SUCCEEDED", "PARTIAL"}
@@ -309,13 +287,7 @@ async def test_shared_source_is_fetched_once_for_native_and_derived(monkeypatch,
 @pytest.mark.anyio
 async def test_cancel_queued_job_is_cancelled(monkeypatch, tmp_path) -> None:
     _, repo, dm = _setup(monkeypatch, tmp_path)
-    service = ManualHistoryService(
-        repository=repo,
-        data_manager=dm,
-        storage=KlinesRepoAdapter(),
-        fetch_native=_write_range,
-        enabled=True,
-    )
+    service = _service(repo, dm, fetch_native=_write_range)
     created = service.create_from_plan(_plan(), idempotency_key="cancel-q")
     cancelled = service.cancel_job(created.job.job_id)
     assert cancelled.state.value == "CANCELLED"
@@ -325,13 +297,7 @@ async def test_cancel_queued_job_is_cancelled(monkeypatch, tmp_path) -> None:
 @pytest.mark.anyio
 async def test_recover_running_job_requeues(monkeypatch, tmp_path) -> None:
     _, repo, dm = _setup(monkeypatch, tmp_path)
-    service = ManualHistoryService(
-        repository=repo,
-        data_manager=dm,
-        storage=KlinesRepoAdapter(),
-        fetch_native=_write_range,
-        enabled=True,
-    )
+    service = _service(repo, dm, fetch_native=_write_range)
     created = service.create_from_plan(_plan(), idempotency_key="recover-1")
     repo.cas_job_state(
         created.job.job_id,
@@ -347,13 +313,7 @@ async def test_recover_running_job_requeues(monkeypatch, tmp_path) -> None:
 @pytest.mark.anyio
 async def test_blocked_storage_when_disk_is_critical(monkeypatch, tmp_path) -> None:
     _, repo, dm = _setup(monkeypatch, tmp_path)
-    service = ManualHistoryService(
-        repository=repo,
-        data_manager=dm,
-        storage=KlinesRepoAdapter(),
-        fetch_native=_write_range,
-        enabled=True,
-    )
+    service = _service(repo, dm, fetch_native=_write_range)
     service._disk_free_bytes = lambda: 0
     created = service.create_from_plan(_plan(), idempotency_key="disk-0")
     result = await service.run_job(created.job.job_id)
@@ -363,13 +323,7 @@ async def test_blocked_storage_when_disk_is_critical(monkeypatch, tmp_path) -> N
 @pytest.mark.anyio
 async def test_feature_flag_off_keeps_durable_floor(monkeypatch, tmp_path) -> None:
     _, repo, dm = _setup(monkeypatch, tmp_path)
-    service = ManualHistoryService(
-        repository=repo,
-        data_manager=dm,
-        storage=KlinesRepoAdapter(),
-        fetch_native=_write_range,
-        enabled=True,
-    )
+    service = _service(repo, dm, fetch_native=_write_range)
     created = service.create_from_plan(_plan(), idempotency_key="flag-off-floor")
     await service.run_job(created.job.job_id)
     service.enabled = False
@@ -378,3 +332,40 @@ async def test_feature_flag_off_keeps_durable_floor(monkeypatch, tmp_path) -> No
     assert floors
     collections = repo.list_collections()
     assert collections[0].collection_id == created.collection.collection_id
+
+
+@pytest.mark.anyio
+async def test_seal_recomputes_last_closed_and_fills_tail(monkeypatch, tmp_path) -> None:
+    calls: list[tuple[int, int]] = []
+
+    async def write_counted(*, start_ms: int, end_ms: int, **kwargs) -> int:
+        calls.append((start_ms, end_ms))
+        return await _write_range(start_ms=start_ms, end_ms=end_ms, **kwargs)
+
+    _, repo, dm = _setup(monkeypatch, tmp_path)
+    ticks = {"n": 0}
+
+    def clock_ms() -> int:
+        ticks["n"] += 1
+        if ticks["n"] <= 1:
+            return START + BARS * STEP
+        return START + (BARS + 1) * STEP
+
+    extra_end = START + BARS * STEP
+    service = _service(repo, dm, fetch_native=write_counted, clock_ms=clock_ms)
+    created = service.create_from_plan(_plan(), idempotency_key="tail")
+    result = await service.run_job(created.job.job_id)
+    assert result.state.value == "SUCCEEDED"
+    assert calls[0] == (START, START + (BARS - 1) * STEP)
+    assert calls[-1] == (extra_end, extra_end)
+    target = repo.list_job_targets(created.job.job_id)[0]
+    assert target.sealed_end_open_ms == extra_end
+    verification = KlinesRepoAdapter().verify_contiguous_range(
+        "BTCUSDT",
+        "1m",
+        START,
+        extra_end,
+        exchange="binance",
+        market_type="spot",
+    )
+    assert verification["verified_contiguous"] is True

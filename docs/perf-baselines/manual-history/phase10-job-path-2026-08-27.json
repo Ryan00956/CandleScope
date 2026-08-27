@@ -1,0 +1,15 @@
+{
+  "schema": "candlescope.manual-history.phase10-job-path.v1",
+  "git_commit": "3b8e1ad15be9da79cc812940d891fa7bb495ec58",
+  "klines_db_path": "E:\\CacheVault\\Temp\\manual-history-job-path-mbb6z47y\\klines.db",
+  "production_db": false,
+  "job_state": "SUCCEEDED",
+  "coordinator_requests": 1,
+  "archive_explicit_demand": true,
+  "verify": {
+    "verified_contiguous": true,
+    "actual_count": 1620,
+    "expected_count": 1620,
+    "expected_open_time": null
+  }
+}

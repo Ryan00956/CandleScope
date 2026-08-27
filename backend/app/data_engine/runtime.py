@@ -12,6 +12,7 @@ from typing import Any
 from app.core.config import (
     BACKFILL_COORDINATOR_MAX_CONCURRENCY,
     KLINES_DB_PATH,
+    MANUAL_HISTORY_DOWNLOAD_ENABLED,
     KLINE_APP_MAX_ACTIVE_SERIES,
     FULL_ORDER_BOOK_DEFAULT_MAX_PENDING,
     FULL_ORDER_BOOK_MAX_BUFFERED_LEVEL_UPDATES,
@@ -308,6 +309,29 @@ class DataEngineRuntime:
             print(f"[shutdown] {name} shutdown timed out")
         except Exception as exc:
             print(f"[shutdown] {name} shutdown error: {exc}")
+
+
+def attach_manual_history_service(
+    *,
+    data_manager: DataManager,
+    coordinator: BackfillCoordinator,
+    enabled: bool | None = None,
+) -> Any:
+    """Construct the LIVE manual-history runner used by start_data_engine."""
+
+    from app.data_engine.manual_history.repository import ManualHistoryRepository
+    from app.data_engine.manual_history.service import ManualHistoryService
+    from app.data_engine.storage.klines_repo import KlinesRepoAdapter
+
+    if enabled is None:
+        enabled = bool(MANUAL_HISTORY_DOWNLOAD_ENABLED)
+    return ManualHistoryService(
+        repository=ManualHistoryRepository(KLINES_DB_PATH),
+        data_manager=data_manager,
+        coordinator=coordinator,
+        storage=KlinesRepoAdapter(),
+        enabled=enabled,
+    )
 
 
 def _build_trade_flow_service(
@@ -1010,6 +1034,13 @@ async def start_data_engine() -> DataEngineRuntime:
         gap_scan_task = _start_startup_gap_scan(dm, backfill_coordinator)
         gap_audit_task = _start_background_gap_audit(dm, backfill_coordinator)
 
+        manual_history_service = attach_manual_history_service(
+            data_manager=dm,
+            coordinator=backfill_coordinator,
+        )
+        await manual_history_service.start()
+        print("[startup] ManualHistoryService initialized [ok]")
+
         runtime = DataEngineRuntime(
             data_manager=dm,
             ingestion_factory=ingestion_factory,
@@ -1025,6 +1056,7 @@ async def start_data_engine() -> DataEngineRuntime:
             subscription_service=subscription_service,
             gap_scan_task=gap_scan_task,
             gap_audit_task=gap_audit_task,
+            manual_history_service=manual_history_service,
         )
         return runtime
     except Exception:

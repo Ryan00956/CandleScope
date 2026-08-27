@@ -1,4 +1,4 @@
-import { request } from "./api.js";
+import { request, type ApiRequestOptions } from "./api.js";
 import { API_BASE } from "./apiConfig.js";
 
 export interface ManualHistoryPlanRequest {
@@ -24,43 +24,62 @@ function toPayload(body: ManualHistoryPlanRequest): Record<string, unknown> {
   };
 }
 
+function optionalSignal(signal: AbortSignal | undefined): ApiRequestOptions {
+  return signal === undefined ? {} : { signal };
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value != null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
 export async function fetchManualHistoryCapabilities(signal?: AbortSignal): Promise<Record<string, unknown>> {
-  return request(`${API_BASE}/settings/storage/manual-downloads/capabilities`, { signal });
+  return asRecord(await request(
+    `${API_BASE}/settings/storage/manual-downloads/capabilities`,
+    optionalSignal(signal),
+  ));
 }
 
 export async function planManualHistoryDownload(
   body: ManualHistoryPlanRequest,
   signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
-  return request(`${API_BASE}/settings/storage/manual-downloads/plan`, {
+  return asRecord(await request(`${API_BASE}/settings/storage/manual-downloads/plan`, {
     method: "POST",
     body: JSON.stringify(toPayload(body)),
-    signal,
-  });
+    ...optionalSignal(signal),
+  }));
 }
 
 export async function createManualHistoryDownload(
   body: ManualHistoryCreateRequest,
   signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
-  return request(`${API_BASE}/settings/storage/manual-downloads`, {
+  return asRecord(await request(`${API_BASE}/settings/storage/manual-downloads`, {
     method: "POST",
     body: JSON.stringify({
       ...toPayload(body),
       plan_hash: body.planHash,
       idempotency_key: body.idempotencyKey,
     }),
-    signal,
-  });
+    ...optionalSignal(signal),
+  }));
 }
 
 export async function getManualHistoryJob(jobId: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
-  return request(`${API_BASE}/settings/storage/manual-downloads/${encodeURIComponent(jobId)}`, { signal });
+  return asRecord(await request(
+    `${API_BASE}/settings/storage/manual-downloads/${encodeURIComponent(jobId)}`,
+    optionalSignal(signal),
+  ));
 }
 
 export async function cancelManualHistoryJob(jobId: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
-  return request(`${API_BASE}/settings/storage/manual-downloads/${encodeURIComponent(jobId)}/cancel`, {
-    method: "POST",
-    signal,
-  });
+  return asRecord(await request(
+    `${API_BASE}/settings/storage/manual-downloads/${encodeURIComponent(jobId)}/cancel`,
+    {
+      method: "POST",
+      ...optionalSignal(signal),
+    },
+  ));
 }

@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { useLocale } from "../../i18n/useLocale.js";
 import {
   canStartDownload,
   createEmptyManualHistoryForm,
@@ -7,6 +8,7 @@ import {
   parentStateTone,
   type ManualHistoryFormState,
 } from "./manualHistoryForm.js";
+import { manualHistoryText } from "./manualHistoryCopy.js";
 import {
   createManualHistoryDownload,
   planManualHistoryDownload,
@@ -31,10 +33,13 @@ export function ManualHistoryDownloadPanel({
   const [plan, setPlan] = useState<Record<string, unknown> | null>(null);
   const [jobState, setJobState] = useState<string>("");
   const [error, setError] = useState<string>("");
+  const locale = useLocale();
 
   const startEnabled = enabled && isPlanFirstReady(form) && canStartDownload(plan);
   const tone = parentStateTone(jobState);
   const hasEnd = formHasEndTime(form);
+  const text = (key: Parameters<typeof manualHistoryText>[1], vars?: Readonly<Record<string, string>>) =>
+    manualHistoryText(locale, key, vars);
 
   const summary = useMemo(() => {
     const targetCount = form.symbols.length * form.intervals.length;
@@ -44,7 +49,7 @@ export function ManualHistoryDownloadPanel({
   async function onPlan() {
     setError("");
     if (form.startMs == null) {
-      setError("Start time is required.");
+      setError(text("startRequired"));
       return;
     }
     const next = await planManualHistoryDownload({
@@ -76,19 +81,19 @@ export function ManualHistoryDownloadPanel({
   if (!enabled) {
     return (
       <section data-testid="manual-history-download-disabled">
-        Manual history download is disabled.
+        {text("disabled")}
       </section>
     );
   }
 
   return (
     <section data-testid="manual-history-download-panel">
-      <h3>Manual continuous history</h3>
-      <p>Select symbols, intervals, and a start time. The system fills to the last closed bar at seal time.</p>
-      <p>Successful data joins the user dataset and is GC-protected.</p>
+      <h3>{text("title")}</h3>
+      <p>{text("hint")}</p>
+      <p>{text("protected")}</p>
       <p data-testid="manual-history-target-count">{summary}</p>
       <label>
-        Start time
+        {text("startTime")}
         <input
           data-testid="manual-history-start"
           type="datetime-local"
@@ -102,9 +107,9 @@ export function ManualHistoryDownloadPanel({
           }}
         />
       </label>
-      {hasEnd ? <p>Invalid form: end time is not allowed.</p> : null}
+      {hasEnd ? <p>{text("endNotAllowed")}</p> : null}
       <button type="button" data-testid="manual-history-plan" onClick={() => void onPlan()}>
-        Preview plan
+        {text("previewPlan")}
       </button>
       <button
         type="button"
@@ -112,7 +117,7 @@ export function ManualHistoryDownloadPanel({
         disabled={!startEnabled}
         onClick={() => void onStart()}
       >
-        Start download
+        {text("startDownload")}
       </button>
       {error ? <p data-testid="manual-history-error">{error}</p> : null}
       {plan ? (
@@ -120,7 +125,7 @@ export function ManualHistoryDownloadPanel({
       ) : null}
       {jobState ? (
         <p data-testid="manual-history-job-state" data-tone={tone}>
-          {tone === "success" ? "Download succeeded" : `Job ${jobState}`}
+          {tone === "success" ? text("succeeded") : text("jobState", { state: jobState })}
         </p>
       ) : null}
     </section>

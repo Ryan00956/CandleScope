@@ -754,3 +754,76 @@ def test_partial_closed_month_uses_monthly_only_above_rest_threshold() -> None:
         ("monthly", "2024-01"),
     ]
     assert _selected(1) == []
+
+
+def test_manual_history_explicit_demand_is_foreground_archive() -> None:
+    from app.data_engine.backfill.source_router import _is_foreground_archive_demand
+
+    explicit = BackfillTask(
+        symbol="BTCUSDT",
+        interval="1m",
+        start_ms=0,
+        end_ms=60_000,
+        metadata={
+            "requester": "manual_history_download",
+            "reason": "manual_history_download",
+            "archive_explicit_demand": True,
+        },
+    )
+    background = BackfillTask(
+        symbol="BTCUSDT",
+        interval="1m",
+        start_ms=0,
+        end_ms=60_000,
+        metadata={
+            "requester": "warm_start_custom_seed",
+            "reason": "background_prefetch",
+            "source": "background-prefetch",
+        },
+    )
+    assert _is_foreground_archive_demand(explicit) is True
+    assert _is_foreground_archive_demand(background) is False
+
+
+def test_history_archive_disabled_returns_empty_route(tmp_path) -> None:
+    config = _config(tmp_path)
+    config.history_archive_enabled = False
+    router = HistoricalSourceRouter(
+        config,
+        cache=HistoricalArchiveCache(
+            tmp_path,
+            max_bytes=config.history_archive_cache_max_bytes,
+        ),
+    )
+    task = _task(_january_ref(), 0, 1)
+    plan = asyncio.run(router.prepare([task]))
+    assert plan.refs_by_task == {}
+    assert plan.futures == {}
+
+
+def test_okx_archive_flag_off_skips_okx_tasks(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.data_engine.backfill.source_router.bootstrap_default_adapters",
+        lambda: None,
+    )
+    config = _config(tmp_path)
+    config.history_archive_okx_enabled = False
+    router = HistoricalSourceRouter(
+        config,
+        cache=HistoricalArchiveCache(
+            tmp_path,
+            max_bytes=config.history_archive_cache_max_bytes,
+        ),
+    )
+    task = BackfillTask(
+        symbol="BTC-USDT",
+        interval="1m",
+        start_ms=0,
+        end_ms=60_000,
+        exchange="okx",
+        market_type="spot",
+        metadata={"archive_explicit_demand": True},
+    )
+    plan = asyncio.run(router.prepare([task]))
+    assert plan.refs_by_task == {}
+

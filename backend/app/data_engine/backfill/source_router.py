@@ -860,10 +860,19 @@ def _is_foreground_archive_demand(task: BackfillTask) -> bool:
     source = str(metadata.get("source") or "").strip().lower()
     if source == "background-prefetch" or reason == "background_prefetch":
         return False
+    explicit = metadata.get("archive_explicit_demand")
+    if explicit in {True, 1, "1", "true", "True"}:
+        return True
     return (
-        requester in {"klines_history", "klines_range", "mixed"}
+        requester in {
+            "klines_history",
+            "klines_range",
+            "mixed",
+            "manual_history_download",
+        }
         or "initial_history" in reason
         or "visible_range_gap" in reason
+        or reason == "manual_history_download"
     )
 
 

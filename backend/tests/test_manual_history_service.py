@@ -189,3 +189,34 @@ async def test_replay_does_not_corrupt_existing_contiguous_range(monkeypatch, tm
         "BTCUSDT", "1m", exchange="binance", market_type="spot"
     )
     assert len(rows) == BARS
+
+
+@pytest.mark.anyio
+async def test_native_fetch_marks_explicit_archive_demand(monkeypatch, tmp_path) -> None:
+    captured: list[object] = []
+
+    class _Coordinator:
+        async def request_and_wait(self, request):
+            captured.append(request)
+
+    _, repo, dm = _setup(monkeypatch, tmp_path)
+    service = ManualHistoryService(
+        repository=repo,
+        data_manager=dm,
+        storage=KlinesRepoAdapter(),
+        coordinator=_Coordinator(),
+        fetch_native=None,
+        verify_range=lambda *args, **kwargs: {
+            "verified_contiguous": True,
+            "expected_count": BARS,
+            "actual_count": BARS,
+        },
+        enabled=True,
+    )
+    created = service.create_from_plan(_plan(), idempotency_key="explicit")
+    await service.run_job(created.job.job_id)
+    assert captured
+    request = captured[0]
+    assert request.reason == "manual_history_download"
+    assert request.metadata["archive_explicit_demand"] is True
+    assert request.metadata["requires_trusted_finality"] is True

@@ -362,7 +362,7 @@ export default function ExchangeSettingsPanel({
                     <div className="st-group-desc">{t("settings.exchange.desc")}</div>
                 </div>
                 <button
-                    className="st-advanced-toggle"
+                    className="st-exchange-refresh"
                     type="button"
                     onClick={onRefreshExchanges}
                     disabled={exchangeListLoading}
@@ -373,16 +373,31 @@ export default function ExchangeSettingsPanel({
 
             {exchangeCatalogSummary && (
                 <div className="st-exchange-summary">
-                    <div><span>{t("settings.exchange.kernelVersion")}</span><strong>CCXT {exchangeCatalogSummary.version}</strong></div>
-                    <div><span>{t("settings.exchange.adapterIds")}</span><strong>{exchangeCatalogSummary.rest_exchange_ids}</strong></div>
-                    <div><span>{t("settings.exchange.routable")}</span><strong>{routableCount}</strong></div>
-                    <div><span>{t("settings.exchange.proIds")}</span><strong>{exchangeCatalogSummary.pro_exchange_ids}</strong></div>
-                    <div><span>{t("settings.exchange.wsKline")}</span><strong>{streamCount}</strong></div>
+                    <div className="st-exchange-stat">
+                        <span>{t("settings.exchange.kernelVersion")}</span>
+                        <strong>CCXT {exchangeCatalogSummary.version}</strong>
+                    </div>
+                    <div className="st-exchange-stat">
+                        <span>{t("settings.exchange.adapterIds")}</span>
+                        <strong>{exchangeCatalogSummary.rest_exchange_ids}</strong>
+                    </div>
+                    <div className="st-exchange-stat">
+                        <span>{t("settings.exchange.routable")}</span>
+                        <strong>{routableCount}</strong>
+                    </div>
+                    <div className="st-exchange-stat">
+                        <span>{t("settings.exchange.proIds")}</span>
+                        <strong>{exchangeCatalogSummary.pro_exchange_ids}</strong>
+                    </div>
+                    <div className="st-exchange-stat">
+                        <span>{t("settings.exchange.wsKline")}</span>
+                        <strong>{streamCount}</strong>
+                    </div>
                 </div>
             )}
 
             <div className="st-exchange-toolbar">
-                <label>
+                <label className="st-exchange-search">
                     <span>{t("settings.exchange.search")}</span>
                     <input
                         value={search}
@@ -390,17 +405,19 @@ export default function ExchangeSettingsPanel({
                         placeholder={t("settings.exchange.searchPlaceholder")}
                     />
                 </label>
-                <label>
-                    <span>{t("settings.exchange.filter")}</span>
-                    <select
-                        value={filter}
-                        onChange={(event) => setFilter(event.target.value as ExchangeSupportFilter)}
-                    >
-                        {FILTERS.map((option) => (
-                            <option key={option.value} value={option.value}>{t(option.label)}</option>
-                        ))}
-                    </select>
-                </label>
+                <div className="st-exchange-filters" role="group" aria-label={t("settings.exchange.filter")}>
+                    {FILTERS.map((option) => (
+                        <button
+                            key={option.value}
+                            type="button"
+                            className={`st-exchange-filter${filter === option.value ? " active" : ""}`}
+                            aria-pressed={filter === option.value}
+                            onClick={() => setFilter(option.value)}
+                        >
+                            {t(option.label)}
+                        </button>
+                    ))}
+                </div>
             </div>
 
             {exchangeListError && (
@@ -428,24 +445,27 @@ export default function ExchangeSettingsPanel({
                     const qualifications = exchange.support?.qualifications
                         || (exchange.support?.qualification ? [exchange.support.qualification] : []);
                     return (
-                        <section key={exchange.exchange} className={`st-exchange-card ${isExpanded ? "expanded" : ""}`}>
+                        <section
+                            key={exchange.exchange}
+                            className={[
+                                "st-exchange-card",
+                                isExpanded ? "expanded" : "",
+                                isCurrent ? "current" : "",
+                                isRoutable ? "" : "unroutable",
+                            ].filter(Boolean).join(" ")}
+                        >
                             <button
                                 type="button"
                                 className="st-exchange-card-head"
                                 onClick={() => setExpandedExchange(isExpanded ? "" : exchange.exchange)}
                                 aria-expanded={isExpanded}
                             >
-                                <span className="st-exchange-disclosure" aria-hidden="true">{isExpanded ? "−" : "+"}</span>
+                                <span className="st-exchange-disclosure" aria-hidden="true">
+                                    <span className="st-exchange-chevron">▸</span>
+                                </span>
                                 <span className="st-exchange-identity">
                                     <strong>{exchange.name || exchange.exchange}</strong>
                                     <small>{exchange.exchange}</small>
-                                </span>
-                                <span className="st-exchange-row-markets">
-                                    {exchange.markets.map((market) => market.label || market.market_type).join(" / ")
-                                        || t("settings.exchange.noMarkets")}
-                                </span>
-                                <span className="st-exchange-row-capabilities">
-                                    {capabilitySummary(exchange) || t("settings.exchange.noChannels")}
                                 </span>
                                 <span className="st-exchange-row-badges">
                                     {isCurrent && <span className="st-series-badge st-badge-ok">{t("settings.exchange.current")}</span>}
@@ -461,6 +481,20 @@ export default function ExchangeSettingsPanel({
                                     {exchangeHasDerivatives(exchange) && (
                                         <span className="st-series-badge st-badge-info">{t("settings.exchange.derivatives")}</span>
                                     )}
+                                </span>
+                                <span className="st-exchange-row-meta">
+                                    <span className="st-exchange-row-markets">
+                                        {exchange.markets.length > 0
+                                            ? exchange.markets.map((market) => (
+                                                <span key={market.market_type} className="st-exchange-chip">
+                                                    {market.label || market.market_type}
+                                                </span>
+                                            ))
+                                            : <span className="st-exchange-chip muted">{t("settings.exchange.noMarkets")}</span>}
+                                    </span>
+                                    <span className="st-exchange-row-capabilities">
+                                        {capabilitySummary(exchange) || t("settings.exchange.noChannels")}
+                                    </span>
                                 </span>
                             </button>
 

@@ -35,8 +35,10 @@ import time
 from typing import Callable, Awaitable, Any
 
 from app.data_engine.interval_policy import (
+    aggregate_kline_rows,
     compute_bucket_close_ms,
     compute_bucket_start_ms,
+    parse_interval_ms,
 )
 from app.data_engine.kline_quality import source_rank
 from app.data_engine.custom_materialization import (
@@ -1101,6 +1103,52 @@ class Reconciler:
         if not bars:
             return []
 
+        if self._custom_aggregator is None:
+            source_interval = bars[0].interval
+            if parse_interval_ms(source_interval) is None:
+                inferred_source_ms = int(bars[0].close_time) - int(bars[0].open_time) + 1
+                if inferred_source_ms <= 0 or inferred_source_ms % 1_000:
+                    return []
+                source_interval = f"{inferred_source_ms // 1_000}s"
+            rebuilt = aggregate_kline_rows(
+                [bar.to_storage_dict() for bar in bars],
+                target_interval=custom_interval,
+                source_interval=source_interval,
+                now_ms=max(int(bar.close_time) for bar in bars) + 1,
+            )
+            result: list[FetchedBar] = []
+            for row in rebuilt:
+                enhanced_fields = frozenset(
+                    field
+                    for field in (
+                        "quote_volume",
+                        "trades",
+                        "taker_buy_base",
+                        "taker_buy_quote",
+                    )
+                    if row.get(field) is not None
+                )
+                result.append(FetchedBar(
+                    symbol=symbol,
+                    interval=custom_interval,
+                    open_time=int(row["open_time"]),
+                    close_time=int(row["close_time"]),
+                    open=float(row["open"]),
+                    high=float(row["high"]),
+                    low=float(row["low"]),
+                    close=float(row["close"]),
+                    volume=float(row["volume"]),
+                    exchange=bars[0].exchange,
+                    market_type=bars[0].market_type,
+                    quote_volume=float(row.get("quote_volume") or 0),
+                    trades=int(row.get("trades") or 0),
+                    taker_buy_base=float(row.get("taker_buy_base") or 0),
+                    taker_buy_quote=float(row.get("taker_buy_quote") or 0),
+                    source="backfill_aggregated",
+                    enhanced_fields=enhanced_fields,
+                ))
+            return result
+
         result: list[FetchedBar] = []
 
         # Assign each bar to a custom bucket
@@ -1137,16 +1185,10 @@ class Reconciler:
                 )
                 continue
 
-            if self._custom_aggregator is not None:
-                agg = self._custom_aggregator(
-                    bucket_bars, symbol, custom_interval,
-                    bucket_start, bucket_end,
-                )
-            else:
-                agg = self._default_aggregate(
-                    bucket_bars, symbol, custom_interval,
-                    bucket_start, bucket_end,
-                )
+            agg = self._custom_aggregator(
+                bucket_bars, symbol, custom_interval,
+                bucket_start, bucket_end,
+            )
             if agg is not None:
                 result.append(agg)
 

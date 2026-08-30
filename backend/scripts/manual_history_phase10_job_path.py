@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+from manual_history_evidence_identity import build_source_identity
+
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_ROOT = REPOSITORY_ROOT / "backend"
 if str(BACKEND_ROOT) not in sys.path:
@@ -218,6 +220,8 @@ async def main() -> int:
     seal_now = int(datetime(2024, 6, 2, 3, 0, tzinfo=timezone.utc).timestamp() * 1000)
     out_dir = REPOSITORY_ROOT / "docs" / "perf-baselines" / "manual-history"
     out_dir.mkdir(parents=True, exist_ok=True)
+    date_stamp = datetime.now(timezone.utc).date().isoformat()
+    source_identity = build_source_identity(REPOSITORY_ROOT)
 
     with tempfile.TemporaryDirectory(prefix="manual-history-job-path-", ignore_cleanup_errors=True) as tmp:
         tmp_path = Path(tmp)
@@ -303,9 +307,13 @@ async def main() -> int:
             payload = {
                 "schema": "candlescope.manual-history.phase10-job-path.v1",
                 "git_commit": _git_head(),
+                "source_identity": source_identity,
                 "klines_db_path": str(db_path.resolve()),
                 "production_db": False,
                 "job_state": job.state.value,
+                "collection_state": repo.get_collection(
+                    created.collection.collection_id
+                ).status.value,
                 "coordinator_requests": len(coordinator.requests),
                 "archive_explicit_demand": all(
                     (item.metadata or {}).get("archive_explicit_demand") is True
@@ -313,13 +321,17 @@ async def main() -> int:
                 ),
                 "verify": verify,
             }
-            path = out_dir / "phase10-job-path-2026-08-27.json"
+            path = out_dir / f"phase10-job-path-{date_stamp}.json"
             path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
             print(json.dumps(payload, indent=2, default=str))
             if verify.get("verified_contiguous") is not True:
                 raise SystemExit(f"job-path continuity failed: {verify}")
             if job.state.value not in {"SUCCEEDED", "PARTIAL"}:
                 raise SystemExit(f"job did not succeed: {job.state}")
+            if payload["collection_state"] != "ACTIVE":
+                raise SystemExit(
+                    f"completed collection is not ACTIVE: {payload['collection_state']}"
+                )
     return 0
 
 

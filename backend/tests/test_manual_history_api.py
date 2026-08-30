@@ -24,7 +24,8 @@ def test_plan_endpoint_is_read_only_and_expands_targets(monkeypatch) -> None:
         True,
     )
 
-    def fake_build_planner(*, feature_enabled: bool):
+    def fake_build_planner(*, feature_enabled: bool, request=None):
+        del request
         from app.data_engine.manual_history.planner import ManualHistoryPlanner
 
         return ManualHistoryPlanner(
@@ -84,7 +85,32 @@ def test_list_jobs_without_runtime_is_empty() -> None:
     assert response.json()["jobs"] == []
 
 
-def test_create_remains_closed_after_plan_exists() -> None:
+def test_create_is_closed_when_feature_flag_is_disabled(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.api.v1.manual_history.MANUAL_HISTORY_DOWNLOAD_ENABLED",
+        False,
+    )
+    response = _client().post(
+        "/api/v1/settings/storage/manual-downloads",
+        json={
+            "exchange": "binance",
+            "market_type": "spot",
+            "symbols": ["BTCUSDT"],
+            "intervals": ["1m"],
+            "start_ms": START_MS,
+            "plan_hash": "sha256:" + ("0" * 64),
+            "idempotency_key": "disabled-create",
+        },
+    )
+    assert response.status_code == 403
+    assert response.json()["detail"]["reason"] == "feature_flag_disabled"
+
+
+def test_disabled_create_rejects_before_request_schema_validation(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.api.v1.manual_history.MANUAL_HISTORY_DOWNLOAD_ENABLED",
+        False,
+    )
     response = _client().post(
         "/api/v1/settings/storage/manual-downloads",
         json={
@@ -143,7 +169,8 @@ def test_create_uses_factory_runtime_service_not_hand_built(monkeypatch, tmp_pat
     )
     assert service.coordinator is not None
 
-    def fake_build_planner(*, feature_enabled: bool):
+    def fake_build_planner(*, feature_enabled: bool, request=None):
+        del request
         from app.data_engine.manual_history.planner import ManualHistoryPlanner
 
         return ManualHistoryPlanner(
@@ -190,6 +217,21 @@ def test_create_uses_factory_runtime_service_not_hand_built(monkeypatch, tmp_pat
             "idempotency_key": "factory-runtime-create-1",
         },
     )
-    assert created.status_code == 200, created.text
+    assert created.status_code == 202, created.text
     assert created.json()["status"] == "accepted"
     assert created.json()["job"]["state"] in {"QUEUED", "RUNNING", "SUCCEEDED"}
+    repeated = client.post(
+        "/api/v1/settings/storage/manual-downloads",
+        json={
+            "exchange": "binance",
+            "market_type": "spot",
+            "symbols": ["BTCUSDT"],
+            "intervals": ["1m"],
+            "start_ms": START_MS,
+            "plan_hash": plan.json()["plan_hash"],
+            "idempotency_key": "factory-runtime-create-1",
+        },
+    )
+    assert repeated.status_code == 202
+    assert repeated.json()["reused_existing"] is True
+    assert repeated.json()["job"]["job_id"] == created.json()["job"]["job_id"]

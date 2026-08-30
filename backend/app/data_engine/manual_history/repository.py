@@ -534,7 +534,8 @@ class ManualHistoryRepository:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 row = conn.execute(
-                    "SELECT state, revision FROM manual_history_jobs WHERE job_id = ?",
+                    "SELECT state, revision, collection_id "
+                    "FROM manual_history_jobs WHERE job_id = ?",
                     (job_id,),
                 ).fetchone()
                 if row is None:
@@ -597,6 +598,30 @@ class ManualHistoryRepository:
                     "WHERE job_id = ?",
                     params,
                 )
+                if to_state in terminal:
+                    # Target sealing upgrades ownership. Close the parent
+                    # collection lifecycle in the same transaction as the
+                    # terminal job transition so restart readers never see a
+                    # completed job attached to a BUILDING collection.
+                    collection_status = (
+                        CollectionStatus.ACTIVE
+                        if to_state is JobState.SUCCEEDED
+                        else CollectionStatus.PARTIAL
+                    )
+                    conn.execute(
+                        """
+                        UPDATE manual_history_collections
+                        SET status = ?, revision = revision + 1,
+                            updated_at_ms = ?
+                        WHERE collection_id = ? AND status != ?
+                        """,
+                        (
+                            collection_status.value,
+                            now_ms,
+                            str(row["collection_id"]),
+                            CollectionStatus.RELEASED.value,
+                        ),
+                    )
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -698,6 +723,61 @@ class ManualHistoryRepository:
             if target.symbol == symbol and target.canonical_interval == canonical_interval
         ]
         return targets[0]
+
+    def set_job_target_backfill_request_id(
+        self,
+        job_id: str,
+        symbol: str,
+        canonical_interval: str,
+        request_id: str | None,
+    ) -> ManualHistoryJobTargetRecord:
+        """Persist the coordinator request currently owned by a target."""
+
+        now_ms = self._clock()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE manual_history_job_targets
+                SET backfill_request_id = ?, updated_at_ms = ?
+                WHERE job_id = ? AND symbol = ? AND canonical_interval = ?
+                """,
+                (request_id, now_ms, job_id, symbol, canonical_interval),
+            )
+            if cursor.rowcount != 1:
+                raise ManualHistoryNotFound(
+                    f"job target not found: {job_id} {symbol} {canonical_interval}"
+                )
+            conn.commit()
+        return next(
+            target
+            for target in self.list_job_targets(job_id)
+            if target.symbol == symbol
+            and target.canonical_interval == canonical_interval
+        )
+
+    def reset_recoverable_targets(self, job_id: str) -> tuple[ManualHistoryJobTargetRecord, ...]:
+        """Return interrupted non-terminal targets to an idempotent queue state."""
+
+        now_ms = self._clock()
+        recoverable = (
+            JobTargetState.FETCHING.value,
+            JobTargetState.MATERIALIZING.value,
+            JobTargetState.VERIFYING.value,
+            JobTargetState.BLOCKED_STORAGE.value,
+        )
+        placeholders = ",".join("?" for _ in recoverable)
+        with self._connect() as conn:
+            conn.execute(
+                f"""
+                UPDATE manual_history_job_targets
+                SET state = ?, backfill_request_id = NULL,
+                    last_error = NULL, updated_at_ms = ?
+                WHERE job_id = ? AND state IN ({placeholders})
+                """,
+                (JobTargetState.QUEUED.value, now_ms, job_id, *recoverable),
+            )
+            conn.commit()
+        return self.list_job_targets(job_id)
 
     def active_protection_snapshot(self) -> tuple[StorageProtectionFloor, ...]:
         with self._connect() as conn:
@@ -952,6 +1032,124 @@ class ManualHistoryRepository:
                 raise
         return self.get_collection(collection_id)
 
+    def finalize_job_cancellation(self, job_id: str) -> ManualHistoryJobRecord:
+        """Make non-ready work inert and release only the job's transient floors."""
+
+        now_ms = self._clock()
+        active_target_states = (
+            JobTargetState.QUEUED.value,
+            JobTargetState.FETCHING.value,
+            JobTargetState.MATERIALIZING.value,
+            JobTargetState.VERIFYING.value,
+            JobTargetState.BLOCKED_STORAGE.value,
+        )
+        placeholders = ",".join("?" for _ in active_target_states)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                job = conn.execute(
+                    "SELECT * FROM manual_history_jobs WHERE job_id = ?",
+                    (job_id,),
+                ).fetchone()
+                if job is None:
+                    raise ManualHistoryNotFound(f"job not found: {job_id}")
+                current = parse_enum(JobState, job["state"], field_name="job.state")
+                if current in {JobState.CANCELLED, JobState.PARTIAL}:
+                    conn.commit()
+                    return self._job_from_row(job)
+                if current is not JobState.CANCELLING:
+                    raise ManualHistoryIllegalTransition(
+                        entity="job-cancel-finalize",
+                        current=current.value,
+                        expected=JobState.CANCELLING.value,
+                        requested=JobState.CANCELLED.value,
+                    )
+                collection_id = str(job["collection_id"])
+                conn.execute(
+                    f"""
+                    UPDATE manual_history_job_targets
+                    SET state = ?, backfill_request_id = NULL,
+                        last_error = ?, updated_at_ms = ?
+                    WHERE job_id = ? AND state IN ({placeholders})
+                    """,
+                    (
+                        JobTargetState.CANCELLED.value,
+                        "cancelled",
+                        now_ms,
+                        job_id,
+                        *active_target_states,
+                    ),
+                )
+                conn.execute(
+                    """
+                    UPDATE manual_history_collection_targets
+                    SET status = ?, last_error = ?, updated_at_ms = ?
+                    WHERE collection_id = ? AND EXISTS (
+                        SELECT 1 FROM manual_history_job_targets target
+                        WHERE target.job_id = ?
+                          AND target.symbol = manual_history_collection_targets.symbol
+                          AND target.canonical_interval = manual_history_collection_targets.canonical_interval
+                          AND target.state = ?
+                    )
+                    """,
+                    (
+                        TargetStatus.FAILED.value,
+                        "cancelled",
+                        now_ms,
+                        collection_id,
+                        job_id,
+                        JobTargetState.CANCELLED.value,
+                    ),
+                )
+                ready_row = conn.execute(
+                    """
+                    SELECT COUNT(*) AS count FROM manual_history_job_targets
+                    WHERE job_id = ? AND state = ?
+                    """,
+                    (job_id, JobTargetState.READY.value),
+                ).fetchone()
+                ready = int(ready_row["count"] if ready_row is not None else 0)
+                final_state = JobState.PARTIAL if ready else JobState.CANCELLED
+                conn.execute(
+                    """
+                    UPDATE manual_history_jobs
+                    SET state = ?, stage = 'done', finished_at_ms = ?,
+                        updated_at_ms = ?, revision = revision + 1
+                    WHERE job_id = ?
+                    """,
+                    (final_state.value, now_ms, now_ms, job_id),
+                )
+                conn.execute(
+                    """
+                    UPDATE manual_history_collections
+                    SET status = ?, updated_at_ms = ?, revision = revision + 1
+                    WHERE collection_id = ?
+                    """,
+                    (CollectionStatus.PARTIAL.value, now_ms, collection_id),
+                )
+                conn.execute(
+                    """
+                    UPDATE manual_history_protections
+                    SET state = ?, released_at_ms = ?, updated_at_ms = ?
+                    WHERE owner_kind = ? AND owner_id = ?
+                      AND protection_kind = ? AND state = ?
+                    """,
+                    (
+                        ProtectionState.RELEASED.value,
+                        now_ms,
+                        now_ms,
+                        ProtectionOwnerKind.JOB.value,
+                        job_id,
+                        ProtectionKind.TRANSIENT.value,
+                        ProtectionState.ACTIVE.value,
+                    ),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return self.get_job(job_id)
+
     def increment_recovery_count(self, job_id: str) -> ManualHistoryJobRecord:
         now_ms = self._clock()
         with self._connect() as conn:
@@ -968,15 +1166,40 @@ class ManualHistoryRepository:
             conn.commit()
         return self.get_job(job_id)
 
-    def list_jobs(self, *, limit: int = 50) -> tuple[ManualHistoryJobRecord, ...]:
+    def list_jobs(
+        self,
+        *,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> tuple[ManualHistoryJobRecord, ...]:
         with self._connect() as conn:
+            params: list[object] = []
+            where = ""
+            if cursor:
+                cursor_row = conn.execute(
+                    "SELECT created_at_ms, job_id FROM manual_history_jobs WHERE job_id = ?",
+                    (cursor,),
+                ).fetchone()
+                if cursor_row is None:
+                    raise ManualHistoryNotFound(f"job cursor not found: {cursor}")
+                where = (
+                    "WHERE created_at_ms < ? "
+                    "OR (created_at_ms = ? AND job_id < ?)"
+                )
+                params.extend((
+                    int(cursor_row["created_at_ms"]),
+                    int(cursor_row["created_at_ms"]),
+                    str(cursor_row["job_id"]),
+                ))
+            params.append(max(1, min(int(limit), 200)))
             rows = conn.execute(
-                """
+                f"""
                 SELECT * FROM manual_history_jobs
+                {where}
                 ORDER BY created_at_ms DESC, job_id DESC
                 LIMIT ?
                 """,
-                (max(1, min(int(limit), 200)),),
+                params,
             ).fetchall()
         return tuple(self._job_from_row(row) for row in rows)
 

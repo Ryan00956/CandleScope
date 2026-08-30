@@ -16,6 +16,8 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+from manual_history_evidence_identity import build_source_identity
+
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_ROOT = REPOSITORY_ROOT / "backend"
 if str(BACKEND_ROOT) not in sys.path:
@@ -77,6 +79,7 @@ async def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     date_stamp = datetime.now(timezone.utc).date().isoformat()
     commit = _git_head()
+    source_identity = build_source_identity(REPOSITORY_ROOT)
 
     with tempfile.TemporaryDirectory(prefix="manual-history-phase11-", ignore_cleanup_errors=True) as tmp:
         db_path = Path(tmp) / "klines.db"
@@ -164,9 +167,10 @@ async def main() -> int:
         payload = {
             "schema": "candlescope.manual-history.phase11-rollback.v1",
             "git_commit": commit,
+            "source_identity": source_identity,
             "protection_aware_floor_commit": "ff0ec9fab77ed79d362a815ed3c7a1f052cb1ee6",
             "earliest_legal_backend_rollback": "ff0ec9fab77ed79d362a815ed3c7a1f052cb1ee6",
-            "MANUAL_HISTORY_DOWNLOAD_ENABLED_default": 0,
+            "MANUAL_HISTORY_DOWNLOAD_ENABLED_default": 1,
             "klines_db_path": str(db_path.resolve()),
             "production_db": False,
             "job_state": job.state.value,
@@ -184,8 +188,8 @@ async def main() -> int:
                 "schema": "forward-only; rollback must not DROP protection tables",
             },
             "enable_method": (
-                "set MANUAL_HISTORY_DOWNLOAD_ENABLED=1 in the process environment "
-                "and restart the LIVE backend"
+                "use the shipped default or set MANUAL_HISTORY_DOWNLOAD_ENABLED=1 "
+                "in the process environment, then restart the LIVE backend"
             ),
         }
         path = out_dir / f"phase11-rollback-{date_stamp}.json"
@@ -195,6 +199,8 @@ async def main() -> int:
             raise SystemExit("GC crossed protected floor after flag-off restart")
         if not collections:
             raise SystemExit("collections disappeared after flag-off restart")
+        if any(item.status.value != "ACTIVE" for item in collections):
+            raise SystemExit(f"completed collection is not ACTIVE after restart: {collections}")
     return 0
 
 

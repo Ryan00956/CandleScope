@@ -322,6 +322,19 @@ def attach_manual_history_service(
     from app.data_engine.manual_history.repository import ManualHistoryRepository
     from app.data_engine.manual_history.service import ManualHistoryService
     from app.data_engine.storage.klines_repo import KlinesRepoAdapter
+    from app.data_engine.data_manager.runtime_pressure import (
+        build_storage_watermarks,
+        disk_pressure_snapshot,
+        storage_file_snapshot,
+    )
+
+    def _storage_pressure() -> dict[str, Any]:
+        retention = data_manager.retention_snapshot()
+        return build_storage_watermarks(
+            storage_files=storage_file_snapshot(KLINES_DB_PATH),
+            disk=disk_pressure_snapshot(KLINES_DB_PATH),
+            sqlite_budget_bytes=retention.get("sqlite_budget_bytes"),
+        )
 
     if enabled is None:
         enabled = bool(MANUAL_HISTORY_DOWNLOAD_ENABLED)
@@ -331,6 +344,7 @@ def attach_manual_history_service(
         coordinator=coordinator,
         storage=KlinesRepoAdapter(),
         enabled=enabled,
+        storage_pressure=_storage_pressure,
     )
 
 

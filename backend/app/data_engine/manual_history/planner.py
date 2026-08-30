@@ -26,7 +26,6 @@ from app.data_engine.interval_resolution import (
     IntervalResolver,
     IntervalRouteKind,
 )
-from app.core.market import MarketType
 from app.exchanges.symbols import normalize_symbol
 
 PLANNER_VERSION = "manual-history.planner.v1"
@@ -126,10 +125,13 @@ class ManualHistoryPlanner:
         blocking: list[str] = []
         warnings: list[str] = []
         normalized_exchange = str(exchange or "").strip().lower() or "binance"
-        try:
-            normalized_market = MarketType.from_str(market_type).value
-        except Exception:
-            normalized_market = str(market_type or "spot").strip().lower() or "spot"
+        market_value = str(market_type or "spot").strip().lower()
+        if market_value in {"futures", "perpetual", "perp", "usdt-m"}:
+            normalized_market = "futures"
+        elif market_value in {"spot", ""}:
+            normalized_market = "spot"
+        else:
+            normalized_market = market_value
             blocking.append(PlanErrorCode.INVALID_SELECTION)
 
         normalized_symbols = self._normalize_symbols(
@@ -163,6 +165,20 @@ class ManualHistoryPlanner:
                     if target.error:
                         blocking.append(target.error)
                         continue
+                    target_width = parse_interval_ms(target.canonical_interval) or 0
+                    source_width = parse_interval_ms(target.source_interval) or target_width
+                    source_end_open_ms = int(target.initial_end_open_ms)
+                    if (
+                        target.route_kind == "DERIVED"
+                        and target_width > source_width > 0
+                    ):
+                        source_end_open_ms += target_width - source_width
+                    source_last_closed = last_closed_bar_open_ms(
+                        captured_at_ms,
+                        target.source_interval,
+                    )
+                    if source_last_closed is not None:
+                        source_end_open_ms = min(source_end_open_ms, source_last_closed)
                     demand_key = (
                         normalized_exchange,
                         normalized_market,
@@ -177,7 +193,7 @@ class ManualHistoryPlanner:
                             symbol=symbol,
                             source_interval=target.source_interval,
                             start_ms=target.effective_start_ms,
-                            end_open_ms=target.initial_end_open_ms,
+                            end_open_ms=source_end_open_ms,
                         )
                     else:
                         source_demands[demand_key] = SourceDemand(
@@ -186,12 +202,13 @@ class ManualHistoryPlanner:
                             symbol=existing.symbol,
                             source_interval=existing.source_interval,
                             start_ms=min(existing.start_ms, target.effective_start_ms),
-                            end_open_ms=max(existing.end_open_ms, target.initial_end_open_ms),
+                            end_open_ms=max(existing.end_open_ms, source_end_open_ms),
                         )
 
         unique_blocking = list(dict.fromkeys(blocking))
         storage = self._storage_estimate(
             targets=targets,
+            source_demands=tuple(source_demands.values()),
             captured_at_ms=captured_at_ms,
         )
         if storage.get("blocking_reasons"):
@@ -363,7 +380,16 @@ class ManualHistoryPlanner:
         if error is None and last_closed is not None and width_ms > 0:
             target_rows = max(0, ((last_closed - aligned) // width_ms) + 1)
             if source_width:
-                source_rows = max(0, ((last_closed - aligned) // source_width) + 1)
+                source_end = int(last_closed)
+                if route.kind is not IntervalRouteKind.NATIVE and width_ms > source_width:
+                    source_end += width_ms - source_width
+                source_last_closed = last_closed_bar_open_ms(
+                    captured_at_ms,
+                    route.source_interval,
+                )
+                if source_last_closed is not None:
+                    source_end = min(source_end, source_last_closed)
+                source_rows = max(0, ((source_end - aligned) // source_width) + 1)
         strategy = "REST"
         if error is None and self._archive_enabled and (source_rows or 0) >= REST_PAGE_BARS * ARCHIVE_MIN_REST_PAGES:
             strategy = "ARCHIVE_PREFERRED_WITH_REST_TAIL"
@@ -425,6 +451,7 @@ class ManualHistoryPlanner:
         self,
         *,
         targets: Sequence[PlannedTarget],
+        source_demands: Sequence[SourceDemand],
         captured_at_ms: int,
     ) -> dict[str, Any]:
         disk = self._disk_snapshot() if self._disk_snapshot is not None else {}
@@ -433,11 +460,19 @@ class ManualHistoryPlanner:
         bytes_per_row = self._measured_bytes_per_row
         row_sum = 0
         known = True
-        for target in targets:
-            if target.estimated_source_rows is None:
+        for demand in source_demands:
+            source_width = parse_interval_ms(demand.source_interval)
+            if source_width is None or source_width <= 0:
                 known = False
                 continue
-            row_sum += int(target.estimated_source_rows)
+            row_sum += max(0, ((demand.end_open_ms - demand.start_ms) // source_width) + 1)
+        for target in targets:
+            if target.route_kind != "DERIVED":
+                continue
+            if target.estimated_target_rows is None:
+                known = False
+                continue
+            row_sum += int(target.estimated_target_rows)
         if bytes_per_row is None or bytes_per_row <= 0:
             growth = None
             confidence = "LOW"

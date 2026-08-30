@@ -101,7 +101,141 @@ export default function DataWorkbenchStyles() {
 .dw-series-name small { color: var(--text-muted, #64748b); font-size: 10px; }
 .dw-mono { color: #bfdbfe; font-family: var(--font-mono, 'JetBrains Mono', monospace); }
 
+.dw-manual {
+  --dw-ink: var(--text-primary, #f1f5f9);
+  --dw-label: var(--text-secondary, #cbd5e1);
+  --dw-subtle: var(--text-muted, #94a3b8);
+  --dw-card-bg: var(--bg-secondary, #1e293b);
+  --dw-card-border: var(--border-color, #334155);
+  --dw-inset-bg: var(--bg-tertiary, #1a2332);
+  --dw-filter-bg: rgba(30, 64, 175, 0.08);
+  --dw-ok: #34d399;
+  --dw-warn: #fbbf24;
+  --dw-fail: #f87171;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 14px;
+  margin: 0 0 14px;
+  padding: 18px;
+  border: 1px solid color-mix(in srgb, var(--accent-blue, #3b82f6) 38%, var(--dw-card-border));
+  border-radius: 12px;
+  background: linear-gradient(145deg, var(--dw-filter-bg), var(--dw-card-bg));
+}
+
+.dw-manual > h3,
+.dw-manual > p,
+.dw-manual > fieldset,
+.dw-manual > [data-testid='manual-history-plan-summary'],
+.dw-manual > [data-testid='manual-history-polling'],
+.dw-manual > [data-testid='manual-history-error'],
+.dw-manual > [data-testid='manual-history-recent-jobs'],
+.dw-manual > [data-testid='manual-history-collections'],
+.dw-manual > div:has([data-testid='manual-history-job-state']) {
+  grid-column: 1 / -1;
+}
+
+.dw-manual > h3 {
+  margin: 0;
+  color: var(--dw-ink);
+  font-size: 16px;
+}
+
+.dw-manual > p {
+  margin: 0;
+  color: var(--dw-subtle);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.dw-manual > label {
+  display: grid;
+  gap: 7px;
+  color: var(--dw-label);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.dw-manual textarea,
+.dw-manual input:not([type='checkbox']),
+.dw-manual select {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--dw-card-border);
+  border-radius: 8px;
+  background: var(--dw-inset-bg);
+  color: var(--dw-ink);
+  font: inherit;
+  padding: 8px 10px;
+}
+
+.dw-manual textarea {
+  min-height: 68px;
+  resize: vertical;
+}
+
+.dw-manual fieldset {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px 12px;
+  margin: 0;
+  padding: 10px 12px 12px;
+  border: 1px solid var(--dw-card-border);
+  border-radius: 9px;
+  color: var(--dw-label);
+}
+
+.dw-manual fieldset label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+}
+
+.dw-manual h4 {
+  margin: 0 0 8px;
+  color: var(--dw-ink);
+  font-size: 13px;
+}
+
+.dw-manual ul {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dw-manual li {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--dw-inset-bg);
+  color: var(--dw-label);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.dw-manual [data-tone='success'] { color: var(--dw-ok); }
+.dw-manual [data-tone='warning'] { color: var(--dw-warn); }
+.dw-manual [data-tone='danger'],
+.dw-manual [data-testid='manual-history-error'] { color: var(--dw-fail); }
+
+.dw-manual-release {
+  width: auto;
+  margin-left: 10px;
+  padding: 5px 8px;
+  font-size: 11px;
+}
+
+.dw-manual-disabled {
+  display: block;
+  color: var(--dw-subtle);
+  font-size: 12px;
+}
+
+
 @media (max-width: 780px) {
+  .dw-manual { grid-template-columns: 1fr; }
+  .dw-manual > * { grid-column: 1; }
   .dw-overlay { padding: 10px; }
   .dw-panel { width: 100%; height: 94vh; }
   .dw-header, .dw-body { padding-left: 16px; padding-right: 16px; }

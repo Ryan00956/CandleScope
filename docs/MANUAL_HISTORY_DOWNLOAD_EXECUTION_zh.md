@@ -1,10 +1,40 @@
 # 数据工作台手动连续历史下载执行文档
 
-状态：设计冻结，尚未实现。
+状态：已实现并默认启用；Phase 10/11 功能、真实来源、GC 重启、回滚与回归证据已完成。显式设置 `MANUAL_HISTORY_DOWNLOAD_ENABLED=0` 可立即关闭新建任务入口，既有持久 GC 保护继续生效。
 
 目标：在“设置 → 数据工作台”中交付一个可恢复、可审计的手动历史数据下载功能。用户只选择交易所/市场、多个商品、多个周期和一个开始时间；系统自动补全到任务封口时的最后一根已收盘 K 线。大范围历史优先使用交易所官方 ZIP 归档，小范围、归档尾部和失败区间使用 REST。自定义周期由可精确平铺的交易所原生基础周期合成。只有经过精确连续性验证的目标才能标记完成并获得持久化 GC 保护。
 
 本文是执行合同，不是方向性建议。每个 Phase 都有明确修改范围、测试、退出门禁和回滚要求。后续实施不得跳过 Phase 2 的 GC 所有权基础直接开放下载入口。
+
+### 2026-08-30 最终完成与启用记录
+
+用户在全部验收门禁完成后明确批准把默认开关从 `0` 提升为 `1` 并形成提交。该决定只改变新任务入口的默认可用性，不改变保护感知 GC、连续性封存或回滚底线；此前文档中的“默认关闭发布”描述保留为已经完成的上线阶段记录，不再代表当前默认配置。
+
+当前实现已经具备：多商品/多周期选择、自定义周期服务端路由与合成、唯一开始时间、自动补齐到封口时最后一根已收盘 K 线、官方归档显式需求与 REST 尾部、可恢复 Job、物理工作 inert 后取消、`BLOCKED_STORAGE` 自动恢复、精确连续性封存、transient/durable GC 所有权、集合保护释放但不删除 K 线、任务/集合刷新恢复和计划摘要。
+
+本次收口额外关闭了以下实现缺口：
+
+- Planner 使用真实 SQLite 预算和活动 reservation，去除 `data_engine -> core.market` 架构越界，并按共享 source demand 估算空间。
+- collection create/seal/release 与保护镜像更新统一进入 DataManager GC guard；提交后镜像读取失败时按 fail-closed 方式保留或补强保护线。
+- 活跃取消先持久化 `CANCELLING` 并撤销 Backfill demand owner，物理写入返回后才原子取消未完成 target、释放 transient protection。
+- 存储压力接入 LIVE runtime 水位；`BLOCKED_STORAGE` 在压力恢复后重置中断 target 并重新排队。
+- 自定义周期封存前重验基础周期尾部；物化查询固定 5,000 行分页并跨页携带未完成 bucket；Backfill 和手动历史共用 `aggregate_kline_rows` 聚合核心。
+- create 返回 `202`，严格校验 plan hash/idempotency key，支持幂等重放、Job 游标、集合 target 明细和 release-not-delete。
+- 数据工作台支持 exchange/market、商品与周期多选、自定义周期 token、结构化计划、任务恢复、目标封存结果、历史集合及移除 GC 保护。
+- Job 进入终态时在同一事务中关闭 collection 生命周期：`SUCCEEDED -> ACTIVE`，其它终态保持 `PARTIAL`；重启后不再出现成功 Job 对应 `BUILDING` collection。
+- 关闭门禁作为 FastAPI route dependency 先于请求体校验执行；回滚时即使旧客户端缺少新版 plan hash/idempotency 字段，仍稳定返回 `403 feature_flag_disabled`，不会误报 `422`。
+
+最终验证结果：
+
+- 功能相关后端矩阵（含 settings API、archive routing、GC、runtime、planner、repository/service）`154 passed`；Python 编译检查通过。
+- 后端全量为 `4056 passed, 3 failed, 1 error, 5 warnings`。其中两个 settings API 失败属于本功能，已修复；修复后受影响矩阵 `34 passed`，扩大后的功能矩阵仍为 `154 passed`。剩余一个 fail 和一个 fixture error 是同一个既有插件 Phase 6 冻结合同哈希漂移，已作为仓库基线保留。
+- 前端全量应用测试 `3522 passed`，桌面测试 `35 passed`；插件架构、i18n、双 TypeScript 工程和生产构建通过。启用提交前再次验证本功能 9 项定向测试、双 TypeScript 工程和生产构建均通过。
+- 默认值提升为 `1` 后，扩大的后端功能矩阵（settings、manual history、archive、interval policy、架构边界）为 `171 passed`。
+- 前端仓库仍有两个与本功能无关的基线：`ExchangeSettingsPanel.tsx` 的 component-to-service 架构越界，以及未改动 `IndicatorPanel.tsx` 的未使用 `useEffect` lint；没有为伪造全绿而修改它们。
+- 真实受控矩阵使用临时 `KLINES_DB_PATH`：Binance REST、官方 ZIP 与 checksum、ZIP 404/错误校验回退、完整 Job→Coordinator→Fetcher 的 ZIP+REST 尾部、自定义 45m/89m、多商品、GC、重启、取消、存储阻塞和恢复均通过。
+- Phase 11 回滚演练通过：关闭 manual feature 后重启仍加载 durable floor；GC 删除 20 行无保护前缀，受保护 5 行保持精确连续；重新启用后 collection 可读且为 `ACTIVE`。
+
+证据记录本功能发布范围的工作树内容指纹，而不只记录 HEAD；因此当前验证可复核，同时不会把无关的混合工作树改动计入本功能发行身份。`MANUAL_HISTORY_DOWNLOAD_ENABLED` 当前代码默认值为 `1`；运维回滚仍可显式设为 `0` 并重启。任何版本都不得回滚到 protection-aware baseline 之前。
 
 ---
 
@@ -127,15 +157,15 @@ storage.verify_contiguous_range(
 | GC 计划/执行 | `backend/app/data_engine/data_manager/retention.py`、`backend/app/data_engine/data_manager/auto_gc.py`、`backend/app/data_engine/data_manager/maintenance.py` | 增加时间保护下限，并在每个删除 batch 前重验 |
 | 临时 StorageIntent | `backend/app/data_engine/data_manager/storage_intents.py` | 继续服务运行时工作流，但不能承担用户持久所有权 |
 
-当前已知阻塞：
+设计阶段阻塞及关闭结果：
 
-1. `StorageIntentRegistry` 只在内存中，进程重启后丢失。
-2. `RetentionService.run_startup_db_cleanup()` 直接调用 `delete_oldest()`，绕过 StorageIntent、活跃序列和未来的用户所有权。
-3. GC 只理解 `keep_rows`，不能准确表达用户选择的时间起点。
-4. `BackfillCoordinator` 的持久 outcome 不是长期 Job Store，不能单独承担跨进程任务恢复。
-5. 多个自定义目标分别提交时可能重复发起相同基础周期网络抓取，需要显式源需求合并。
+1. 已关闭：新增 SQLite 持久化 transient/durable protection，启动时 fail-closed 重载，不依赖进程内 `StorageIntentRegistry` 承担用户所有权。
+2. 已关闭：startup、auto、manual GC 和 row-limit 删除都进入统一 protection-aware floor 与 GC guard。
+3. 已关闭：GC 使用每序列 `protected_start_ms` 时间下限，并在删除 batch 前重验。
+4. 已关闭：`ManualHistoryRepository` 持久化 Job/target/CAS/recovery/cancel 状态，Backfill outcome 只承担物理工作结果。
+5. 已关闭：Job runner 按 `(symbol, source_interval)` 合并 source demand，45m/89m 共用一次 1m 抓取并共享聚合核心。
 
-在这些阻塞关闭前，`MANUAL_HISTORY_DOWNLOAD_ENABLED` 必须保持关闭。
+以上阻塞已经由自动测试和 Phase 10/11 受控证据关闭；在用户批准后，功能已从受控启用提升为默认启用。
 
 ---
 
@@ -1220,6 +1250,8 @@ docs/perf-baselines/manual-history/
   phase10-capacity-<date>.json
   phase10-gc-restart-<date>.json
   phase10-archive-rest-parity-<date>.json
+  phase10-job-path-<date>.json
+  phase10-regression-<date>.json
 ```
 
 证据至少记录：commit、feature flags、DB path 是否临时、目标矩阵、每个目标 effective/sealed range、verified result、source route、网络请求数、写入行数、物理字节、GC before/after、重启结果。
@@ -1236,21 +1268,25 @@ npm run check
 
 如果仓库已有与本功能无关的已知失败，必须分别记录 baseline 与新增回归；不能把失败静默忽略，也不能修改无关测试来伪造全绿。
 
-退出门禁：所有不可变合同均有自动测试和至少一次受控真实链路证据。
+2026-08-30 已生成并通过上述六类证据。真实网络证据和 synthetic 故障注入分开记录；所有物理数据库路径均为临时目录，`production_db=false`。
+
+退出门禁：所有不可变合同均有自动测试和至少一次受控真实链路证据。已满足。
 
 建议提交：`manual-history phase10: add release evidence and acceptance gates`
 
-### Phase 11：默认关闭发布与回滚演练
+### Phase 11：受控发布、默认启用与回滚演练
 
 目标：先发布保护感知代码，再开放写入功能。
 
-发布顺序：
+原始受控发布顺序（已完成）：
 
 1. 发布 Phase 2 保护感知 GC，manual feature 仍关闭。
 2. 验证现有 inventory/GC/backfill 无回归。
 3. 发布完整后端和前端，manual feature 仍关闭。
 4. 在受控环境设置 `MANUAL_HISTORY_DOWNLOAD_ENABLED=1` 做 Phase 10。
 5. 通过后才在正式本地配置启用。
+
+2026-08-30 启用决策：上述门禁和回滚演练通过后，用户明确批准将代码默认值提升为 `1`。若要暂停新任务，运维显式设置 `MANUAL_HISTORY_DOWNLOAD_ENABLED=0` 并重启；此操作不得清除 durable protection。
 
 回滚合同：
 
@@ -1269,7 +1305,15 @@ npm run check
 4. 验证 collection range 仍精确连续。
 5. 重新启用，确认历史 job/collection 可读取。
 
-退出门禁：默认关闭包、启用包和回滚演练都有证据；不存在“回滚后 GC 不认识用户数据”的路径。
+证据输出：
+
+```text
+docs/perf-baselines/manual-history/
+  phase11-rollback-<date>.json
+  phase11-release-manifest-<date>.json
+```
+
+退出门禁：受控启用链路和 flag-off 回滚演练都有证据；不存在“回滚后 GC 不认识用户数据”的路径。已满足。代码默认值已按用户批准提升为 `1`，release manifest 同步记录启用配置与回滚方法。
 
 建议提交：`manual-history phase11: freeze guarded release and rollback baseline`
 
@@ -1347,23 +1391,23 @@ manual_history_gc_blocked_bytes
 
 只有同时满足以下条件才可把文档状态改为“已实现”：
 
-- [ ] 用户可多选商品和周期，只输入开始时间。
-- [ ] 公开 API 不接受用户结束时间。
-- [ ] 每个目标显示 effective start 和明确 sealed end。
-- [ ] 原生周期、可精确合成的自定义周期均可完成。
-- [ ] 多个自定义目标共享基础周期网络下载。
-- [ ] 大范围 Binance 历史使用官方 ZIP；小范围/尾部/失败回退 REST。
-- [ ] ZIP 与 REST 路径最终使用相同精确连续性门禁。
-- [ ] Job 可取消、可跨进程恢复、状态诚实。
-- [ ] READY 只在 `verify_contiguous_range is True` 后出现。
-- [ ] transient protection 在数据写入前生效并持久化。
-- [ ] durable protection 跨重启有效。
-- [ ] startup cleanup、auto GC、manual GC、row limits 均不能越过 protected floor。
-- [ ] 预算无法满足时报告 blocking owners，不删除用户数据。
-- [ ] release protection 不等于物理删除。
-- [ ] 数据工作台库存仍保持只读查询语义。
-- [ ] targeted backend/frontend tests、全量回归、真实 archive/REST、GC restart、rollback drill 都有证据。
-- [ ] 正式回滚目标不早于 protection-aware baseline。
+- [x] 用户可多选商品和周期，只输入开始时间。
+- [x] 公开 API 不接受用户结束时间。
+- [x] 每个目标显示 effective start 和明确 sealed end。
+- [x] 原生周期、可精确合成的自定义周期均可完成。
+- [x] 多个自定义目标共享基础周期网络下载。
+- [x] 大范围 Binance 历史使用官方 ZIP；小范围/尾部/失败回退 REST。
+- [x] ZIP 与 REST 路径最终使用相同精确连续性门禁。
+- [x] Job 可取消、可跨进程恢复、状态诚实。
+- [x] READY 只在 `verify_contiguous_range is True` 后出现。
+- [x] transient protection 在数据写入前生效并持久化。
+- [x] durable protection 跨重启有效。
+- [x] startup cleanup、auto GC、manual GC、row limits 均不能越过 protected floor。
+- [x] 预算无法满足时报告 blocking owners，不删除用户数据。
+- [x] release protection 不等于物理删除。
+- [x] 数据工作台库存仍保持只读查询语义。
+- [x] targeted backend/frontend tests、全量回归、真实 archive/REST、GC restart、rollback drill 都有证据。
+- [x] 正式回滚目标不早于 protection-aware baseline。
 
 ---
 

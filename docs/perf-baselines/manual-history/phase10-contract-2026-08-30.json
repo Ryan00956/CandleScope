@@ -1,0 +1,393 @@
+{
+  "schema": "candlescope.manual-history.phase10-contract.v1",
+  "git_commit": "ca5bab8a94d83bf7838eafb8fd5123f72ef502d4",
+  "source_identity": {
+    "git_commit": "ca5bab8a94d83bf7838eafb8fd5123f72ef502d4",
+    "worktree_dirty": true,
+    "worktree_sha256": "99af7c9b6785a1e5c7205dbd93a58934438f1c8a5ed9af43c8afc94e81463d0b",
+    "worktree_files": [
+      "backend/app/api/v1/manual_history.py",
+      "backend/app/core/config.py",
+      "backend/app/data_engine/backfill/reconciler.py",
+      "backend/app/data_engine/data_manager/manager.py",
+      "backend/app/data_engine/manual_history/planner.py",
+      "backend/app/data_engine/manual_history/protection.py",
+      "backend/app/data_engine/manual_history/repository.py",
+      "backend/app/data_engine/manual_history/service.py",
+      "backend/app/data_engine/runtime.py",
+      "backend/scripts/manual_history_evidence_identity.py",
+      "backend/scripts/manual_history_phase10_evidence.py",
+      "backend/scripts/manual_history_phase10_job_path.py",
+      "backend/scripts/manual_history_phase11_rollback_drill.py",
+      "backend/tests/test_manual_history_api.py",
+      "backend/tests/test_manual_history_gc_protection.py",
+      "backend/tests/test_manual_history_repository.py",
+      "backend/tests/test_manual_history_service.py",
+      "backend/tests/test_settings_api.py",
+      "docs/MANUAL_HISTORY_DOWNLOAD_EXECUTION_zh.md",
+      "frontend/src/features/data-workbench/ManualHistoryDownloadPanel.tsx",
+      "frontend/src/features/data-workbench/manualHistoryCopy.ts",
+      "frontend/src/features/data-workbench/manualHistoryForm.test.ts",
+      "frontend/src/features/data-workbench/manualHistoryForm.ts",
+      "frontend/src/services/manualHistoryApi.ts"
+    ],
+    "generated_evidence_excluded": "docs/perf-baselines/manual-history/",
+    "release_scope": [
+      "backend/app/api/v1/manual_history.py",
+      "backend/app/core/config.py",
+      "backend/app/data_engine/backfill/reconciler.py",
+      "backend/app/data_engine/data_manager/manager.py",
+      "backend/app/data_engine/manual_history/**",
+      "backend/app/data_engine/runtime.py",
+      "backend/scripts/manual_history_*.py",
+      "backend/tests/test_manual_history_*.py",
+      "backend/tests/test_settings_api.py",
+      "docs/MANUAL_HISTORY_DOWNLOAD_EXECUTION_zh.md",
+      "frontend/src/features/data-workbench/ManualHistoryDownloadPanel.tsx",
+      "frontend/src/features/data-workbench/manualHistory*.ts",
+      "frontend/src/services/manualHistoryApi.ts"
+    ]
+  },
+  "recorded_at": "2026-08-30T02:45:31.785968+00:00",
+  "MANUAL_HISTORY_DOWNLOAD_ENABLED": 1,
+  "HISTORY_ARCHIVE_ENABLED": 1,
+  "klines_db_path": "E:\\CacheVault\\Temp\\manual-history-phase10-b9noj43b\\klines.db",
+  "production_db": false,
+  "completed_collection_states": {
+    "col:018eb16a-edc1-400f-a450-00261d4b7024": "ACTIVE",
+    "col:9ffadbbf-16ed-4e3a-aec5-09f23a6198a1": "ACTIVE",
+    "col:3a1d04cd-bdae-4ffb-9c63-e3dee17e8b86": "ACTIVE"
+  },
+  "targets": [
+    {
+      "symbol": "BTCUSDT",
+      "interval": "1m",
+      "effective_start_ms": 1788057660000,
+      "sealed_end_open_ms": 1788057900000,
+      "verified_contiguous": true,
+      "actual_count": 5,
+      "expected_count": 5,
+      "expected_open_time": null,
+      "error": null,
+      "source_route": "REST",
+      "matrix": "rest_only"
+    },
+    {
+      "symbol": "BTCUSDT",
+      "interval": "1m",
+      "effective_start_ms": 1717200000000,
+      "sealed_end_open_ms": 1717286340000,
+      "verified_contiguous": true,
+      "actual_count": 1440,
+      "expected_count": 1440,
+      "expected_open_time": null,
+      "error": null,
+      "source_route": "ZIP",
+      "matrix": "archive_plus_rest_tail"
+    },
+    {
+      "symbol": "BTCUSDT",
+      "interval": "1m",
+      "effective_start_ms": 1788057660000,
+      "sealed_end_open_ms": 1788057900000,
+      "verified_contiguous": true,
+      "actual_count": 5,
+      "expected_count": 5,
+      "expected_open_time": null,
+      "error": null,
+      "source_route": "REST",
+      "matrix": "archive_plus_rest_tail"
+    },
+    {
+      "symbol": "BTCUSDT",
+      "interval": "1m",
+      "effective_start_ms": 1788027960000,
+      "sealed_end_open_ms": 1788057900000,
+      "verified_contiguous": true,
+      "actual_count": 500,
+      "expected_count": 500,
+      "expected_open_time": null,
+      "error": null,
+      "source_route": "REST",
+      "matrix": "custom_1h_45m_89m"
+    },
+    {
+      "symbol": "BTCUSDT",
+      "interval": "1h",
+      "effective_start_ms": 1788030000000,
+      "sealed_end_open_ms": 1788055200000,
+      "verified_contiguous": true,
+      "actual_count": 8,
+      "expected_count": 8,
+      "expected_open_time": null,
+      "error": null,
+      "source_route": "REST",
+      "matrix": "custom_1h_45m_89m"
+    },
+    {
+      "symbol": "BTCUSDT",
+      "interval": "45m",
+      "effective_start_ms": 1788029100000,
+      "sealed_end_open_ms": 1788053400000,
+      "verified_contiguous": true,
+      "actual_count": 10,
+      "expected_count": 10,
+      "expected_open_time": null,
+      "error": null,
+      "source_route": "REST",
+      "matrix": "custom_1h_45m_89m"
+    },
+    {
+      "symbol": "BTCUSDT",
+      "interval": "89m",
+      "effective_start_ms": 1788029580000,
+      "sealed_end_open_ms": 1788050940000,
+      "verified_contiguous": true,
+      "actual_count": 5,
+      "expected_count": 5,
+      "expected_open_time": null,
+      "error": null,
+      "source_route": "REST",
+      "matrix": "custom_1h_45m_89m"
+    },
+    {
+      "symbol": "BTCUSDT",
+      "interval": "1m",
+      "effective_start_ms": 1788057660000,
+      "sealed_end_open_ms": 1788057900000,
+      "verified_contiguous": true,
+      "actual_count": 5,
+      "expected_count": 5,
+      "expected_open_time": null,
+      "error": null,
+      "source_route": "REST",
+      "matrix": "multi_symbol"
+    },
+    {
+      "symbol": "ETHUSDT",
+      "interval": "1m",
+      "effective_start_ms": 1788057660000,
+      "sealed_end_open_ms": 1788057900000,
+      "verified_contiguous": true,
+      "actual_count": 5,
+      "expected_count": 5,
+      "expected_open_time": null,
+      "error": null,
+      "source_route": "REST",
+      "matrix": "multi_symbol"
+    },
+    {
+      "symbol": "SOLUSDT",
+      "interval": "1m",
+      "effective_start_ms": 1788057660000,
+      "sealed_end_open_ms": 1788057900000,
+      "verified_contiguous": true,
+      "actual_count": 5,
+      "expected_count": 5,
+      "expected_open_time": null,
+      "error": null,
+      "source_route": "REST",
+      "matrix": "multi_symbol"
+    },
+    {
+      "symbol": "BTCUSDT",
+      "interval": "1m",
+      "effective_start_ms": 1788057660000,
+      "sealed_end_open_ms": 1788057900000,
+      "verified_contiguous": true,
+      "actual_count": 5,
+      "expected_count": 5,
+      "expected_open_time": null,
+      "error": null,
+      "source_route": "REST",
+      "matrix": "gc_floor"
+    },
+    {
+      "symbol": "BTCUSDT",
+      "interval": "1m",
+      "effective_start_ms": 1788057660000,
+      "sealed_end_open_ms": 1788057900000,
+      "verified_contiguous": true,
+      "actual_count": 5,
+      "expected_count": 5,
+      "expected_open_time": null,
+      "error": null,
+      "source_route": "REST",
+      "matrix": "restart_gc"
+    }
+  ],
+  "matrix": {
+    "rest_only": {
+      "job_state": "SUCCEEDED",
+      "targets": [
+        {
+          "symbol": "BTCUSDT",
+          "interval": "1m",
+          "effective_start_ms": 1788057660000,
+          "sealed_end_open_ms": 1788057900000,
+          "verified_contiguous": true,
+          "actual_count": 5,
+          "expected_count": 5,
+          "expected_open_time": null,
+          "error": null
+        }
+      ],
+      "source_route": "REST",
+      "request_count": 1,
+      "rows": 5
+    },
+    "archive_plus_rest_tail": {
+      "archive": {
+        "symbol": "BTCUSDT",
+        "interval": "1m",
+        "effective_start_ms": 1717200000000,
+        "sealed_end_open_ms": 1717286340000,
+        "verified_contiguous": true,
+        "actual_count": 1440,
+        "expected_count": 1440,
+        "expected_open_time": null,
+        "error": null,
+        "source_route": "ZIP",
+        "rows": 1440
+      },
+      "rest_tail": {
+        "symbol": "BTCUSDT",
+        "interval": "1m",
+        "effective_start_ms": 1788057660000,
+        "sealed_end_open_ms": 1788057900000,
+        "verified_contiguous": true,
+        "actual_count": 5,
+        "expected_count": 5,
+        "expected_open_time": null,
+        "error": null,
+        "source_route": "REST",
+        "rows": 5
+      }
+    },
+    "custom_1h_45m_89m": {
+      "job_state": "SUCCEEDED",
+      "source_demand_calls": [
+        [
+          "BTCUSDT",
+          "1h"
+        ],
+        [
+          "BTCUSDT",
+          "1m"
+        ]
+      ],
+      "one_m_source_fetches": 1,
+      "one_h_source_fetches": 1,
+      "targets": [
+        {
+          "symbol": "BTCUSDT",
+          "interval": "1m",
+          "effective_start_ms": 1788027960000,
+          "sealed_end_open_ms": 1788057900000,
+          "verified_contiguous": true,
+          "actual_count": 500,
+          "expected_count": 500,
+          "expected_open_time": null,
+          "error": null
+        },
+        {
+          "symbol": "BTCUSDT",
+          "interval": "1h",
+          "effective_start_ms": 1788030000000,
+          "sealed_end_open_ms": 1788055200000,
+          "verified_contiguous": true,
+          "actual_count": 8,
+          "expected_count": 8,
+          "expected_open_time": null,
+          "error": null
+        },
+        {
+          "symbol": "BTCUSDT",
+          "interval": "45m",
+          "effective_start_ms": 1788029100000,
+          "sealed_end_open_ms": 1788053400000,
+          "verified_contiguous": true,
+          "actual_count": 10,
+          "expected_count": 10,
+          "expected_open_time": null,
+          "error": null
+        },
+        {
+          "symbol": "BTCUSDT",
+          "interval": "89m",
+          "effective_start_ms": 1788029580000,
+          "sealed_end_open_ms": 1788050940000,
+          "verified_contiguous": true,
+          "actual_count": 5,
+          "expected_count": 5,
+          "expected_open_time": null,
+          "error": null
+        }
+      ]
+    },
+    "multi_symbol": {
+      "job_state": "SUCCEEDED",
+      "targets": [
+        {
+          "symbol": "BTCUSDT",
+          "interval": "1m",
+          "effective_start_ms": 1788057660000,
+          "sealed_end_open_ms": 1788057900000,
+          "verified_contiguous": true,
+          "actual_count": 5,
+          "expected_count": 5,
+          "expected_open_time": null,
+          "error": null
+        },
+        {
+          "symbol": "ETHUSDT",
+          "interval": "1m",
+          "effective_start_ms": 1788057660000,
+          "sealed_end_open_ms": 1788057900000,
+          "verified_contiguous": true,
+          "actual_count": 5,
+          "expected_count": 5,
+          "expected_open_time": null,
+          "error": null
+        },
+        {
+          "symbol": "SOLUSDT",
+          "interval": "1m",
+          "effective_start_ms": 1788057660000,
+          "sealed_end_open_ms": 1788057900000,
+          "verified_contiguous": true,
+          "actual_count": 5,
+          "expected_count": 5,
+          "expected_open_time": null,
+          "error": null
+        }
+      ]
+    },
+    "zip_fallback": {
+      "status": "completed",
+      "priming_status": "completed",
+      "bars_count": 3,
+      "archive_downloads": 1,
+      "rest_requests": 2,
+      "rest_fallback_ranges": 1,
+      "archive_errors": [
+        "binance-public-kline-v1:binance:spot:BTCUSDT:1m:monthly:2024-01: archive download returned HTTP 404"
+      ],
+      "checksum_rejected": true,
+      "completed": true
+    },
+    "cancel": {
+      "state": "CANCELLED"
+    },
+    "blocked_storage": {
+      "state": "BLOCKED_STORAGE"
+    },
+    "recovery": [
+      {
+        "job_id": "job:4d36ae82-69a3-4f89-b5a0-002df1473569",
+        "state": "BLOCKED_STORAGE",
+        "recovery_count": 0
+      }
+    ]
+  }
+}

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from app.core import config as core_config
 from app.data_engine.data_manager import DataManager
-from app.data_engine.manual_history.models import JobState
+from app.data_engine.manual_history.models import CollectionStatus, JobState
 from app.data_engine.manual_history.planner import ManualHistoryPlanner
 from app.data_engine.manual_history.repository import ManualHistoryRepository
 from app.data_engine.manual_history.service import ManualHistoryService
@@ -111,6 +113,7 @@ async def test_native_job_seals_when_range_is_contiguous(monkeypatch, tmp_path) 
     created = service.create_from_plan(_plan(), idempotency_key="k1")
     result = await service.run_job(created.job.job_id)
     assert result.state.value == "SUCCEEDED"
+    assert repo.get_collection(created.collection.collection_id).status is CollectionStatus.ACTIVE
     target = repo.list_job_targets(created.job.job_id)[0]
     assert target.state.value == "READY"
     verification = KlinesRepoAdapter().verify_contiguous_range(
@@ -141,6 +144,7 @@ async def test_gap_prevents_ready(monkeypatch, tmp_path) -> None:
     created = service.create_from_plan(_plan(), idempotency_key="gap")
     result = await service.run_job(created.job.job_id)
     assert result.state.value == "FAILED"
+    assert repo.get_collection(created.collection.collection_id).status is CollectionStatus.PARTIAL
     assert repo.list_job_targets(created.job.job_id)[0].state.value == "FAILED"
     assert repo.active_protection_snapshot()[0].durable_owner_count == 0
 
@@ -289,9 +293,34 @@ async def test_cancel_queued_job_is_cancelled(monkeypatch, tmp_path) -> None:
     _, repo, dm = _setup(monkeypatch, tmp_path)
     service = _service(repo, dm, fetch_native=_write_range)
     created = service.create_from_plan(_plan(), idempotency_key="cancel-q")
-    cancelled = service.cancel_job(created.job.job_id)
+    cancelled = await service.cancel_job(created.job.job_id)
     assert cancelled.state.value == "CANCELLED"
     assert repo.list_job_targets(created.job.job_id)[0].state.value == "CANCELLED"
+    assert repo.active_protection_snapshot() == ()
+
+
+@pytest.mark.anyio
+async def test_cancel_active_job_waits_for_physical_fetch_to_be_inert(monkeypatch, tmp_path) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def held_fetch(**_kwargs) -> int:
+        started.set()
+        await release.wait()
+        return 0
+
+    _, repo, dm = _setup(monkeypatch, tmp_path)
+    service = _service(repo, dm, fetch_native=held_fetch)
+    created = service.create_from_plan(_plan(), idempotency_key="cancel-active")
+    running = asyncio.create_task(service.run_job(created.job.job_id))
+    await started.wait()
+    cancelling = await service.cancel_job(created.job.job_id)
+    assert cancelling.state.value == "CANCELLING"
+    assert repo.list_job_targets(created.job.job_id)[0].state.value == "FETCHING"
+    release.set()
+    cancelled = await running
+    assert cancelled.state.value == "CANCELLED"
+    assert repo.active_protection_snapshot() == ()
 
 
 @pytest.mark.anyio
@@ -318,6 +347,100 @@ async def test_blocked_storage_when_disk_is_critical(monkeypatch, tmp_path) -> N
     created = service.create_from_plan(_plan(), idempotency_key="disk-0")
     result = await service.run_job(created.job.job_id)
     assert result.state.value == "BLOCKED_STORAGE"
+
+
+@pytest.mark.anyio
+async def test_blocked_storage_requeues_after_pressure_recovers(monkeypatch, tmp_path) -> None:
+    _, repo, dm = _setup(monkeypatch, tmp_path)
+    pressure = {"level": "critical", "disk_free_critical": False}
+    service = _service(
+        repo,
+        dm,
+        fetch_native=_write_range,
+        storage_pressure=lambda: pressure,
+    )
+    created = service.create_from_plan(_plan(), idempotency_key="disk-recover")
+    blocked = await service.run_job(created.job.job_id)
+    assert blocked.state.value == "BLOCKED_STORAGE"
+    pressure["level"] = "normal"
+    recovered = service.recover_jobs()
+    assert recovered[0].state.value == "QUEUED"
+    assert repo.list_job_targets(created.job.job_id)[0].state.value == "QUEUED"
+    completed = await service.run_job(created.job.job_id)
+    assert completed.state.value == "SUCCEEDED"
+
+
+@pytest.mark.anyio
+async def test_derived_materialization_reads_source_in_bounded_pages(monkeypatch, tmp_path) -> None:
+    aligned = (START // (2 * STEP)) * (2 * STEP)
+    source_rows = 6_000
+    final_source_open = aligned + (source_rows - 1) * STEP
+    final_target_open = aligned + (source_rows - 2) * STEP
+
+    async def write_source(*, symbol: str, interval: str, start_ms: int, end_ms: int, **_kwargs) -> int:
+        return klines_repo.upsert_klines(
+            symbol,
+            interval,
+            [_row(open_time) for open_time in range(start_ms, end_ms + 1, STEP)],
+            source="binance",
+            exchange="binance",
+            market_type="spot",
+        )
+
+    _, repo, dm = _setup(monkeypatch, tmp_path)
+    original_query = klines_repo.query_klines
+    limits: list[int | None] = []
+
+    def recording_query(*args, **kwargs):
+        limits.append(kwargs.get("limit"))
+        return original_query(*args, **kwargs)
+
+    monkeypatch.setattr(klines_repo, "query_klines", recording_query)
+    plan = {
+        "can_start": True,
+        "plan_hash": "sha256:paged-derived",
+        "selection": {
+            "exchange": "binance",
+            "market_type": "spot",
+            "symbols": ["BTCUSDT"],
+            "intervals": ["2m"],
+            "requested_start_ms": aligned,
+            "target_count": 1,
+        },
+        "targets": [{
+            "symbol": "BTCUSDT",
+            "requested_interval": "2m",
+            "canonical_interval": "2m",
+            "route_kind": "DERIVED",
+            "source_interval": "1m",
+            "effective_start_ms": aligned,
+            "initial_end_open_ms": final_target_open,
+            "source_strategy": "REST",
+            "estimated_target_rows": source_rows // 2,
+            "estimated_source_rows": source_rows,
+            "existing_coverage": "NONE",
+            "error": None,
+            "boundary_reason": None,
+        }],
+        "storage": {},
+    }
+    service = _service(
+        repo,
+        dm,
+        fetch_native=write_source,
+        clock_ms=lambda: final_source_open + STEP,
+    )
+    created = service.create_from_plan(plan, idempotency_key="paged-derived")
+    completed = await service.run_job(created.job.job_id)
+    assert completed.state.value == "SUCCEEDED"
+    assert limits.count(5_000) >= 2
+    derived_rows = original_query(
+        "BTCUSDT",
+        "2m",
+        exchange="binance",
+        market_type="spot",
+    )
+    assert len(derived_rows) == source_rows // 2
 
 
 @pytest.mark.anyio

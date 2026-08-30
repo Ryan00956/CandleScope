@@ -1,0 +1,74 @@
+{
+  "schema": "candlescope.manual-history.phase11-release-manifest.v1",
+  "recorded_at": "2026-08-30T02:45:41.8821041Z",
+  "status": "ENABLED_RELEASE_CANDIDATE_PASS",
+  "source_identity": {
+    "git_commit": "ca5bab8a94d83bf7838eafb8fd5123f72ef502d4",
+    "worktree_dirty": true,
+    "worktree_sha256": "99af7c9b6785a1e5c7205dbd93a58934438f1c8a5ed9af43c8afc94e81463d0b",
+    "formal_release_commit": null,
+    "binding": "parent git_commit plus scoped worktree_sha256 identifies the exact pre-commit release source",
+    "clean_commit_binding_required_before_persistent_enablement": false
+  },
+  "enabled_package": {
+    "MANUAL_HISTORY_DOWNLOAD_ENABLED": 1,
+    "config_source": "backend/app/core/config.py",
+    "capabilities_readable": true,
+    "write_endpoints_available_when_runtime_ready": true,
+    "flag_off_write_endpoints_fail_closed": "403 feature_flag_disabled",
+    "durable_protections_loaded_while_disabled": true
+  },
+  "controlled_enablement": {
+    "MANUAL_HISTORY_DOWNLOAD_ENABLED": 1,
+    "HISTORY_ARCHIVE_ENABLED": 1,
+    "production_db": false,
+    "result": "PASS",
+    "persistent_local_config_changed": true,
+    "enable_method": "use the shipped default or set MANUAL_HISTORY_DOWNLOAD_ENABLED=1 in the LIVE backend process environment, then restart"
+  },
+  "evidence": [
+    "phase10-contract-2026-08-30.json",
+    "phase10-capacity-2026-08-30.json",
+    "phase10-gc-restart-2026-08-30.json",
+    "phase10-archive-rest-parity-2026-08-30.json",
+    "phase10-job-path-2026-08-30.json",
+    "phase10-regression-2026-08-30.json",
+    "phase11-rollback-2026-08-30.json"
+  ],
+  "gates": {
+    "product_contract": "PASS",
+    "real_binance_rest": "PASS",
+    "real_binance_zip_and_checksum": "PASS",
+    "archive_rest_tail_job_path": "PASS",
+    "archive_failure_rest_fallback": "PASS",
+    "custom_interval_materialization": "PASS",
+    "multi_symbol_source_demand": "PASS",
+    "exact_continuity": "PASS",
+    "gc_floor": "PASS",
+    "restart_gc": "PASS",
+    "cancel_storage_block_and_recovery": "PASS",
+    "flag_off_rollback": "PASS",
+    "manual_history_regression": "PASS",
+    "repository_full_regression": "PASS_WITH_DOCUMENTED_UNRELATED_BASELINES"
+  },
+  "rollback": {
+    "protection_aware_floor_commit": "ff0ec9fab77ed79d362a815ed3c7a1f052cb1ee6",
+    "earliest_legal_backend_rollback": "ff0ec9fab77ed79d362a815ed3c7a1f052cb1ee6",
+    "disable_manual_download": "stop new jobs; preserve durable protections",
+    "disable_history_archive": "disable ZIP acceleration; retain REST correctness path",
+    "frontend_rollback": "retain read-only inventory workbench",
+    "schema_policy": "forward-only; do not DROP manual history or protection tables",
+    "drill_result": "PASS"
+  },
+  "known_unrelated_repository_baselines": [
+    "plugin Phase 6 frozen contract hash drift",
+    "ExchangeSettingsPanel component-to-service architecture violation",
+    "IndicatorPanel unused useEffect lint"
+  ],
+  "release_instructions": [
+    "Commit only the intended manual-history release scope.",
+    "Ship MANUAL_HISTORY_DOWNLOAD_ENABLED=1 as the code default.",
+    "Set MANUAL_HISTORY_DOWNLOAD_ENABLED=0 and restart to stop new jobs during rollback; retain durable protections.",
+    "Rollback no earlier than the protection-aware floor commit."
+  ]
+}

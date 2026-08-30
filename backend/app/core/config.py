@@ -537,11 +537,12 @@ OKX_HISTORY_ARCHIVE_ENABLED = os.getenv(
     "OKX_HISTORY_ARCHIVE_ENABLED", "0"
 ).strip().lower() in {"1", "true", "yes", "on"}
 
-# Manual continuous history download is a default-off write feature.  Closing
-# the flag must stop new jobs; it must not disable later durable GC protection.
+# Manual continuous history download ships enabled after its release gates.
+# Explicitly setting the flag to 0 must stop new jobs without disabling the
+# durable GC protection already attached to completed collections.
 MANUAL_HISTORY_DOWNLOAD_ENABLED = _parse_strict_flag(
     "MANUAL_HISTORY_DOWNLOAD_ENABLED",
-    "0",
+    "1",
 )
 MANUAL_HISTORY_PLAN_TTL_SECONDS = _parse_positive_int(
     "MANUAL_HISTORY_PLAN_TTL_SECONDS",

@@ -257,6 +257,49 @@ def test_transient_and_durable_are_hard_floors(monkeypatch, tmp_path) -> None:
     assert btc["keep_rows"] == 12
 
 
+def test_create_installs_fail_closed_floor_if_snapshot_reload_fails(
+    monkeypatch, tmp_path
+) -> None:
+    dm = _seed_series(monkeypatch, tmp_path, rows=20)
+    repo = ManualHistoryRepository(core_config.KLINES_DB_PATH)
+    original_snapshot = repo.active_protection_snapshot
+
+    def broken_snapshot():
+        raise RuntimeError("injected snapshot read failure")
+
+    monkeypatch.setattr(repo, "active_protection_snapshot", broken_snapshot)
+    created = dm.create_manual_history_collection(
+        repo,
+        ManualHistoryCreateSpec(
+            collection_id="col-atomic",
+            job_id="job-atomic",
+            exchange="binance",
+            market_type="spot",
+            requested_start_ms=START_MS,
+            idempotency_key="atomic-create",
+            request_hash="atomic-plan",
+            plan_hash="atomic-plan",
+            targets=(ManualHistoryTargetSpec(
+                symbol="BTCUSDT",
+                requested_interval="1m",
+                canonical_interval="1m",
+                route_kind=RouteKind.NATIVE,
+                source_interval="1m",
+                effective_start_ms=START_MS,
+                initial_end_open_ms=START_MS + 19 * STEP_MS,
+            ),),
+        ),
+    )
+    assert created.job.job_id == "job-atomic"
+    floor = dm.durable_protections.floor_for(
+        SeriesKey("BTCUSDT", "1m", exchange="binance", market_type="spot")
+    )
+    assert floor is not None
+    assert floor.protected_start_ms == START_MS
+    monkeypatch.setattr(repo, "active_protection_snapshot", original_snapshot)
+    assert dm.reload_durable_protections(repository=repo, strict=True) is False
+
+
 def test_unconfigured_budget_does_not_auto_delete(monkeypatch, tmp_path) -> None:
     dm = _seed_series(monkeypatch, tmp_path, rows=20)
     dm.update_retention_limits(

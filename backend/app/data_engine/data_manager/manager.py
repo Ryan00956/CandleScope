@@ -3085,16 +3085,96 @@ class DataManager:
                 self._storage_gc_protection_epoch,
             )
 
-    def reload_durable_protections(self) -> None:
-        """Restore GC floors from SQLite.  Safe when the schema is absent."""
+    def reload_durable_protections(
+        self,
+        *,
+        repository: Any | None = None,
+        strict: bool = False,
+    ) -> bool:
+        """Restore GC floors from SQLite under the physical-delete guard."""
         from app.core import config as core_config
         from app.data_engine.manual_history.repository import ManualHistoryRepository
 
-        repository = ManualHistoryRepository(core_config.KLINES_DB_PATH)
-        try:
-            self.durable_protections.load_from_repository(repository)
-        except Exception as exc:
-            logger.warning("Durable protection reload skipped: %s", exc)
+        source = repository or ManualHistoryRepository(core_config.KLINES_DB_PATH)
+        with self._storage_gc_guard:
+            try:
+                return self.durable_protections.load_from_repository(source)
+            except Exception as exc:
+                if strict:
+                    raise
+                logger.warning("Durable protection reload skipped: %s", exc)
+                return False
+
+    def create_manual_history_collection(self, repository: Any, spec: Any) -> Any:
+        """Commit create metadata and publish its GC floor atomically."""
+
+        with self._storage_gc_guard:
+            created = repository.create_collection_and_job(spec)
+            try:
+                self.durable_protections.load_from_repository(repository)
+            except Exception:
+                # The create transaction is already durable.  Strengthen the
+                # mirror from its returned records before releasing the guard,
+                # then surface the read failure through logs without opening a
+                # deletion window.
+                self.durable_protections.ensure_records(created.protections)
+                logger.exception(
+                    "Durable protection snapshot reload failed after manual-history create; "
+                    "installed fail-closed floors from committed records"
+                )
+            return created
+
+    def seal_manual_history_target(
+        self,
+        repository: Any,
+        job_id: str,
+        symbol: str,
+        canonical_interval: str,
+        *,
+        sealed_end_open_ms: int,
+        verified_rows: int,
+    ) -> Any:
+        """Upgrade transient protection to durable under the GC guard."""
+
+        with self._storage_gc_guard:
+            sealed = repository.seal_target(
+                job_id,
+                symbol,
+                canonical_interval,
+                sealed_end_open_ms=sealed_end_open_ms,
+                verified_rows=verified_rows,
+            )
+            try:
+                self.durable_protections.load_from_repository(repository)
+            except Exception:
+                # The previous transient floor remains in the mirror and is at
+                # least as strong as the new durable floor.  Keep it rather
+                # than weakening protection after a successful seal.
+                logger.exception(
+                    "Durable protection snapshot reload failed after manual-history seal; "
+                    "retaining the stronger pre-seal mirror"
+                )
+            return sealed
+
+    def release_manual_history_collection(
+        self,
+        repository: Any,
+        collection_id: str,
+    ) -> Any:
+        """Release ownership under the GC guard without deleting K-lines."""
+
+        with self._storage_gc_guard:
+            released = repository.release_collection(collection_id)
+            try:
+                self.durable_protections.load_from_repository(repository)
+            except Exception:
+                # A stale mirror only over-protects after release, which is the
+                # safe failure mode.  A later reload can remove the floor.
+                logger.exception(
+                    "Durable protection snapshot reload failed after collection release; "
+                    "retaining stale protection fail closed"
+                )
+            return released
 
     def _mark_storage_gc_protection_changed(self) -> None:
         self._storage_gc_protection_epoch += 1

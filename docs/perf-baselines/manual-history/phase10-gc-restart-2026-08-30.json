@@ -1,0 +1,123 @@
+{
+  "schema": "candlescope.manual-history.phase10-gc-restart.v1",
+  "git_commit": "ca5bab8a94d83bf7838eafb8fd5123f72ef502d4",
+  "source_identity": {
+    "git_commit": "ca5bab8a94d83bf7838eafb8fd5123f72ef502d4",
+    "worktree_dirty": true,
+    "worktree_sha256": "99af7c9b6785a1e5c7205dbd93a58934438f1c8a5ed9af43c8afc94e81463d0b",
+    "worktree_files": [
+      "backend/app/api/v1/manual_history.py",
+      "backend/app/core/config.py",
+      "backend/app/data_engine/backfill/reconciler.py",
+      "backend/app/data_engine/data_manager/manager.py",
+      "backend/app/data_engine/manual_history/planner.py",
+      "backend/app/data_engine/manual_history/protection.py",
+      "backend/app/data_engine/manual_history/repository.py",
+      "backend/app/data_engine/manual_history/service.py",
+      "backend/app/data_engine/runtime.py",
+      "backend/scripts/manual_history_evidence_identity.py",
+      "backend/scripts/manual_history_phase10_evidence.py",
+      "backend/scripts/manual_history_phase10_job_path.py",
+      "backend/scripts/manual_history_phase11_rollback_drill.py",
+      "backend/tests/test_manual_history_api.py",
+      "backend/tests/test_manual_history_gc_protection.py",
+      "backend/tests/test_manual_history_repository.py",
+      "backend/tests/test_manual_history_service.py",
+      "backend/tests/test_settings_api.py",
+      "docs/MANUAL_HISTORY_DOWNLOAD_EXECUTION_zh.md",
+      "frontend/src/features/data-workbench/ManualHistoryDownloadPanel.tsx",
+      "frontend/src/features/data-workbench/manualHistoryCopy.ts",
+      "frontend/src/features/data-workbench/manualHistoryForm.test.ts",
+      "frontend/src/features/data-workbench/manualHistoryForm.ts",
+      "frontend/src/services/manualHistoryApi.ts"
+    ],
+    "generated_evidence_excluded": "docs/perf-baselines/manual-history/",
+    "release_scope": [
+      "backend/app/api/v1/manual_history.py",
+      "backend/app/core/config.py",
+      "backend/app/data_engine/backfill/reconciler.py",
+      "backend/app/data_engine/data_manager/manager.py",
+      "backend/app/data_engine/manual_history/**",
+      "backend/app/data_engine/runtime.py",
+      "backend/scripts/manual_history_*.py",
+      "backend/tests/test_manual_history_*.py",
+      "backend/tests/test_settings_api.py",
+      "docs/MANUAL_HISTORY_DOWNLOAD_EXECUTION_zh.md",
+      "frontend/src/features/data-workbench/ManualHistoryDownloadPanel.tsx",
+      "frontend/src/features/data-workbench/manualHistory*.ts",
+      "frontend/src/services/manualHistoryApi.ts"
+    ]
+  },
+  "klines_db_path": "E:\\CacheVault\\Temp\\manual-history-phase10-b9noj43b\\klines.db",
+  "production_db": false,
+  "rows_before_gc": 1960,
+  "rows_after_gc_in_sealed_range": 5,
+  "prefix_rows_after_gc": 0,
+  "zip_rows_after_gc": 0,
+  "gc_plan_would_delete_rows": 1460,
+  "gc_deleted_rows": 1460,
+  "gc_status": "ok",
+  "protected_start_ms": 1788057660000,
+  "sealed_range_after_gc": {
+    "symbol": "BTCUSDT",
+    "interval": "1m",
+    "effective_start_ms": 1788057660000,
+    "sealed_end_open_ms": 1788057900000,
+    "verified_contiguous": true,
+    "actual_count": 5,
+    "expected_count": 5,
+    "expected_open_time": null,
+    "error": null
+  },
+  "restart_floor_count": 6,
+  "floors_after_reopen": [
+    {
+      "symbol": "BTCUSDT",
+      "interval": "1h",
+      "protected_start_ms": 1788030000000,
+      "durable_owner_count": 1
+    },
+    {
+      "symbol": "BTCUSDT",
+      "interval": "1m",
+      "protected_start_ms": 1788027960000,
+      "durable_owner_count": 3
+    },
+    {
+      "symbol": "BTCUSDT",
+      "interval": "45m",
+      "protected_start_ms": 1788029100000,
+      "durable_owner_count": 1
+    },
+    {
+      "symbol": "BTCUSDT",
+      "interval": "89m",
+      "protected_start_ms": 1788029580000,
+      "durable_owner_count": 1
+    },
+    {
+      "symbol": "ETHUSDT",
+      "interval": "1m",
+      "protected_start_ms": 1788057660000,
+      "durable_owner_count": 1
+    },
+    {
+      "symbol": "SOLUSDT",
+      "interval": "1m",
+      "protected_start_ms": 1788057660000,
+      "durable_owner_count": 1
+    }
+  ],
+  "restart_gc_would_delete_rows": 0,
+  "restart_verify": {
+    "symbol": "BTCUSDT",
+    "interval": "1m",
+    "effective_start_ms": 1788057660000,
+    "sealed_end_open_ms": 1788057900000,
+    "verified_contiguous": true,
+    "actual_count": 5,
+    "expected_count": 5,
+    "expected_open_time": null,
+    "error": null
+  }
+}

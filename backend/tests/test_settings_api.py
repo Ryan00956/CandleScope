@@ -242,11 +242,15 @@ def _assert_disabled_capabilities(payload: dict) -> None:
     assert "okx_enabled" in payload["archive"]
 
 
-def test_manual_history_download_flag_defaults_off() -> None:
-    assert MANUAL_HISTORY_DOWNLOAD_ENABLED is False
+def test_manual_history_download_flag_defaults_on() -> None:
+    assert MANUAL_HISTORY_DOWNLOAD_ENABLED is True
 
 
-def test_manual_history_capabilities_disabled_and_stable() -> None:
+def test_manual_history_capabilities_disabled_and_stable(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.api.v1.manual_history.MANUAL_HISTORY_DOWNLOAD_ENABLED",
+        False,
+    )
     client = _client()
     first = client.get("/api/v1/settings/storage/manual-downloads/capabilities")
     second = client.get("/api/v1/settings/storage/manual-downloads/capabilities")
@@ -257,7 +261,11 @@ def test_manual_history_capabilities_disabled_and_stable() -> None:
     _assert_disabled_capabilities(first.json())
 
 
-def test_manual_history_create_rejected_when_feature_flag_disabled() -> None:
+def test_manual_history_create_rejected_when_feature_flag_disabled(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.api.v1.manual_history.MANUAL_HISTORY_DOWNLOAD_ENABLED",
+        False,
+    )
     response = _client().post(
         "/api/v1/settings/storage/manual-downloads",
         json={
@@ -275,7 +283,11 @@ def test_manual_history_create_rejected_when_feature_flag_disabled() -> None:
     assert detail["reason"] == "feature_flag_disabled"
 
 
-def test_live_app_registers_manual_history_capabilities_route() -> None:
+def test_live_app_registers_manual_history_capabilities_route(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.api.v1.manual_history.MANUAL_HISTORY_DOWNLOAD_ENABLED",
+        False,
+    )
     main_source = (
         Path(__file__).resolve().parents[1] / "app" / "main.py"
     ).read_text(encoding="utf-8")

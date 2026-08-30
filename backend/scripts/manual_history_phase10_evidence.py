@@ -21,6 +21,8 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+from manual_history_evidence_identity import build_source_identity
+
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_ROOT = REPOSITORY_ROOT / "backend"
 if str(BACKEND_ROOT) not in sys.path:
@@ -299,6 +301,7 @@ async def main() -> int:
     out_dir = REPOSITORY_ROOT / "docs" / "perf-baselines" / "manual-history"
     out_dir.mkdir(parents=True, exist_ok=True)
     commit = _git_head()
+    source_identity = build_source_identity(REPOSITORY_ROOT)
     network_counts: dict[str, int] = {"rest": 0, "zip": 0, "checksum": 0}
     os.environ["MANUAL_HISTORY_DOWNLOAD_ENABLED"] = "1"
     os.environ["HISTORY_ARCHIVE_ENABLED"] = "1"
@@ -473,7 +476,7 @@ async def main() -> int:
             raise EvidenceError(
                 f"materializer produced empty custom bars 45m={len(rebuilt_45)} 89m={len(rebuilt_89)}"
             )
-        custom_job, _ = await _run_native_job(
+        custom_job, custom_created = await _run_native_job(
             service,
             idempotency_key="phase10-custom",
             symbols=["BTCUSDT"],
@@ -529,7 +532,7 @@ async def main() -> int:
             for symbol in ("BTCUSDT", "ETHUSDT", "SOLUSDT")
         ]
         # ETH/SOL need their own collections because create_from_plan is one exchange job.
-        multi_job, _ = await _run_native_job(
+        multi_job, multi_created = await _run_native_job(
             service,
             idempotency_key="phase10-multi",
             symbols=["BTCUSDT", "ETHUSDT", "SOLUSDT"],
@@ -660,6 +663,13 @@ async def main() -> int:
             fetcher = HistoricalFetcher(
                 config, rest_transport, IngestionConfig(), source_router=router,
             )
+            async def _evidence_rate_limiter() -> None:
+                return None
+
+            # This path validates archive failure -> REST correctness, not the
+            # process-global token bucket. Avoid a millisecond admission race
+            # making the deterministic release drill flaky between two calls.
+            fetcher.set_rate_limiter(_evidence_rate_limiter)
             priming = (await fetcher.fetch([fallback_task]))[0]
             for _ in range(50):
                 errors = router.snapshot()["metrics"]["counters"].get(
@@ -754,7 +764,7 @@ async def main() -> int:
             ),
             idempotency_key="phase10-cancel",
         )
-        cancelled = service.cancel_job(cancel_created.job.job_id)
+        cancelled = await service.cancel_job(cancel_created.job.job_id)
         service._disk_free_bytes = lambda: 0
         blocked_created = service.create_from_plan(
             _plan(
@@ -769,6 +779,12 @@ async def main() -> int:
         service._disk_free_bytes = None
 
         files_after = storage_file_snapshot(db_path)
+        completed_collection_states = {
+            created.collection.collection_id: repo.get_collection(
+                created.collection.collection_id
+            ).status.value
+            for created in (rest_created, custom_created, multi_created)
+        }
         sealed_targets = [
             {**rest_verify, "source_route": "REST", "matrix": "rest_only"},
             {**zip_verify, "source_route": "ZIP", "matrix": "archive_plus_rest_tail"},
@@ -787,11 +803,13 @@ async def main() -> int:
         contract = {
             "schema": "candlescope.manual-history.phase10-contract.v1",
             "git_commit": commit,
+            "source_identity": source_identity,
             "recorded_at": datetime.now(timezone.utc).isoformat(),
             "MANUAL_HISTORY_DOWNLOAD_ENABLED": 1,
             "HISTORY_ARCHIVE_ENABLED": 1,
             "klines_db_path": str(db_path.resolve()),
             "production_db": False,
+            "completed_collection_states": completed_collection_states,
             "targets": sealed_targets,
             "matrix": {
                 "rest_only": {
@@ -828,6 +846,7 @@ async def main() -> int:
         capacity = {
             "schema": "candlescope.manual-history.phase10-capacity.v1",
             "git_commit": commit,
+            "source_identity": source_identity,
             "klines_db_path": str(db_path.resolve()),
             "production_db": False,
             "network": network_counts,
@@ -856,6 +875,7 @@ async def main() -> int:
         gc_restart = {
             "schema": "candlescope.manual-history.phase10-gc-restart.v1",
             "git_commit": commit,
+            "source_identity": source_identity,
             "klines_db_path": str(db_path.resolve()),
             "production_db": False,
             "rows_before_gc": rows_before,
@@ -883,6 +903,7 @@ async def main() -> int:
         archive_parity = {
             "schema": "candlescope.manual-history.phase10-archive-rest-parity.v1",
             "git_commit": commit,
+            "source_identity": source_identity,
             "HISTORY_ARCHIVE_ENABLED": 1,
             "klines_db_path": str(db_path.resolve()),
             "production_db": False,
@@ -922,6 +943,10 @@ async def main() -> int:
         print(json.dumps(summary, indent=2, default=str))
         if failed:
             raise EvidenceError(f"continuity gate failed: {failed}")
+        if any(state != "ACTIVE" for state in completed_collection_states.values()):
+            raise EvidenceError(
+                f"completed collections are not ACTIVE: {completed_collection_states}"
+            )
         if cancelled.state is not JobState.CANCELLED:
             raise EvidenceError(f"cancel did not reach CANCELLED: {cancelled.state}")
         if blocked.state is not JobState.BLOCKED_STORAGE:

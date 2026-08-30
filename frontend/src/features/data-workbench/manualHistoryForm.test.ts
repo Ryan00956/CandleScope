@@ -9,6 +9,7 @@ import {
   formHasEndTime,
   isGreenCompleteState,
   isPlanFirstReady,
+  normalizeCustomInterval,
   parentStateTone,
   parseSymbolList,
   toggleInterval,
@@ -55,6 +56,13 @@ test("symbol list parser accepts comma-separated multi-select", () => {
 test("interval toggle is additive multi-select", () => {
   assert.deepEqual(toggleInterval(["1m"], "1h"), ["1m", "1h"]);
   assert.deepEqual(toggleInterval(["1m", "1h"], "1m"), ["1h"]);
+});
+
+test("custom interval accepts one positive duration token", () => {
+  assert.equal(normalizeCustomInterval(" 89m "), "89m");
+  assert.equal(normalizeCustomInterval("2M"), "2M");
+  assert.equal(normalizeCustomInterval("0m"), null);
+  assert.equal(normalizeCustomInterval("1.5h"), null);
 });
 
 test("PARTIAL FAILED and BLOCKED are not rendered as green complete", () => {

@@ -1,0 +1,106 @@
+{
+  "schema": "candlescope.manual-history.phase10-regression.v1",
+  "recorded_at": "2026-08-30T02:45:41.8821041Z",
+  "source_identity": {
+    "git_commit": "ca5bab8a94d83bf7838eafb8fd5123f72ef502d4",
+    "worktree_dirty": true,
+    "worktree_sha256": "99af7c9b6785a1e5c7205dbd93a58934438f1c8a5ed9af43c8afc94e81463d0b",
+    "identity_evidence": "phase10-contract-2026-08-30.json"
+  },
+  "backend": {
+    "full_regression": {
+      "command": "python -m pytest -q",
+      "passed": 4056,
+      "failed": 3,
+      "errors": 1,
+      "warnings": 5,
+      "duration_seconds": 2667.96,
+      "worktree_sha256_before_final_api_gate_fix": "cdaac2d91d725c7c7e392c1ba34fdb684816f51b7bf62f27faa71e750a26d6b9"
+    },
+    "manual_history_failures_found_and_fixed": [
+      {
+        "tests": [
+          "tests/test_settings_api.py::test_manual_history_create_rejected_when_feature_flag_disabled",
+          "tests/test_settings_api.py::test_live_app_registers_manual_history_capabilities_route"
+        ],
+        "before": "422 request body validation",
+        "after": "403 feature_flag_disabled before request body validation",
+        "fix": "write route dependency runs the flag-off rollback gate before Pydantic body validation"
+      }
+    ],
+    "post_fix_impacted_regression": {
+      "passed": 34,
+      "failed": 0,
+      "duration_seconds": 5.45
+    },
+    "post_fix_manual_history_matrix": {
+      "passed": 154,
+      "failed": 0,
+      "duration_seconds": 26.14,
+      "includes": [
+        "settings API",
+        "manual history API/service/repository/planner/runtime",
+        "GC protection",
+        "archive routing",
+        "interval policy",
+        "data engine architecture boundaries"
+      ]
+    },
+    "post_enable_manual_history_matrix": {
+      "passed": 171,
+      "failed": 0,
+      "duration_seconds": 11.94,
+      "default_flag": 1,
+      "includes": [
+        "settings and manual history API",
+        "manual history service/repository/planner/runtime",
+        "GC protection",
+        "archive storage/routing/providers/cache",
+        "interval policy",
+        "data engine architecture boundaries"
+      ]
+    },
+    "remaining_unrelated_baseline": {
+      "failed": 1,
+      "errors": 1,
+      "test_file": "tests/test_plugin_platform_multi_runtime_phase6_gate.py",
+      "reason": "existing plugin Phase 6 frozen contract hash drift",
+      "fixture_sha256": "f7419040499c6de0749c8d3316036c477f967734fd3bf23d957f510540e85e87",
+      "current_sha256": "9ae7b75322b7650a78d2a236e9bf9e95432a7cd16bc5376e7550ff0dc17b5938"
+    }
+  },
+  "frontend": {
+    "application_tests": {
+      "passed": 3522,
+      "failed": 0,
+      "duration_ms": 189229.4313
+    },
+    "desktop_tests": {
+      "passed": 35,
+      "failed": 0,
+      "duration_ms": 2342.2945
+    },
+    "passed_gates": [
+      "check:plugins",
+      "check:i18n",
+      "typecheck",
+      "production build",
+      "manual history ESLint",
+      "9 manual history targeted tests"
+    ],
+    "remaining_unrelated_baselines": [
+      {
+        "gate": "check:architecture",
+        "file": "src/components/settings/ExchangeSettingsPanel.tsx",
+        "reason": "component-no-service-import"
+      },
+      {
+        "gate": "lint",
+        "file": "src/features/indicators/IndicatorPanel.tsx",
+        "reason": "unused useEffect import"
+      }
+    ]
+  },
+  "manual_history_scope_result": "PASS",
+  "full_regression_result": "PASS_WITH_DOCUMENTED_UNRELATED_BASELINES"
+}

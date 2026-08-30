@@ -83,3 +83,32 @@ export async function cancelManualHistoryJob(jobId: string, signal?: AbortSignal
     },
   ));
 }
+
+export async function listManualHistoryJobs(signal?: AbortSignal): Promise<Record<string, unknown>[]> {
+  const payload = asRecord(await request(
+    `${API_BASE}/settings/storage/manual-downloads?limit=50`,
+    optionalSignal(signal),
+  ));
+  return Array.isArray(payload.jobs) ? payload.jobs.map(asRecord) : [];
+}
+
+export async function listManualHistoryCollections(signal?: AbortSignal): Promise<Record<string, unknown>[]> {
+  const payload = asRecord(await request(
+    `${API_BASE}/settings/storage/manual-downloads/collections`,
+    optionalSignal(signal),
+  ));
+  return Array.isArray(payload.collections) ? payload.collections.map(asRecord) : [];
+}
+
+export async function releaseManualHistoryCollection(
+  collectionId: string,
+  signal?: AbortSignal,
+): Promise<Record<string, unknown>> {
+  return asRecord(await request(
+    `${API_BASE}/settings/storage/manual-downloads/collections/${encodeURIComponent(collectionId)}/release`,
+    {
+      method: "POST",
+      ...optionalSignal(signal),
+    },
+  ));
+}

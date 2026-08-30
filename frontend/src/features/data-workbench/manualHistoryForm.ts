@@ -63,6 +63,11 @@ export function toggleInterval(current: string[], interval: string): string[] {
     : [...current, interval];
 }
 
+export function normalizeCustomInterval(raw: string): string | null {
+  const value = raw.trim();
+  return /^[1-9]\d*[smhdwM]$/.test(value) ? value : null;
+}
+
 export function isPlanFirstReady(form: ManualHistoryFormState): boolean {
   return form.symbols.length > 0 && form.intervals.length > 0 && form.startMs != null && form.startMs >= 0;
 }

@@ -284,6 +284,22 @@ def test_seal_upgrades_durable_protection_in_one_transaction(
     assert sealed.job.revision == 1
 
 
+def test_job_listing_cursor_is_stable_for_equal_timestamps(monkeypatch, tmp_path) -> None:
+    db_path = _use_temp_db(monkeypatch, tmp_path)
+    repo = _repo(db_path)
+    repo.create_collection_and_job(_native_spec())
+    repo.create_collection_and_job(_native_spec(
+        collection_id="col-2",
+        job_id="job-2",
+        idempotency_key="idem-2",
+        request_hash="req-2",
+    ))
+    first = repo.list_jobs(limit=1)
+    assert [job.job_id for job in first] == ["job-2"]
+    second = repo.list_jobs(limit=1, cursor=first[-1].job_id)
+    assert [job.job_id for job in second] == ["job-1"]
+
+
 def test_release_collection_drops_protection_without_deleting_klines(
     monkeypatch, tmp_path
 ) -> None:

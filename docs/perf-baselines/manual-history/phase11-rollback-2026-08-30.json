@@ -1,0 +1,83 @@
+{
+  "schema": "candlescope.manual-history.phase11-rollback.v1",
+  "git_commit": "ca5bab8a94d83bf7838eafb8fd5123f72ef502d4",
+  "source_identity": {
+    "git_commit": "ca5bab8a94d83bf7838eafb8fd5123f72ef502d4",
+    "worktree_dirty": true,
+    "worktree_sha256": "99af7c9b6785a1e5c7205dbd93a58934438f1c8a5ed9af43c8afc94e81463d0b",
+    "worktree_files": [
+      "backend/app/api/v1/manual_history.py",
+      "backend/app/core/config.py",
+      "backend/app/data_engine/backfill/reconciler.py",
+      "backend/app/data_engine/data_manager/manager.py",
+      "backend/app/data_engine/manual_history/planner.py",
+      "backend/app/data_engine/manual_history/protection.py",
+      "backend/app/data_engine/manual_history/repository.py",
+      "backend/app/data_engine/manual_history/service.py",
+      "backend/app/data_engine/runtime.py",
+      "backend/scripts/manual_history_evidence_identity.py",
+      "backend/scripts/manual_history_phase10_evidence.py",
+      "backend/scripts/manual_history_phase10_job_path.py",
+      "backend/scripts/manual_history_phase11_rollback_drill.py",
+      "backend/tests/test_manual_history_api.py",
+      "backend/tests/test_manual_history_gc_protection.py",
+      "backend/tests/test_manual_history_repository.py",
+      "backend/tests/test_manual_history_service.py",
+      "backend/tests/test_settings_api.py",
+      "docs/MANUAL_HISTORY_DOWNLOAD_EXECUTION_zh.md",
+      "frontend/src/features/data-workbench/ManualHistoryDownloadPanel.tsx",
+      "frontend/src/features/data-workbench/manualHistoryCopy.ts",
+      "frontend/src/features/data-workbench/manualHistoryForm.test.ts",
+      "frontend/src/features/data-workbench/manualHistoryForm.ts",
+      "frontend/src/services/manualHistoryApi.ts"
+    ],
+    "generated_evidence_excluded": "docs/perf-baselines/manual-history/",
+    "release_scope": [
+      "backend/app/api/v1/manual_history.py",
+      "backend/app/core/config.py",
+      "backend/app/data_engine/backfill/reconciler.py",
+      "backend/app/data_engine/data_manager/manager.py",
+      "backend/app/data_engine/manual_history/**",
+      "backend/app/data_engine/runtime.py",
+      "backend/scripts/manual_history_*.py",
+      "backend/tests/test_manual_history_*.py",
+      "backend/tests/test_settings_api.py",
+      "docs/MANUAL_HISTORY_DOWNLOAD_EXECUTION_zh.md",
+      "frontend/src/features/data-workbench/ManualHistoryDownloadPanel.tsx",
+      "frontend/src/features/data-workbench/manualHistory*.ts",
+      "frontend/src/services/manualHistoryApi.ts"
+    ]
+  },
+  "protection_aware_floor_commit": "ff0ec9fab77ed79d362a815ed3c7a1f052cb1ee6",
+  "earliest_legal_backend_rollback": "ff0ec9fab77ed79d362a815ed3c7a1f052cb1ee6",
+  "MANUAL_HISTORY_DOWNLOAD_ENABLED_default": 1,
+  "klines_db_path": "E:\\CacheVault\\Temp\\manual-history-phase11-hagl5sxk\\klines.db",
+  "production_db": false,
+  "job_state": "SUCCEEDED",
+  "sealed_before_flag_off": {
+    "verified_contiguous": true,
+    "actual_count": 5,
+    "expected_count": 5,
+    "expected_open_time": null
+  },
+  "floors_after_restart": 1,
+  "gc_deleted_rows": 20,
+  "sealed_after_gc_flag_off": {
+    "verified_contiguous": true,
+    "actual_count": 5,
+    "expected_count": 5,
+    "expected_open_time": null
+  },
+  "collections_readable_after_reenable": [
+    {
+      "collection_id": "col:caa85b9b-5cea-4953-a6d0-694ac3de40ca",
+      "status": "ACTIVE"
+    }
+  ],
+  "flags": {
+    "disable_manual_download": "stops new jobs; durable protections remain",
+    "disable_history_archive": "ZIP off; REST continuity path remains",
+    "schema": "forward-only; rollback must not DROP protection tables"
+  },
+  "enable_method": "use the shipped default or set MANUAL_HISTORY_DOWNLOAD_ENABLED=1 in the process environment, then restart the LIVE backend"
+}

@@ -87,7 +87,7 @@ def test_exchange_list_exposes_pinned_ccxt_catalog() -> None:
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["count"] == 105
+    assert payload["count"] == 106
     assert payload["ccxt"] == {
         "version": "4.5.60",
         "rest_exchange_ids": 105,

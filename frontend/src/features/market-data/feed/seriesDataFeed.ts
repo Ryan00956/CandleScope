@@ -2220,6 +2220,13 @@ export class SeriesDataFeed {
       marketType: msg.market_type || activeSeries?.marketType,
       symbol: msg.symbol || activeSeries?.symbol,
       interval: msg.interval || activeSeries?.interval,
+      providerId: msg.provider_id || activeSeries?.providerId,
+      venue: msg.venue || activeSeries?.venue,
+      assetClass: msg.asset_class || activeSeries?.assetClass,
+      seriesVariant: msg.series_variant || activeSeries?.seriesVariant,
+      priceAdjustment: msg.price_adjustment || activeSeries?.priceAdjustment,
+      sessionVariant: msg.session_variant || activeSeries?.sessionVariant,
+      volumeSemantics: msg.volume_semantics || activeSeries?.volumeSemantics,
     } as MarketSeries;
     if (
       !baseEventSeries.exchange
@@ -2575,6 +2582,7 @@ export class SeriesDataFeed {
         series.marketType,
         series.exchange,
         {
+          seriesIdentity: series,
           ...(countBack === undefined ? {} : { countBack }),
           ...(signal === undefined ? {} : { signal }),
           ...(maxWaitMs === undefined ? {} : { maxWaitMs }),
@@ -2646,6 +2654,7 @@ export class SeriesDataFeed {
         series.marketType,
         series.exchange,
         {
+          seriesIdentity: series,
           ...(signal === undefined ? {} : { signal }),
           ...(maxWaitMs === undefined ? {} : { maxWaitMs }),
           ...transportDemand,
@@ -2739,6 +2748,7 @@ export class SeriesDataFeed {
           series.marketType,
           series.exchange,
           {
+            seriesIdentity: series,
             repair,
             waitMs,
             strict,
@@ -2915,6 +2925,7 @@ export class SeriesDataFeed {
         series.exchange,
         apiSource,
         {
+          seriesIdentity: series,
           ...(signal === undefined ? {} : { signal }),
           repair,
           ...(waitMs === undefined ? {} : { waitMs }),

@@ -74,7 +74,8 @@ def test_pinned_catalog_registers_all_ids_with_ccxt_primary_venues() -> None:
     }
 
     registry = bootstrap_default_adapters()
-    assert len(registry.list_plugins()) == summary["rest_exchange_ids"]
+    assert len(registry.list_plugins()) == summary["rest_exchange_ids"] + 1
+    assert registry.has("twelvedata")
     assert registry.get_plugin("binance").__class__.__name__ == "CcxtPrimaryPlugin"
     assert registry.get_plugin("okx").__class__.__name__ == "CcxtPrimaryPlugin"
     assert registry.get_plugin("binance").protocol().__class__.__name__ == (
@@ -1257,4 +1258,5 @@ def test_global_registry_contains_every_pinned_id() -> None:
     bootstrap_default_adapters()
     ids = {plugin.id for plugin in registry.list_plugins()}
     assert {"bybit", "kraken", "bitget", "gate"}.issubset(ids)
-    assert len(ids) == 105
+    assert len(ids) == 106
+    assert "twelvedata" in ids

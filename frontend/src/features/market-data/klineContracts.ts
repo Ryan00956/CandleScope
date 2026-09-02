@@ -1,6 +1,7 @@
 import type { IntervalString } from "../../utils/intervals.js";
 import type { ForegroundPreloadGate } from "./foregroundPreloadGate.js";
 import type { ChartWorkScheduler } from "./chartWorkScheduler.js";
+import type { KlineSeriesIdentityInput } from "./klineSeriesIdentity.js";
 import type {
   EpochMilliseconds,
   EpochSeconds,
@@ -118,6 +119,8 @@ export interface KlineRequestOptions {
   demandScope?: string;
   /** Monotonic generation within demandScope. */
   demandGeneration?: number;
+  /** Exact vendor/session/adjustment semantics; omitted for legacy crypto series. */
+  seriesIdentity?: KlineSeriesIdentityInput;
 }
 
 export interface KlineLatestRequestOptions extends KlineRequestOptions {
@@ -320,6 +323,13 @@ export interface BackfillCompletedMessage {
   market_type?: string;
   symbol?: string;
   interval?: IntervalString;
+  provider_id?: string;
+  venue?: string;
+  asset_class?: string;
+  series_variant?: string;
+  price_adjustment?: string;
+  session_variant?: string;
+  volume_semantics?: string;
   detail?: BackfillCompletedDetail;
 }
 

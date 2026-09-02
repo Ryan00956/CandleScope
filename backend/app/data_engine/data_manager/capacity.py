@@ -269,7 +269,11 @@ def _dedicated_upstream_websockets(ingress: dict[str, Any] | None) -> int:
         session = feed.get("session")
         if not isinstance(session, dict):
             continue
-        if session.get("layer") in {"L2_SharedSession", "L2_CcxtProvider"}:
+        if session.get("layer") in {
+            "L2_SharedSession",
+            "L2_CcxtProvider",
+            "L2_TwelveDataProvider",
+        }:
             continue
         if session.get("health") == "connected":
             total += 1
@@ -415,6 +419,23 @@ async def build_capacity_snapshot(
         int(value.get("physical_websockets", 0))
         for value in (
             ccxt_runtimes.values() if isinstance(ccxt_runtimes, dict) else ()
+        )
+        if isinstance(value, dict)
+    )
+    twelve_data_provider = (
+        ingress.get("twelve_data_provider") if isinstance(ingress, dict) else None
+    )
+    twelve_data_runtimes = (
+        twelve_data_provider.get("runtimes")
+        if isinstance(twelve_data_provider, dict)
+        else None
+    )
+    provider_physical += sum(
+        int(value.get("physical_websockets", 0))
+        for value in (
+            twelve_data_runtimes.values()
+            if isinstance(twelve_data_runtimes, dict)
+            else ()
         )
         if isinstance(value, dict)
     )

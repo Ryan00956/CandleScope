@@ -27,6 +27,7 @@ from .pagination import (
     ReverseTimePaginationPolicy,
 )
 from .plugin import ExchangePlugin, ProviderStreamPlugin, SymbolNormalizer
+from .history_identity import supports_history_identity
 from .protocol import AdapterBackedProtocol, ExchangeProtocol, RestRequestSpec, WsConnectionSpec
 from .rate_limits import (
     HistoricalRequest,
@@ -98,4 +99,5 @@ __all__ = [
     "serialize_exchange_capabilities",
     "validate_exchange_capabilities",
     "validate_exchange_plugin_contract",
+    "supports_history_identity",
 ]

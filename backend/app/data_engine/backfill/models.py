@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 from app.data_engine.market_data.kline_metrics import declared_enhanced_fields
+from app.data_engine.series_identity import KlineSeriesIdentity
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -290,6 +291,7 @@ class FetchedBar:
     # SQLite transaction.  It is deliberately not part of the chart/storage
     # wire shape; the durable receipt owns the object-level metadata.
     archive_object_key: str | None = None
+    series_identity: KlineSeriesIdentity | None = None
 
     def __post_init__(self) -> None:
         values = {
@@ -311,7 +313,7 @@ class FetchedBar:
         )
 
     def to_dict(self) -> dict:
-        return {
+        payload = {
             "symbol": self.symbol,
             "interval": self.interval,
             "exchange": self.exchange,
@@ -330,6 +332,9 @@ class FetchedBar:
             "enhanced_fields": sorted(self.enhanced_fields),
             "source": self.source,
         }
+        if self.series_identity is not None:
+            payload["series_identity"] = self.series_identity.to_dict()
+        return payload
 
     def to_storage_dict(self) -> dict:
         """Format for StorageBackend.upsert_bars()."""

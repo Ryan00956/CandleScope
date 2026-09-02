@@ -26,6 +26,7 @@ from app.data_engine.data_manager.models import (
     SeriesKey,
 )
 from app.data_engine.history import AlwaysOpenCalendar, SessionCalendar
+from app.data_engine.series_identity import KlineSeriesIdentity
 
 
 def test_range_verifier_rejects_explicitly_unclosed_bar_inside_closed_range() -> None:
@@ -2181,6 +2182,65 @@ def test_history_count_back_overrides_days_window() -> None:
     assert end_ms - start_ms == 9 * 60 * 60 * 1000
 
 
+def test_twelve_data_history_uses_registered_calendar_for_nonlegacy_identity() -> None:
+    class _HistoryPolicy:
+        def __init__(self) -> None:
+            self.resolve_calls = 0
+
+        @staticmethod
+        def series_key(**kwargs):
+            return kwargs
+
+        def resolve(self, _key):
+            self.resolve_calls += 1
+            return SimpleNamespace(calendar=AlwaysOpenCalendar())
+
+    class _HistoryDataManager:
+        def __init__(self) -> None:
+            self.history_policy = _HistoryPolicy()
+            self.query_calls: list[dict] = []
+
+        def query(self, symbol, interval, **kwargs) -> QueryResult:
+            self.query_calls.append(kwargs)
+            return QueryResult(
+                bars=[],
+                symbol=symbol,
+                interval=interval,
+                exchange=kwargs["exchange"],
+                market_type=kwargs["market_type"],
+                source=QuerySource.EMPTY,
+                total=0,
+            )
+
+    dm = _HistoryDataManager()
+    response = _client(dm).get(
+        "/api/v1/klines/history",
+        params={
+            "symbol": "AAPL:NASDAQ",
+            "interval": "1m",
+            "count_back": 2,
+            "max_wait_ms": 0,
+            "exchange": "twelvedata",
+            "market_type": "stock",
+            "provider_id": "twelvedata",
+            "venue": "XNAS",
+            "asset_class": "stock",
+            "series_variant": "ohlcv",
+            "price_adjustment": "raw",
+            "session_variant": "regular",
+            "volume_semantics": "shares",
+        },
+    )
+
+    assert response.status_code == 200
+    assert dm.history_policy.resolve_calls == 1
+    assert isinstance(
+        dm.query_calls[0]["series_identity"],
+        KlineSeriesIdentity,
+    )
+    assert response.json()["missing_ranges"]
+
+
 def test_history_rejects_oversized_days_without_count_back() -> None:
     dm = DataManager()
 
@@ -2488,6 +2548,47 @@ def test_latest_endpoint_wait_repairs_bounded_tail_with_scope_metadata() -> None
     assert kwargs["requester"] == "klines_latest"
     assert kwargs["metadata"]["demand_scope"] == "pane-tail"
     assert kwargs["metadata"]["demand_generation"] == 7
+
+
+def test_latest_wait_repairs_supported_twelve_data_identity() -> None:
+    calls: list[tuple[tuple, dict]] = []
+    dm = DataManager()
+    dm.set_backfill_trigger(
+        lambda *args, **kwargs: calls.append((args, kwargs)) or "td-tail-1"
+    )
+    identity = KlineSeriesIdentity(
+        provider_id="twelvedata",
+        venue="XNAS",
+        asset_class="stock",
+        series_variant="ohlcv",
+        price_adjustment="raw",
+        session_variant="regular",
+        volume_semantics="shares",
+    )
+
+    response = _client(dm).get(
+        "/api/v1/klines/latest",
+        params={
+            "symbol": "AAPL:NASDAQ",
+            "interval": "1m",
+            "limit": 5,
+            "exchange": "twelvedata",
+            "market_type": "stock",
+            "repair": "wait",
+            "max_wait_ms": 1,
+            **identity.to_dict(),
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["backfill_triggered"] is True
+    assert len(calls) == 1
+    _, kwargs = calls[0]
+    assert kwargs["reason"] == "latest_refresh"
+    assert kwargs["metadata"]["series_identity"] == identity.to_dict()
+    assert kwargs["metadata"]["history_verification"] == (
+        "provider_authoritative_sparse"
+    )
 
 
 def test_latest_endpoint_rejects_wait_beyond_fast_tail_budget() -> None:
@@ -2851,6 +2952,118 @@ def test_range_verification_only_gap_submits_for_async_but_not_none() -> None:
     assert none_dm.query_calls == [False]
     assert none_dm.repair_calls == []
     assert none_response.json()["backfill_triggered"] is False
+
+
+def test_twelve_data_range_repair_preserves_nonlegacy_series_identity() -> None:
+    class _RangeDataManager:
+        def __init__(self) -> None:
+            self.query_calls: list[dict] = []
+            self.repair_calls: list[tuple[tuple, dict]] = []
+
+        def query(self, symbol, interval, **kwargs) -> QueryResult:
+            self.query_calls.append(kwargs)
+            return QueryResult(
+                bars=[
+                    BarData(time=60, open=1, high=2, low=1, close=2, volume=10),
+                    BarData(time=180, open=3, high=4, low=3, close=4, volume=30),
+                ],
+                symbol=symbol,
+                interval=interval,
+                exchange=kwargs["exchange"],
+                market_type=kwargs["market_type"],
+                source=QuerySource.STORAGE,
+                total=2,
+            )
+
+        def request_backfill(self, *args, **kwargs):
+            self.repair_calls.append((args, kwargs))
+            return "twelve-data-verification-range"
+
+    dm = _RangeDataManager()
+    identity_params = {
+        "provider_id": "twelvedata",
+        "venue": "XNAS",
+        "asset_class": "stock",
+        "series_variant": "ohlcv",
+        "price_adjustment": "raw",
+        "session_variant": "regular",
+        "volume_semantics": "shares",
+    }
+    response = _client(dm).get(
+        "/api/v1/klines/range",
+        params={
+            "symbol": "AAPL:NASDAQ",
+            "interval": "1m",
+            "start_ms": 60_000,
+            "end_ms": 180_000,
+            "exchange": "twelvedata",
+            "market_type": "stock",
+            "repair": "async",
+            "strict": False,
+            **identity_params,
+        },
+    )
+
+    assert response.status_code == 200
+    assert dm.query_calls[0]["auto_backfill"] is True
+    expected_identity = KlineSeriesIdentity(**identity_params)
+    assert dm.query_calls[0]["series_identity"] == expected_identity
+    assert len(dm.repair_calls) == 1
+    _, repair_kwargs = dm.repair_calls[0]
+    metadata = repair_kwargs["metadata"]
+    assert metadata["series_identity"] == expected_identity.to_dict()
+    assert metadata["history_verification"] == "provider_authoritative_sparse"
+    assert metadata["requires_trusted_finality"] is True
+    assert response.json()["backfill_triggered"] is True
+
+
+def test_unknown_nonlegacy_range_identity_cannot_enable_plugin_repair() -> None:
+    class _RangeDataManager:
+        def __init__(self) -> None:
+            self.query_calls: list[dict] = []
+            self.repair_calls: list[tuple[tuple, dict]] = []
+
+        def query(self, symbol, interval, **kwargs) -> QueryResult:
+            self.query_calls.append(kwargs)
+            return QueryResult(
+                bars=[],
+                symbol=symbol,
+                interval=interval,
+                exchange=kwargs["exchange"],
+                market_type=kwargs["market_type"],
+                source=QuerySource.EMPTY,
+                total=0,
+            )
+
+        def request_backfill(self, *args, **kwargs):
+            self.repair_calls.append((args, kwargs))
+            return True
+
+    dm = _RangeDataManager()
+    response = _client(dm).get(
+        "/api/v1/klines/range",
+        params={
+            "symbol": "AAPL:NASDAQ",
+            "interval": "1m",
+            "start_ms": 60_000,
+            "end_ms": 180_000,
+            "exchange": "twelvedata",
+            "market_type": "stock",
+            "repair": "async",
+            "provider_id": "unknown-provider",
+            "venue": "XNAS",
+            "asset_class": "stock",
+            "series_variant": "ohlcv",
+            "price_adjustment": "raw",
+            "session_variant": "regular",
+            "volume_semantics": "shares",
+        },
+    )
+
+    assert response.status_code == 200
+    assert dm.query_calls[0]["auto_backfill"] is False
+    assert dm.repair_calls == []
+    assert response.json()["backfill_triggered"] is False
 
 
 def test_range_verification_only_gap_honours_covering_ledger_suppression() -> None:

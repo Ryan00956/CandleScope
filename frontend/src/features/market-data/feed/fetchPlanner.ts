@@ -14,6 +14,10 @@ import {
   toEpochSeconds,
 } from "../marketDataTypes.js";
 import { canonicalizeIntervalValue } from "../../../utils/intervals.js";
+import {
+  isLegacyKlineSeriesIdentity,
+  klineSeriesIdentityKey,
+} from "../klineSeriesIdentity.js";
 
 interface RangeInput {
   start?: unknown;
@@ -36,13 +40,18 @@ export function seriesKeyFor({
   marketType = "spot",
   symbol = "BTCUSDT",
   interval = "1h",
+  ...seriesIdentity
 }: Partial<MarketSeries> = {}): SeriesKey {
-  return asSeriesKey([
+  const routedKey = [
     String(exchange || "").toLowerCase(),
     String(marketType || "").toLowerCase(),
     String(symbol || "").toUpperCase(),
     canonicalizeIntervalValue(interval) || String(interval || ""),
-  ].join(":"));
+  ].join(":");
+  if (isLegacyKlineSeriesIdentity(exchange, seriesIdentity)) {
+    return asSeriesKey(routedKey);
+  }
+  return asSeriesKey(`${klineSeriesIdentityKey(exchange, seriesIdentity)}:${routedKey}`);
 }
 
 function finiteNumber(value: unknown): number | null {

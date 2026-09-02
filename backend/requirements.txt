@@ -5,6 +5,7 @@ requests==2.32.3
 numpy==2.2.1
 orjson==3.11.3
 pandas==2.2.3
+exchange_calendars==4.13.2
 python-dotenv==1.0.1
 websockets>=15.0.1
 httpx==0.28.1

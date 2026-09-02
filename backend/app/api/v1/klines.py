@@ -22,12 +22,16 @@ from collections.abc import Awaitable, Callable
 from typing import Annotated, Any, Literal
 
 import orjson
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import ORJSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.executors import run_storage
-from app.exchanges import bootstrap_default_adapters, get_exchange_registry
+from app.exchanges import (
+    bootstrap_default_adapters,
+    get_exchange_registry,
+    supports_history_identity,
+)
 from app.exchanges.symbols import normalize_symbol
 from app.core.market import (
     VALID_INTERVALS,
@@ -58,6 +62,14 @@ from app.data_engine.history import (
 )
 from app.data_engine.public_market_projection import public_bar_rows
 from app.data_engine.storage import DEFAULT_EXCHANGE, DEFAULT_MARKET_TYPE
+from app.data_engine.series_identity import (
+    DEFAULT_ASSET_CLASS,
+    DEFAULT_PRICE_ADJUSTMENT,
+    DEFAULT_SERIES_VARIANT,
+    DEFAULT_SESSION_VARIANT,
+    DEFAULT_VOLUME_SEMANTICS,
+    KlineSeriesIdentity,
+)
 
 router = APIRouter(prefix="/klines", tags=["klines"])
 logger = logging.getLogger("api.klines")
@@ -93,6 +105,13 @@ class KlineHistoryBatchItem(BaseModel):
     count_back: int | None = Field(default=None, ge=1, le=MAX_RANGE_RESPONSE_BARS)
     exchange: str = Field(default=DEFAULT_EXCHANGE, min_length=1, max_length=32)
     market_type: str = Field(default=DEFAULT_MARKET_TYPE, min_length=1, max_length=32)
+    provider_id: str | None = Field(default=None, max_length=64)
+    venue: str | None = Field(default=None, max_length=64)
+    asset_class: str = Field(default=DEFAULT_ASSET_CLASS, min_length=1, max_length=64)
+    series_variant: str = Field(default=DEFAULT_SERIES_VARIANT, min_length=1, max_length=64)
+    price_adjustment: str = Field(default=DEFAULT_PRICE_ADJUSTMENT, min_length=1, max_length=64)
+    session_variant: str = Field(default=DEFAULT_SESSION_VARIANT, min_length=1, max_length=64)
+    volume_semantics: str = Field(default=DEFAULT_VOLUME_SEMANTICS, min_length=1, max_length=64)
     intent: Literal["viewport", "active_hydration"] = "viewport"
     request_scope: str | None = Field(default=None, max_length=128)
     request_generation: int | None = Field(default=None, ge=0)
@@ -105,6 +124,74 @@ class KlineHistoryBatchRequest(BaseModel):
     requests: list[KlineHistoryBatchItem] = Field(
         min_length=1,
         max_length=HISTORY_BATCH_MAX_REQUESTS,
+    )
+
+
+class KlineSeriesIdentityQuery:
+    """Additive query parameters for a semantically exact bar series."""
+
+    def __init__(
+        self,
+        provider_id: str | None = Query(None, max_length=64),
+        venue: str | None = Query(None, max_length=64),
+        asset_class: str = Query(DEFAULT_ASSET_CLASS, min_length=1, max_length=64),
+        series_variant: str = Query(DEFAULT_SERIES_VARIANT, min_length=1, max_length=64),
+        price_adjustment: str = Query(DEFAULT_PRICE_ADJUSTMENT, min_length=1, max_length=64),
+        session_variant: str = Query(DEFAULT_SESSION_VARIANT, min_length=1, max_length=64),
+        volume_semantics: str = Query(DEFAULT_VOLUME_SEMANTICS, min_length=1, max_length=64),
+    ) -> None:
+        self.provider_id = provider_id
+        self.venue = venue
+        self.asset_class = asset_class
+        self.series_variant = series_variant
+        self.price_adjustment = price_adjustment
+        self.session_variant = session_variant
+        self.volume_semantics = volume_semantics
+
+    def resolve(self, exchange: str) -> KlineSeriesIdentity:
+        return KlineSeriesIdentity.for_exchange(
+            exchange,
+            provider_id=self.provider_id,
+            venue=self.venue,
+            asset_class=self.asset_class,
+            series_variant=self.series_variant,
+            price_adjustment=self.price_adjustment,
+            session_variant=self.session_variant,
+            volume_semantics=self.volume_semantics,
+        )
+
+
+def _resolve_series_identity_query(
+    exchange: str,
+    value: object,
+) -> KlineSeriesIdentity:
+    if isinstance(value, KlineSeriesIdentityQuery):
+        return value.resolve(exchange)
+    return KlineSeriesIdentity.for_exchange(exchange)
+
+
+def _nonlegacy_identity_kwargs(
+    exchange: str,
+    identity: KlineSeriesIdentity,
+) -> dict[str, KlineSeriesIdentity]:
+    if identity.is_legacy_default_for(exchange):
+        return {}
+    return {"series_identity": identity}
+
+
+def _series_history_supported(
+    *,
+    exchange: str,
+    market_type: str,
+    interval: str,
+    identity: KlineSeriesIdentity,
+) -> bool:
+    """Whether the selected plugin owns this exact durable history series."""
+    return supports_history_identity(
+        exchange=exchange,
+        market_type=market_type,
+        interval=interval,
+        identity=identity,
     )
 
 
@@ -1423,6 +1510,7 @@ def _submit_verification_repairs(
     reason: str,
     requester: str,
     demand_metadata: dict[str, Any] | None = None,
+    series_identity: KlineSeriesIdentity | None = None,
 ) -> tuple[int, list[str], list[dict[str, Any]]]:
     """Submit exact API-only gaps through the normal DataManager facade."""
     request_backfill = getattr(dm, "request_backfill", None)
@@ -1458,6 +1546,30 @@ def _submit_verification_repairs(
         if not callable(request_backfill):
             continue
         try:
+            metadata = {
+                "query_reason": "range_verification",
+                "verification_only": True,
+                "requested_range": {
+                    "start_ms": int(missing["start_ms"]),
+                    "end_ms": int(missing["end_ms"]),
+                },
+                "missing_bars": missing.get("missing_bars"),
+                **dict(demand_metadata or {}),
+            }
+            if (
+                series_identity is not None
+                and not series_identity.is_legacy_default_for(
+                    str(missing["exchange"])
+                )
+            ):
+                # These fields select the physical storage partition and its
+                # verification contract. Callers may add annotations, but
+                # must not redirect a repair into a different series.
+                metadata.update({
+                    "series_identity": series_identity.to_dict(),
+                    "history_verification": "provider_authoritative_sparse",
+                    "requires_trusted_finality": True,
+                })
             outcome = _call_data_manager_method(
                 request_backfill,
                 str(missing["symbol"]),
@@ -1468,16 +1580,7 @@ def _submit_verification_repairs(
                 str(missing["market_type"]),
                 reason=reason,
                 requester=requester,
-                metadata={
-                    "query_reason": "range_verification",
-                    "verification_only": True,
-                    "requested_range": {
-                        "start_ms": int(missing["start_ms"]),
-                        "end_ms": int(missing["end_ms"]),
-                    },
-                    "missing_bars": missing.get("missing_bars"),
-                    **dict(demand_metadata or {}),
-                },
+                metadata=metadata,
             )
         except Exception:
             logger.warning(
@@ -1814,6 +1917,7 @@ async def get_klines(
     limit: int = Query(500, ge=1, le=1000, description="Number of rows"),
     exchange: str = Query(DEFAULT_EXCHANGE, description="Exchange, e.g. binance"),
     market_type: str = Query(DEFAULT_MARKET_TYPE, description="Market type: spot, futures, swap"),
+    series_identity_query: KlineSeriesIdentityQuery = Depends(),
 ):
     """Get the latest K-line bars for a symbol/interval pair.
 
@@ -1823,24 +1927,35 @@ async def get_klines(
     _validate_interval(interval)
     exchange = _validate_exchange(exchange)
     market_type = _validate_market_type(market_type)
+    series_identity = _resolve_series_identity_query(
+        exchange,
+        series_identity_query,
+    )
+    identity_kwargs = _nonlegacy_identity_kwargs(exchange, series_identity)
     symbol = normalize_symbol(symbol, exchange=exchange, market_type=market_type)
     dm = _require_data_manager(request)
     consumer_id = f"rest:klines:{exchange}:{market_type}:{symbol}:{interval}:{id(request)}"
     stream_ensured = False
     try:
-        await dm.ensure_stream(
+        if not identity_kwargs:
+            await dm.ensure_stream(
+                symbol,
+                interval,
+                exchange=exchange,
+                market_type=market_type,
+                focus_scope="rest",
+                consumer_id=consumer_id,
+            )
+            stream_ensured = True
+        result = await run_storage(
+            _call_data_manager_method,
+            dm.query_latest,
             symbol,
             interval,
-            exchange=exchange,
-            market_type=market_type,
-            focus_scope="rest",
-            consumer_id=consumer_id,
-        )
-        stream_ensured = True
-        result = await run_storage(
-            dm.query_latest, symbol, interval, limit,
+            limit,
             exchange,
             market_type=market_type,
+            **identity_kwargs,
         )
     except Exception as exc:
         raise _query_http_exception(exc, "DataManager query failed") from exc
@@ -1863,6 +1978,7 @@ async def get_klines(
     return {
         "exchange": exchange,
         "market_type": market_type,
+        **series_identity.to_dict(),
         "symbol": symbol.upper(),
         "interval": interval,
         "count": len(data),
@@ -1902,11 +2018,23 @@ async def get_latest_klines(
         ge=0,
         description="Monotonic generation within request_scope",
     ),
+    series_identity_query: KlineSeriesIdentityQuery = Depends(),
 ):
     """Get the very latest K-line bars (typically 1-2 for live updates)."""
     _validate_interval(interval)
     exchange = _validate_exchange(exchange)
     market_type = _validate_market_type(market_type)
+    series_identity = _resolve_series_identity_query(
+        exchange,
+        series_identity_query,
+    )
+    identity_kwargs = _nonlegacy_identity_kwargs(exchange, series_identity)
+    identity_history_supported = _series_history_supported(
+        exchange=exchange,
+        market_type=market_type,
+        interval=interval,
+        identity=series_identity,
+    )
     symbol = normalize_symbol(symbol, exchange=exchange, market_type=market_type)
     demand_owner_id = _new_request_demand_owner_id(
         request_scope,
@@ -1927,7 +2055,7 @@ async def get_latest_klines(
     bounded_tail_repair = False
     tail_start_ms = 0
     tail_end_ms = 0
-    if repair == "wait":
+    if repair == "wait" and identity_history_supported:
         tail_calendar, tail_calendar_known = _resolve_history_calendar(
             dm,
             exchange=exchange,
@@ -1946,15 +2074,16 @@ async def get_latest_klines(
     consumer_id = f"rest:klines_latest:{exchange}:{market_type}:{symbol}:{interval}:{id(request)}"
     stream_ensured = False
     try:
-        await dm.ensure_stream(
-            symbol,
-            interval,
-            exchange=exchange,
-            market_type=market_type,
-            focus_scope="rest",
-            consumer_id=consumer_id,
-        )
-        stream_ensured = True
+        if not identity_kwargs:
+            await dm.ensure_stream(
+                symbol,
+                interval,
+                exchange=exchange,
+                market_type=market_type,
+                focus_scope="rest",
+                consumer_id=consumer_id,
+            )
+            stream_ensured = True
 
         async def _run_latest_query(auto_backfill: bool):
             query_method = dm.query if bounded_tail_repair else dm.query_latest
@@ -1969,6 +2098,7 @@ async def get_latest_klines(
                 *query_args,
                 exchange=exchange,
                 market_type=market_type,
+                **identity_kwargs,
                 **(
                     {
                         "start_ms": tail_start_ms,
@@ -2052,6 +2182,7 @@ async def get_latest_klines(
     return {
         "exchange": exchange,
         "market_type": market_type,
+        **series_identity.to_dict(),
         "symbol": symbol.upper(),
         "interval": interval,
         "count": len(data),
@@ -2105,6 +2236,7 @@ async def get_klines_history(
             "empty and a backfill was triggered; warm queries return immediately."
         ),
     ),
+    series_identity_query: KlineSeriesIdentityQuery = Depends(),
 ):
     """Get historical K-line bars for a time range."""
     if count_back is None and days > 3650:
@@ -2115,6 +2247,17 @@ async def get_klines_history(
     _validate_interval(interval)
     exchange = _validate_exchange(exchange)
     market_type = _validate_market_type(market_type)
+    series_identity = _resolve_series_identity_query(
+        exchange,
+        series_identity_query,
+    )
+    identity_kwargs = _nonlegacy_identity_kwargs(exchange, series_identity)
+    identity_history_supported = _series_history_supported(
+        exchange=exchange,
+        market_type=market_type,
+        interval=interval,
+        identity=series_identity,
+    )
     symbol = normalize_symbol(symbol, exchange=exchange, market_type=market_type)
     history_reason = (
         "initial_history"
@@ -2137,13 +2280,16 @@ async def get_klines_history(
         demand_scope=request_scope,
         demand_generation=request_generation,
     )
-    calendar, calendar_known = _resolve_history_calendar(
-        dm,
-        exchange=exchange,
-        market_type=market_type,
-        symbol=symbol,
-        interval=interval,
-    )
+    if identity_history_supported:
+        calendar, calendar_known = _resolve_history_calendar(
+            dm,
+            exchange=exchange,
+            market_type=market_type,
+            symbol=symbol,
+            interval=interval,
+        )
+    else:
+        calendar, calendar_known = None, False
     try:
         end_ms = min(
             int(time.time() * 1000),
@@ -2195,6 +2341,7 @@ async def get_klines_history(
                 limit=needed_limit,
                 exchange=exchange,
                 market_type=market_type,
+                **identity_kwargs,
                 auto_backfill=auto_backfill,
                 backfill_reason=history_reason,
                 backfill_requester="klines_history",
@@ -2251,6 +2398,7 @@ async def get_klines_history(
                 reason=history_reason,
                 requester="klines_history",
                 demand_metadata=demand_metadata,
+                series_identity=series_identity,
             )
         if submitted:
             result.backfill_triggered = True
@@ -2350,6 +2498,7 @@ async def get_klines_history(
         bool(data)
         and bool(verification["verified_contiguous"])
         and _all_rows_final(result)
+        and not identity_kwargs
         and not await _request_disconnected(request)
     ):
         _schedule_related_interval_warmup(
@@ -2374,6 +2523,7 @@ async def get_klines_history(
     payload = {
         "exchange": exchange,
         "market_type": market_type,
+        **series_identity.to_dict(),
         "symbol": symbol.upper(),
         "interval": interval,
         "intent": intent,
@@ -2444,6 +2594,15 @@ async def post_klines_history_batch(
                 request_scope=item.request_scope,
                 request_generation=item.request_generation,
                 max_wait_ms=item.max_wait_ms,
+                series_identity_query=KlineSeriesIdentityQuery(
+                    provider_id=item.provider_id,
+                    venue=item.venue,
+                    asset_class=item.asset_class,
+                    series_variant=item.series_variant,
+                    price_adjustment=item.price_adjustment,
+                    session_variant=item.session_variant,
+                    volume_semantics=item.volume_semantics,
+                ),
             )
             payload = orjson.loads(response.body)
             return {
@@ -2506,6 +2665,7 @@ async def get_klines_range(
         ge=0,
         description="Monotonic generation within request_scope",
     ),
+    series_identity_query: KlineSeriesIdentityQuery = Depends(),
 ):
     """Get K-lines for an exact time range with continuity verification."""
     _validate_interval(interval)
@@ -2517,6 +2677,19 @@ async def get_klines_range(
 
     exchange = _validate_exchange(exchange)
     market_type = _validate_market_type(market_type)
+    series_identity = _resolve_series_identity_query(
+        exchange,
+        series_identity_query,
+    )
+    identity_kwargs = _nonlegacy_identity_kwargs(exchange, series_identity)
+    identity_history_supported = _series_history_supported(
+        exchange=exchange,
+        market_type=market_type,
+        interval=interval,
+        identity=series_identity,
+    )
+    if not identity_history_supported:
+        repair_mode = "none"
     symbol = normalize_symbol(symbol, exchange=exchange, market_type=market_type)
     dm = _require_data_manager(request)
     demand_owner_id = _new_request_demand_owner_id(
@@ -2533,13 +2706,16 @@ async def get_klines_range(
         demand_scope=request_scope,
         demand_generation=request_generation,
     )
-    calendar, calendar_known = _resolve_history_calendar(
-        dm,
-        exchange=exchange,
-        market_type=market_type,
-        symbol=symbol,
-        interval=interval,
-    )
+    if identity_history_supported:
+        calendar, calendar_known = _resolve_history_calendar(
+            dm,
+            exchange=exchange,
+            market_type=market_type,
+            symbol=symbol,
+            interval=interval,
+        )
+    else:
+        calendar, calendar_known = None, False
 
     now_ms = int(time.time() * 1000)
     latest_closed_open_ms = _last_closed_open_ms(
@@ -2553,6 +2729,7 @@ async def get_klines_range(
         return {
             "exchange": exchange,
             "market_type": market_type,
+            **series_identity.to_dict(),
             "symbol": symbol.upper(),
             "interval": interval,
             "start_ms": start_ms,
@@ -2606,6 +2783,7 @@ async def get_klines_range(
                 limit=needed_limit,
                 exchange=exchange,
                 market_type=market_type,
+                **identity_kwargs,
                 auto_backfill=auto_backfill,
                 backfill_reason="visible_range_gap",
                 backfill_requester="klines_range",
@@ -2649,6 +2827,7 @@ async def get_klines_range(
                 reason="visible_range_gap",
                 requester="klines_range",
                 demand_metadata=demand_metadata,
+                series_identity=series_identity,
             )
             if submitted:
                 result.backfill_triggered = True
@@ -2726,6 +2905,7 @@ async def get_klines_range(
     payload = {
         "exchange": exchange,
         "market_type": market_type,
+        **series_identity.to_dict(),
         "symbol": symbol.upper(),
         "interval": interval,
         "start_ms": start_ms,
@@ -2790,11 +2970,23 @@ async def get_klines_before(
             "otherwise paints indicators for bars the chart has not yet received."
         ),
     ),
+    series_identity_query: KlineSeriesIdentityQuery = Depends(),
 ):
     """Paginated historical data — load bars before a timestamp."""
     _validate_interval(interval)
     exchange = _validate_exchange(exchange)
     market_type = _validate_market_type(market_type)
+    series_identity = _resolve_series_identity_query(
+        exchange,
+        series_identity_query,
+    )
+    identity_kwargs = _nonlegacy_identity_kwargs(exchange, series_identity)
+    identity_history_supported = _series_history_supported(
+        exchange=exchange,
+        market_type=market_type,
+        interval=interval,
+        identity=series_identity,
+    )
     symbol = normalize_symbol(symbol, exchange=exchange, market_type=market_type)
 
     dm = _require_data_manager(request)
@@ -2812,13 +3004,16 @@ async def get_klines_before(
         demand_scope=request_scope,
         demand_generation=request_generation,
     )
-    calendar, calendar_known = _resolve_history_calendar(
-        dm,
-        exchange=exchange,
-        market_type=market_type,
-        symbol=symbol,
-        interval=interval,
-    )
+    if identity_history_supported:
+        calendar, calendar_known = _resolve_history_calendar(
+            dm,
+            exchange=exchange,
+            market_type=market_type,
+            symbol=symbol,
+            interval=interval,
+        )
+    else:
+        calendar, calendar_known = None, False
     try:
         before_ms = before * 1000
 
@@ -2829,6 +3024,7 @@ async def get_klines_before(
                 symbol, interval, before_ms, bars,
                 exchange,
                 market_type=market_type,
+                **identity_kwargs,
                 auto_backfill=auto_backfill,
                 backfill_reason="visible_load_more",
                 backfill_requester="klines_history_before",
@@ -2924,6 +3120,7 @@ async def get_klines_before(
     return {
         "exchange": exchange,
         "market_type": market_type,
+        **series_identity.to_dict(),
         "symbol": symbol.upper(),
         "interval": interval,
         "before": before,
@@ -2991,19 +3188,29 @@ async def get_storage_meta(
     interval: str = Query("1h", description="Kline interval"),
     exchange: str = Query(DEFAULT_EXCHANGE, description="Exchange, e.g. binance"),
     market_type: str = Query(DEFAULT_MARKET_TYPE, description="Market type: spot, futures, swap"),
+    series_identity_query: KlineSeriesIdentityQuery = Depends(),
 ):
     """Get storage metadata (bounds, count) for a series."""
     _validate_interval(interval)
     exchange = _validate_exchange(exchange)
     market_type = _validate_market_type(market_type)
+    series_identity = _resolve_series_identity_query(
+        exchange,
+        series_identity_query,
+    )
+    identity_kwargs = _nonlegacy_identity_kwargs(exchange, series_identity)
     symbol = normalize_symbol(symbol, exchange=exchange, market_type=market_type)
 
     dm = _require_data_manager(request)
     try:
         meta = await run_storage(
-            dm.get_bounds, symbol, interval,
+            _call_data_manager_method,
+            dm.get_bounds,
+            symbol,
+            interval,
             exchange,
             market_type=market_type,
+            **identity_kwargs,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"DataManager bounds query failed: {exc}") from exc
@@ -3011,6 +3218,7 @@ async def get_storage_meta(
     return {
         "exchange": exchange,
         "market_type": market_type,
+        **series_identity.to_dict(),
         "symbol": symbol.upper(),
         "interval": interval,
         "meta": meta,
@@ -3027,6 +3235,7 @@ async def get_klines_continuity(
     limit: int = Query(50_000, ge=1, le=200_000, description="Maximum stored bars to scan"),
     exchange: str = Query(DEFAULT_EXCHANGE, description="Exchange, e.g. binance"),
     market_type: str = Query(DEFAULT_MARKET_TYPE, description="Market type: spot, futures, swap"),
+    series_identity_query: KlineSeriesIdentityQuery = Depends(),
 ):
     """Detect storage continuity gaps without triggering repair."""
     _validate_interval(interval)
@@ -3034,6 +3243,11 @@ async def get_klines_continuity(
         raise HTTPException(status_code=400, detail="end_ms must be >= start_ms")
     exchange = _validate_exchange(exchange)
     market_type = _validate_market_type(market_type)
+    series_identity = _resolve_series_identity_query(
+        exchange,
+        series_identity_query,
+    )
+    identity_kwargs = _nonlegacy_identity_kwargs(exchange, series_identity)
     symbol = normalize_symbol(symbol, exchange=exchange, market_type=market_type)
 
     dm = _require_data_manager(request)
@@ -3047,12 +3261,14 @@ async def get_klines_continuity(
             exchange=exchange,
             market_type=market_type,
             limit=limit,
+            **identity_kwargs,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Continuity scan failed: {exc}") from exc
 
     return {
         **report,
+        **series_identity.to_dict(),
         "verified_contiguous": report.get("gap_count", 0) == 0,
     }
 
@@ -3066,21 +3282,29 @@ async def delete_storage_data(
     end: int | None = Query(None, description="end unix timestamp (seconds)"),
     exchange: str = Query(DEFAULT_EXCHANGE, description="Exchange, e.g. binance"),
     market_type: str = Query(DEFAULT_MARKET_TYPE, description="Market type: spot, futures, swap"),
+    series_identity_query: KlineSeriesIdentityQuery = Depends(),
 ):
     """Delete stored K-line data for a symbol/interval range."""
     _validate_interval(interval)
     exchange = _validate_exchange(exchange)
     market_type = _validate_market_type(market_type)
+    series_identity = _resolve_series_identity_query(
+        exchange,
+        series_identity_query,
+    )
+    identity_kwargs = _nonlegacy_identity_kwargs(exchange, series_identity)
     symbol = normalize_symbol(symbol, exchange=exchange, market_type=market_type)
     dm = _require_data_manager(request)
     try:
-        deleted = await dm.delete_storage_data(
+        deleted = await _call_data_manager_method(
+            dm.delete_storage_data,
             symbol=symbol,
             interval=interval,
             start_ms=start * 1000 if start is not None else None,
             end_ms=end * 1000 if end is not None else None,
             exchange=exchange,
             market_type=market_type,
+            **identity_kwargs,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Storage delete failed: {exc}") from exc
@@ -3088,6 +3312,7 @@ async def delete_storage_data(
     return {
         "exchange": exchange,
         "market_type": market_type,
+        **series_identity.to_dict(),
         "symbol": symbol.upper(),
         "interval": interval,
         "deleted": deleted,

@@ -318,12 +318,16 @@ class MarketDataIngress:
 
     def snapshot(self) -> dict:
         from app.exchanges.ccxt_ext.runtime import get_shared_ccxt_runtime_pool
+        from app.exchanges.plugins.twelvedata.runtime import (
+            get_shared_twelve_data_runtime_pool,
+        )
 
         return {
             "started": self._started,
             "transport": self._transport.snapshot(),
             "shared_ws": self._shared_ws.snapshot(),
             "ccxt_provider": get_shared_ccxt_runtime_pool().snapshot(),
+            "twelve_data_provider": get_shared_twelve_data_runtime_pool().snapshot(),
             "pipelines": {
                 key: p.snapshot() for key, p in self._pipelines.items()
             },
@@ -337,6 +341,9 @@ class MarketDataIngress:
     ) -> dict:
         """Build a paged capacity view without materializing every pipeline."""
         from app.exchanges.ccxt_ext.runtime import get_shared_ccxt_runtime_pool
+        from app.exchanges.plugins.twelvedata.runtime import (
+            get_shared_twelve_data_runtime_pool,
+        )
 
         safe_offset = max(0, int(offset))
         safe_limit = min(100, max(0, int(limit)))
@@ -350,7 +357,11 @@ class MarketDataIngress:
                 and feed.get("mode") == "websocket"
                 and isinstance(session, dict)
                 and session.get("layer")
-                not in {"L2_SharedSession", "L2_CcxtProvider"}
+                not in {
+                    "L2_SharedSession",
+                    "L2_CcxtProvider",
+                    "L2_TwelveDataProvider",
+                }
                 and session.get("health") == "connected"
             ):
                 dedicated_connected += 1
@@ -359,6 +370,7 @@ class MarketDataIngress:
             "transport": self._transport.snapshot(),
             "shared_ws": self._shared_ws.snapshot(),
             "ccxt_provider": get_shared_ccxt_runtime_pool().snapshot(),
+            "twelve_data_provider": get_shared_twelve_data_runtime_pool().snapshot(),
             "pipeline_detail_prepared": True,
             "pipeline_detail_total": len(ordered),
             "dedicated_physical_websockets": dedicated_connected,

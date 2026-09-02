@@ -4,6 +4,7 @@ import sys
 
 import pytest
 
+from app.data_engine.ingestion.config import IngestionConfig
 from app.data_engine.ingestion.models import DataSource, MarketEvent, StreamType
 from app.exchanges.contracts import NormalizerContractSample, validate_exchange_plugin_contract
 from app.exchanges.loader import load_external_plugins_from_env
@@ -16,11 +17,13 @@ from tests.fixtures.exchanges.contract_cases import builtin_exchange_contract_ca
 def test_builtin_exchange_plugins_satisfy_runtime_contracts() -> None:
     bootstrap_default_adapters()
     registry = get_exchange_registry()
+    config = IngestionConfig(twelve_data_api_key="contract-test-key")
 
     for plugin_id, plugin_cases in builtin_exchange_contract_cases().items():
         report = validate_exchange_plugin_contract(
             registry.get_plugin(plugin_id),
             plugin_cases,
+            config=config,
         )
         assert report.ok, report.to_dict()
 

@@ -52,6 +52,7 @@ async def fetch_catalog_json(
     base_urls: Sequence[str],
     path: str,
     params: Mapping[str, Any] | None = None,
+    headers: Mapping[str, str] | None = None,
     timeout_seconds: float,
     proxy: str | None,
 ) -> Any:
@@ -95,6 +96,7 @@ async def fetch_catalog_json(
     if not urls:
         raise CatalogHttpError(f"No catalog endpoints configured for {exchange}:{market_type}")
 
+    request_headers = dict(headers or {})
     last_error: Exception | None = None
     timeout = aiohttp.ClientTimeout(total=max(0.001, float(timeout_seconds)))
     async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -117,9 +119,13 @@ async def fetch_catalog_json(
                 async with session.get(
                     url,
                     params=dict(params or {}),
+                    headers=request_headers,
                     proxy=proxy,
                 ) as response:
-                    headers = {str(key): str(value) for key, value in response.headers.items()}
+                    response_headers = {
+                        str(key): str(value)
+                        for key, value in response.headers.items()
+                    }
                     if response.status != 200:
                         body = ""
                         body_error: Exception | None = None
@@ -135,9 +141,11 @@ async def fetch_catalog_json(
                                 else f"HTTP {response.status}: response body unavailable: {body_error}"
                             ),
                             status_code=response.status,
-                            headers=headers,
+                            headers=response_headers,
                             body_code=body_code,
-                            retry_after=_parse_retry_after(headers.get("Retry-After")),
+                            retry_after=_parse_retry_after(
+                                response_headers.get("Retry-After")
+                            ),
                         )
                         manager.record_response(
                             rule,
@@ -159,7 +167,7 @@ async def fetch_catalog_json(
                     manager.record_response(
                         rule,
                         status_code=response.status,
-                        headers=headers,
+                        headers=response_headers,
                         fallback_cooldown_seconds=rule.cooldown_seconds,
                         response_complete=False,
                     )
@@ -169,9 +177,11 @@ async def fetch_catalog_json(
                     manager.record_response(
                         rule,
                         status_code=response.status,
-                        headers=headers,
+                        headers=response_headers,
                         body_code=body_code,
-                        retry_after=_parse_retry_after(headers.get("Retry-After")),
+                        retry_after=_parse_retry_after(
+                            response_headers.get("Retry-After")
+                        ),
                         fallback_cooldown_seconds=rule.cooldown_seconds,
                     )
                     response_completed = True
@@ -181,7 +191,7 @@ async def fetch_catalog_json(
                         raise CatalogHttpError(
                             f"Exchange error {body_code}: {str(payload)[:200]}",
                             status_code=response.status,
-                            headers=headers,
+                            headers=response_headers,
                             body_code=body_code,
                         )
                     return payload

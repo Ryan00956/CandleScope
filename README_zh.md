@@ -128,10 +128,14 @@ npm run dev
 
 后端检查：
 
+使用「快速开始」中创建的虚拟环境。Windows 下将以下 `python`
+替换为 `.\.venv\Scripts\python.exe`。
+
 ```bash
 cd backend
+python -m pip install -r requirements-test.txt
 python -m compileall app tests -q
-python -m pytest -q
+python -m pytest tests -q
 ```
 
 前端检查：

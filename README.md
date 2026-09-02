@@ -135,10 +135,14 @@ Open [http://127.0.0.1:15173/](http://127.0.0.1:15173/). The API runs at
 
 Backend checks:
 
+Use the virtual environment from Quick start. On Windows, replace `python`
+below with `.\.venv\Scripts\python.exe`.
+
 ```bash
 cd backend
+python -m pip install -r requirements-test.txt
 python -m compileall app tests -q
-python -m pytest -q
+python -m pytest tests -q
 ```
 
 Frontend checks:

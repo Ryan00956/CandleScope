@@ -3,6 +3,7 @@ import { t } from "../../i18n/index.js";
 import type { ExchangeId, MarketType, SymbolCode } from "../../utils/symbolKey.js";
 import { loadInitialChartSession } from "../chart-session/chartSessionModel.js";
 import type { ChartSession } from "../chart-session/chartSessionTypes.js";
+import { resolveKlineSeriesIdentity } from "../market-data/klineSeriesIdentity.js";
 import {
   DEFAULT_SETTINGS,
   normalizeSettings,
@@ -115,7 +116,22 @@ function normalizeSession(value: unknown, fallback: ChartSession): ChartSession 
     ? source.marketType.trim().toLowerCase() as MarketType
     : fallback.marketType;
   const interval = canonicalizeIntervalValue(source.interval) || fallback.interval;
-  return { exchange, marketType, symbol, interval };
+  const fallbackIdentity = resolveKlineSeriesIdentity(exchange);
+  return {
+    exchange,
+    marketType,
+    symbol,
+    interval,
+    ...resolveKlineSeriesIdentity(exchange, {
+      providerId: typeof source.providerId === "string" ? source.providerId : fallbackIdentity.providerId,
+      venue: typeof source.venue === "string" ? source.venue : fallbackIdentity.venue,
+      assetClass: typeof source.assetClass === "string" ? source.assetClass : fallbackIdentity.assetClass,
+      seriesVariant: typeof source.seriesVariant === "string" ? source.seriesVariant : fallbackIdentity.seriesVariant,
+      priceAdjustment: typeof source.priceAdjustment === "string" ? source.priceAdjustment : fallbackIdentity.priceAdjustment,
+      sessionVariant: typeof source.sessionVariant === "string" ? source.sessionVariant : fallbackIdentity.sessionVariant,
+      volumeSemantics: typeof source.volumeSemantics === "string" ? source.volumeSemantics : fallbackIdentity.volumeSemantics,
+    }),
+  };
 }
 
 function pickCellChartSettings(settings: ChartSettings): ChartCellChartSettings {

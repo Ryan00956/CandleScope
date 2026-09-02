@@ -12,6 +12,7 @@ import {
 } from "./marketDataTypes.js";
 import type { SeriesDataFeed } from "./feed/seriesDataFeed.js";
 import { planTargetBarRequest } from "./intervalRequestBudget.js";
+import type { KlineSeriesIdentityInput } from "./klineSeriesIdentity.js";
 
 const LOAD_MORE_PAGE_SIZE = 500;
 export const LOAD_MORE_SOURCE_ROW_BUDGET = 10_000;
@@ -123,6 +124,7 @@ export interface UseChartLoadMoreLeftOptions {
   exchange: ExchangeId;
   marketType: MarketType;
   interval: IntervalString;
+  seriesIdentity?: KlineSeriesIdentityInput;
   nativeIntervalValues: readonly IntervalString[];
   chartData: KlineBar[];
   loading: boolean;
@@ -160,6 +162,7 @@ export function useChartLoadMoreLeft({
   exchange,
   marketType,
   interval,
+  seriesIdentity,
   nativeIntervalValues,
   chartData,
   loading,
@@ -167,7 +170,8 @@ export function useChartLoadMoreLeft({
   seriesDataFeed,
   commitMergedChartData,
 }: UseChartLoadMoreLeftOptions): ChartLoadMoreLeftRuntime {
-  const sessionKey = `${exchange}:${marketType}:${symbol}:${interval}`;
+  const activeSeries = { exchange, marketType, symbol, interval, ...seriesIdentity };
+  const sessionKey = String(seriesDataFeed.seriesKey(activeSeries));
   const [loadingMoreLeft, setLoadingMoreLeftState] = useState(false);
   const [hasMoreLeft, setHasMoreLeftState] = useState(true);
   const [paginationState, setPaginationState] = useState<LeftPaginationState>({
@@ -249,6 +253,7 @@ export function useChartLoadMoreLeft({
       marketType,
       symbol,
       interval,
+      ...seriesIdentity,
     });
     if (feedPending?.before === ownership.requestedBefore) return;
     pendingBeforePageRef.current = null;
@@ -258,11 +263,20 @@ export function useChartLoadMoreLeft({
         ? { ...current, phase: "idle", nextBefore: null }
         : current
     ));
-  }, [chartData, exchange, interval, marketType, seriesDataFeed, sessionKey, symbol]);
+  }, [
+    chartData,
+    exchange,
+    interval,
+    marketType,
+    seriesDataFeed,
+    seriesIdentity,
+    sessionKey,
+    symbol,
+  ]);
 
   const requestPage = useCallback<RequestPage>(
     (oldestLoadedTime): Promise<void> => {
-      const series = { exchange, marketType, symbol, interval };
+      const series = { exchange, marketType, symbol, interval, ...seriesIdentity };
       const feedPending = seriesDataFeed.getPendingBeforePage(series);
       let pendingOwnership = pendingBeforePageRef.current;
       if (
@@ -487,6 +501,7 @@ export function useChartLoadMoreLeft({
       marketType,
       oldestChartTime,
       seriesDataFeed,
+      seriesIdentity,
       sessionKey,
       setHasMoreLeft,
       setLoadingMoreLeft,
@@ -503,6 +518,7 @@ export function useChartLoadMoreLeft({
       marketType,
       symbol,
       interval,
+      ...seriesIdentity,
     });
     const ownership = pendingBeforePageRef.current;
     if (ownership && feedPending?.before !== ownership.requestedBefore) {
@@ -510,7 +526,7 @@ export function useChartLoadMoreLeft({
       nextBeforeRef.current = null;
     }
     return loadingMoreLeftRef.current || inflightRef.current != null || feedPending != null;
-  }, [exchange, interval, marketType, seriesDataFeed, symbol]);
+  }, [exchange, interval, marketType, seriesDataFeed, seriesIdentity, symbol]);
 
   return {
     loadingMoreLeft,

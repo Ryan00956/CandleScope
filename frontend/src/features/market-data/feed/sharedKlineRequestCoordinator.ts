@@ -10,6 +10,11 @@ import type {
   KlineRangeRequestOptions,
   KlineRequestOptions,
 } from "../klineContracts.js";
+import {
+  isLegacyKlineSeriesIdentity,
+  klineSeriesIdentityKey,
+  type KlineSeriesIdentityInput,
+} from "../klineSeriesIdentity.js";
 
 type RequestKind = "before" | "history" | "latest" | "range";
 
@@ -75,6 +80,15 @@ function seriesIdentity(
   ];
 }
 
+function semanticIdentityPart(
+  exchange: string,
+  identity: KlineSeriesIdentityInput | undefined,
+): readonly string[] {
+  return isLegacyKlineSeriesIdentity(exchange, identity)
+    ? []
+    : [klineSeriesIdentityKey(exchange, identity)];
+}
+
 function requestKey(kind: RequestKind, identity: readonly unknown[]): string {
   return JSON.stringify([kind, ...identity]);
 }
@@ -118,6 +132,7 @@ export class SharedKlineRequestCoordinator implements KlineApi {
   ): Promise<KlineFetchResult> {
     const identity = [
       ...seriesIdentity(symbol, interval, marketType, exchange),
+      ...semanticIdentityPart(exchange, options.seriesIdentity),
       days ?? null,
       options.countBack ?? null,
       options.maxWaitMs ?? null,
@@ -152,6 +167,9 @@ export class SharedKlineRequestCoordinator implements KlineApi {
               ...(options.demandGeneration === undefined
                 ? {}
                 : { demandGeneration: options.demandGeneration }),
+              ...(options.seriesIdentity === undefined
+                ? {}
+                : { seriesIdentity: options.seriesIdentity }),
             },
           }
         : undefined,
@@ -169,6 +187,7 @@ export class SharedKlineRequestCoordinator implements KlineApi {
   ): Promise<KlineFetchResult> {
     const identity = [
       ...seriesIdentity(symbol, interval, marketType, exchange),
+      ...semanticIdentityPart(exchange, options.seriesIdentity),
       before ?? null,
       bars,
       options.maxWaitMs ?? null,
@@ -202,6 +221,7 @@ export class SharedKlineRequestCoordinator implements KlineApi {
   ): Promise<KlineFetchResult> {
     const identity = [
       ...seriesIdentity(symbol, interval, marketType, exchange),
+      ...semanticIdentityPart(exchange, options.seriesIdentity),
       start,
       end,
       options.repair ?? null,
@@ -237,6 +257,7 @@ export class SharedKlineRequestCoordinator implements KlineApi {
   ): Promise<KlineFetchResult> {
     const identity = [
       ...seriesIdentity(symbol, interval, marketType, exchange),
+      ...semanticIdentityPart(exchange, options.seriesIdentity),
       limit,
       String(source || ""),
       options.repair ?? "none",

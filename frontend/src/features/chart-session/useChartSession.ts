@@ -31,6 +31,11 @@ import {
 import { buildChartDatasetKey } from "./chartDatasetKey.js";
 import { buildRealtimeTrackedIntervals } from "./trackedIntervalsPolicy.js";
 import { getVisibleRangeForInterval, saveVisibleRangeForInterval } from "./visibleRangeStorage.js";
+import {
+  klineSeriesIdentityKey,
+  resolveKlineSeriesIdentity,
+  type ResolvedKlineSeriesIdentity,
+} from "../market-data/klineSeriesIdentity.js";
 import type {
   ChartSession,
   ChartSessionRuntime,
@@ -76,6 +81,12 @@ export function useChartSession({
   const [exchange, setExchange] = useState(initialSession.exchange);
   const [marketType, setMarketType] = useState(initialSession.marketType);
   const [interval, setInterval] = useState(initialSession.interval);
+  const [seriesIdentity, setSeriesIdentity] = useState<ResolvedKlineSeriesIdentity>(() => (
+    resolveKlineSeriesIdentity(
+      initialSession.exchange,
+      configuredInitialSession || undefined,
+    )
+  ));
   const [lastTransition, setLastTransition] = useState<ChartSessionTransition | null>(null);
   const transitionIdRef = useRef(0);
   const controlledInterval = canonicalizeIntervalValue(controlledSession?.interval);
@@ -168,8 +179,14 @@ export function useChartSession({
   }, [trackedIntervals]);
 
   const datasetKey = useMemo(
-    () => buildChartDatasetKey({ exchange, marketType, symbol, interval }),
-    [exchange, interval, marketType, symbol],
+    () => buildChartDatasetKey({
+      exchange,
+      marketType,
+      symbol,
+      interval,
+      ...seriesIdentity,
+    }),
+    [exchange, interval, marketType, seriesIdentity, symbol],
   );
   const savedVisibleRange = useMemo(
     () => getVisibleRangeForInterval(
@@ -182,21 +199,29 @@ export function useChartSession({
     [exchange, interval, marketType, symbol, visibleRangeScope],
   );
   const sessionKey = useMemo(
-    () => buildChartSessionKey({ exchange, marketType, symbol, interval }),
-    [exchange, interval, marketType, symbol],
+    () => buildChartSessionKey({
+      exchange,
+      marketType,
+      symbol,
+      interval,
+      ...seriesIdentity,
+    }),
+    [exchange, interval, marketType, seriesIdentity, symbol],
   );
   const visibleRangeDataMetaRef = useRef<unknown>(null);
 
   useEffect(() => {
-    onSessionChange?.({ exchange, marketType, symbol, interval });
-  }, [exchange, interval, marketType, onSessionChange, symbol]);
+    onSessionChange?.({ exchange, marketType, symbol, interval, ...seriesIdentity });
+  }, [exchange, interval, marketType, onSessionChange, seriesIdentity, symbol]);
 
   const publishTransition = useCallback((
     type: ChartSessionTransitionType,
     nextSession: Partial<ChartSession>,
   ): void => {
-    const from = { exchange, marketType, symbol, interval };
+    const from = { exchange, marketType, symbol, interval, ...seriesIdentity };
     const to = {
+      ...from,
+      ...nextSession,
       exchange: nextSession.exchange ?? exchange,
       marketType: nextSession.marketType ?? marketType,
       symbol: nextSession.symbol ?? symbol,
@@ -209,7 +234,7 @@ export function useChartSession({
       from,
       to,
     }));
-  }, [exchange, interval, marketType, symbol]);
+  }, [exchange, interval, marketType, seriesIdentity, symbol]);
 
   useEffect(() => {
     if (!controlledSession || !controlledInterval || !controlledSessionKey) return;
@@ -219,10 +244,7 @@ export function useChartSession({
     if (lastControlledSessionKeyRef.current === controlledSessionKey) return;
     lastControlledSessionKeyRef.current = controlledSessionKey;
     const nextSession = { ...controlledSession, interval: controlledInterval };
-    if (nextSession.exchange === exchange
-      && nextSession.marketType === marketType
-      && nextSession.symbol === symbol
-      && intervalsSemanticallyEquivalent(nextSession.interval, interval)) return;
+    if (controlledSessionKey === sessionKey) return;
     const identityChanged = nextSession.exchange !== exchange
       || nextSession.marketType !== marketType
       || nextSession.symbol !== symbol;
@@ -236,6 +258,7 @@ export function useChartSession({
     setMarketType(nextSession.marketType);
     setSymbol(nextSession.symbol);
     setInterval(nextSession.interval);
+    setSeriesIdentity(resolveKlineSeriesIdentity(nextSession.exchange, nextSession));
   }, [
     controlledSession,
     controlledInterval,
@@ -244,6 +267,7 @@ export function useChartSession({
     interval,
     marketType,
     publishTransition,
+    sessionKey,
     symbol,
   ]);
 
@@ -298,16 +322,25 @@ export function useChartSession({
     let nextSymbol: SymbolCode;
     let nextMarketType: MarketType;
     let nextExchange: ExchangeId;
+    let nextSeriesIdentity: ResolvedKlineSeriesIdentity;
     if (typeof newSymbolOrObj === "object" && newSymbolOrObj !== null) {
       nextSymbol = newSymbolOrObj.symbol;
       nextMarketType = newSymbolOrObj.marketType || "spot";
       nextExchange = newSymbolOrObj.exchange || "binance";
+      nextSeriesIdentity = resolveKlineSeriesIdentity(nextExchange, newSymbolOrObj);
     } else {
       nextSymbol = newSymbolOrObj;
       nextMarketType = marketType;
       nextExchange = exchange;
+      nextSeriesIdentity = resolveKlineSeriesIdentity(nextExchange);
     }
-    if (nextSymbol === symbol && nextMarketType === marketType && nextExchange === exchange) return;
+    if (
+      nextSymbol === symbol
+      && nextMarketType === marketType
+      && nextExchange === exchange
+      && klineSeriesIdentityKey(nextExchange, nextSeriesIdentity)
+        === klineSeriesIdentityKey(exchange, seriesIdentity)
+    ) return;
 
     const nextInterval = resolveSupportedInterval({
       exchange: nextExchange,
@@ -329,12 +362,14 @@ export function useChartSession({
       marketType: nextMarketType,
       symbol: nextSymbol,
       interval: nextInterval,
+      ...nextSeriesIdentity,
     });
 
     setExchange(nextExchange);
     setMarketType(nextMarketType);
     setSymbol(nextSymbol);
     setInterval(nextInterval);
+    setSeriesIdentity(nextSeriesIdentity);
   }, [
     exchange,
     exchangeCatalog,
@@ -342,6 +377,7 @@ export function useChartSession({
     marketType,
     publishTransition,
     savedCustomIntervals,
+    seriesIdentity,
     symbol,
   ]);
 
@@ -383,12 +419,15 @@ export function useChartSession({
       nativeIntervals: nextNativeIntervals,
       isNativeIntervalSupported,
     });
+    const nextSeriesIdentity = resolveKlineSeriesIdentity(exchange);
     publishTransition(CHART_SESSION_TRANSITION_TYPES.MARKET_TYPE_CHANGE, {
       marketType: nextMarketType,
       interval: nextInterval,
+      ...nextSeriesIdentity,
     });
     setMarketType(nextMarketType);
     setInterval(nextInterval);
+    setSeriesIdentity(nextSeriesIdentity);
     updateUserPref("lastMarketType", nextMarketType);
     updateUserPref("lastInterval", nextInterval);
   }, [exchange, exchangeCatalog, interval, marketType, publishTransition, savedCustomIntervals]);
@@ -413,12 +452,15 @@ export function useChartSession({
       isNativeIntervalSupported,
     });
     const timer = setTimeout(() => {
+      const nextSeriesIdentity = resolveKlineSeriesIdentity(exchange);
       publishTransition(CHART_SESSION_TRANSITION_TYPES.CAPABILITY_CORRECTION, {
         marketType: nextMarketType,
         interval: nextInterval,
+        ...nextSeriesIdentity,
       });
       setMarketType(nextMarketType);
       setInterval(nextInterval);
+      setSeriesIdentity(nextSeriesIdentity);
       updateUserPref("lastMarketType", nextMarketType);
       updateUserPref("lastInterval", nextInterval);
     }, 0);
@@ -530,6 +572,7 @@ export function useChartSession({
       exchange,
       marketType,
       interval,
+      ...seriesIdentity,
       sessionKey,
       datasetKey,
       datasetVersion: 0,

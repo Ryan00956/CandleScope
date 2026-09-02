@@ -41,6 +41,7 @@ from app.data_engine.interval_policy import (
     parse_interval_ms,
 )
 from app.data_engine.kline_quality import source_rank
+from app.data_engine.series_identity import KlineSeriesIdentity
 from app.data_engine.custom_materialization import (
     MaterializationLease,
     custom_materialization_registry,
@@ -62,6 +63,12 @@ from .models import (
 )
 
 logger = logging.getLogger("backfill.Reconciler")
+
+
+def _identity_kwargs(
+    identity: KlineSeriesIdentity | None,
+) -> dict[str, KlineSeriesIdentity]:
+    return {"series_identity": identity} if identity is not None else {}
 
 # Type aliases
 CustomAggregator = Callable[[list[FetchedBar], str, int, int, int], FetchedBar | None]
@@ -429,6 +436,12 @@ class Reconciler:
         if not bars:
             return 0, 0, 0, [], [], 0, 0, set()
 
+        series_identity = bars[0].series_identity
+        if any(bar.series_identity != series_identity for bar in bars):
+            raise ValueError(
+                "reconciliation group contains multiple K-line series identities"
+            )
+
         strategy = DeduplicationStrategy(self._cfg.reconcile_dedup_strategy)
         batch_size = self._cfg.reconcile_write_batch_size
 
@@ -448,6 +461,7 @@ class Reconciler:
                     max_ot,
                     exchange=exchange,
                     market_type=market_type,
+                    **_identity_kwargs(series_identity),
                 )
             except Exception:
                 existing = set()
@@ -538,6 +552,7 @@ class Reconciler:
                             source=source,
                             exchange=exchange,
                             market_type=market_type,
+                            **_identity_kwargs(series_identity),
                         )
                     written += n
                     written_range = self._written_range_from_batch(

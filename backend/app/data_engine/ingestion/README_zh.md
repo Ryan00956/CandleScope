@@ -100,6 +100,13 @@ shared adapter 允许 L3 使用 HTTP fallback，同时不停止其他订阅者�
 | `INGESTION_HTTP_BASE_URLS_FUTURES` | Binance futures HTTP endpoints |
 | `INGESTION_WS_BASE_URLS_FUTURES` | Binance futures WS endpoints |
 | `INGESTION_HTTP_TIMEOUT` | HTTP 请求超时 |
+| `INGESTION_TWELVE_DATA_API_KEY` | Twelve Data 服务端 API key；未配置时 provider fail-closed |
+| `INGESTION_TWELVE_DATA_HTTP_BASE_URLS` | Twelve Data HTTP endpoint，默认 `https://api.twelvedata.com` |
+| `INGESTION_TWELVE_DATA_WS_ENABLED` | 是否启用 Twelve Data Basic 共享实时价格流，默认 `true` |
+| `INGESTION_TWELVE_DATA_WS_MAX_SYMBOLS` | 逻辑订阅上限，默认且硬性封顶 `8` |
+| `INGESTION_TWELVE_DATA_WS_HEARTBEAT_INTERVAL` | 应用层 heartbeat 秒数，默认 `10` |
+| `INGESTION_TWELVE_DATA_CONCURRENCY` | Twelve Data 历史与搜索请求并发，默认 `1` |
+| `INGESTION_TWELVE_DATA_CREDITS_PER_MINUTE` | Twelve Data 共享 credit 预算，默认 `8`，仍受全局 safety factor 收紧 |
 | `INGESTION_PROXY_MODE` | `system`、`custom` 或 `none` |
 | `INGESTION_HTTP_PROXY` | custom proxy URL |
 | `INGESTION_WS_OPEN_TIMEOUT` | WebSocket 建连超时 |
@@ -110,6 +117,12 @@ shared adapter 允许 L3 使用 HTTP fallback，同时不停止其他订阅者�
 | `INGESTION_EXCHANGE` | 默认 exchange id |
 
 proxy 还会读取 `app.core.config` 中持久化的应用设置，因此前端可以运行时切换 proxy 模式。
+
+### Twelve Data M2
+
+M2 在 M1 的历史和 symbol search 基础上，开放美国 venue 股票/ETF 的常规时段盘中历史，并用一条 provider sidecar WebSocket 为价格订阅提供最多 8 个唯一 symbol 的实时 ticker。供应商 WebSocket 不提供 OHLC，因此实时 K 线仍保持禁用；连接 generation 会用受共享额度约束的 `/quote` 快照补充日内字段。
+
+所有 Twelve Data K 线都携带完整 series identity。股票/ETF 的 volume 语义是 `shares`，缺失 volume 的行会被拒绝；外汇、指数和商品明确标记 `volume_semantics=unavailable`，兼容 OHLCV 存储中的数值 volume 为 `0`，不能解释成真实零成交量。详见 [Traditional Market Data M2](../../../../docs/TRADITIONAL_MARKET_DATA_M2_zh.md)。
 
 ## Delivery 语义
 

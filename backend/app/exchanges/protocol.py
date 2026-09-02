@@ -13,6 +13,7 @@ class RestRequestSpec:
     base_urls: list[str]
     path: str
     params: dict[str, Any]
+    headers: dict[str, str] | None = None
     method: str = "GET"
     weight: int = 1
 

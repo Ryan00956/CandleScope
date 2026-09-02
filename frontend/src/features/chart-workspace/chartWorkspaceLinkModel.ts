@@ -8,6 +8,7 @@ import type {
   ChartWorkspaceDocument,
 } from "./chartWorkspaceTypes.js";
 import { chartWorkspaceCell } from "./chartWorkspaceDocument.js";
+import { buildChartSessionKey } from "../chart-session/chartSessionTransition.js";
 
 export type ChartLinkChannel =
   | "market"
@@ -70,10 +71,7 @@ export function chartLinkPolicyEnables(
 }
 
 function sameSession(left: ChartSession, right: ChartSession): boolean {
-  return left.exchange === right.exchange
-    && left.marketType === right.marketType
-    && left.symbol === right.symbol
-    && left.interval === right.interval;
+  return buildChartSessionKey(left) === buildChartSessionKey(right);
 }
 
 function linkedSession(
@@ -82,9 +80,7 @@ function linkedSession(
   policy: ChartLinkGroupSettings,
 ): ChartSession {
   return {
-    exchange: policy.market ? source.exchange : target.exchange,
-    marketType: policy.market ? source.marketType : target.marketType,
-    symbol: policy.market ? source.symbol : target.symbol,
+    ...(policy.market ? source : target),
     interval: policy.interval ? source.interval : target.interval,
   };
 }

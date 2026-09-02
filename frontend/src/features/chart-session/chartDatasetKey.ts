@@ -1,5 +1,9 @@
 import type { ChartSession, DatasetKey } from "./chartSessionTypes.js";
 import { canonicalizeIntervalValue } from "../../utils/intervals.js";
+import {
+  isLegacyKlineSeriesIdentity,
+  klineSeriesIdentityKey,
+} from "../market-data/klineSeriesIdentity.js";
 
 export interface ChartDatasetSourceIdentity {
   sourceKind?: string;
@@ -12,18 +16,24 @@ function keyPart(value: string | number): string {
   return encodeURIComponent(String(value));
 }
 
-export function buildChartDatasetKey<T extends ChartSession & ChartDatasetSourceIdentity>({
-  exchange,
-  marketType,
-  symbol,
-  interval,
-  sourceKind,
-  replaySessionId,
-  dataEpoch,
-  publicTimelineEpoch,
-}: T): DatasetKey {
+export function buildChartDatasetKey<T extends ChartSession & ChartDatasetSourceIdentity>(
+  session: T,
+): DatasetKey {
+  const {
+    exchange,
+    marketType,
+    symbol,
+    interval,
+    sourceKind,
+    replaySessionId,
+    dataEpoch,
+    publicTimelineEpoch,
+  } = session;
   const canonicalInterval = canonicalizeIntervalValue(interval) || interval;
-  const legacyKey = [exchange, marketType, symbol, canonicalInterval].join("-");
+  const routedKey = [exchange, marketType, symbol, canonicalInterval].join("-");
+  const legacyKey = isLegacyKlineSeriesIdentity(exchange, session)
+    ? routedKey
+    : `${klineSeriesIdentityKey(exchange, session)}::${routedKey}`;
   const hasSourceScope = sourceKind !== undefined
     || replaySessionId !== undefined
     || dataEpoch !== undefined

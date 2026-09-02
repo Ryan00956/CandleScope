@@ -10,6 +10,14 @@ from app.data_engine.market_data.models import (
     MarketChannel,
     TransportMode,
 )
+from app.data_engine.series_identity import (
+    DEFAULT_ASSET_CLASS,
+    DEFAULT_PRICE_ADJUSTMENT,
+    DEFAULT_SERIES_VARIANT,
+    DEFAULT_SESSION_VARIANT,
+    DEFAULT_VOLUME_SEMANTICS,
+    KlineSeriesIdentity,
+)
 
 
 CRYPTO_24X7_CALENDAR_ID = "crypto.24x7.utc"
@@ -437,6 +445,24 @@ class SymbolInfo:
     delisted_at_ms: int | None = None
     expiry_at_ms: int | None = None
     price_tick_size: str = ""
+    display_name: str = ""
+    currency: str = ""
+    provider_id: str = ""
+    provider_instrument_id: str = ""
+    venue: str = ""
+    venue_mic: str = ""
+    asset_class: str = DEFAULT_ASSET_CLASS
+    series_variant: str = DEFAULT_SERIES_VARIANT
+    price_adjustment: str = DEFAULT_PRICE_ADJUSTMENT
+    session_variant: str = DEFAULT_SESSION_VARIANT
+    volume_semantics: str = DEFAULT_VOLUME_SEMANTICS
+    contract_multiplier: str = ""
+    underlying_symbol: str = ""
+    option_strike: str = ""
+    option_right: str = ""
+    entitlement: str = "unknown"
+    delay_seconds: int | None = None
+    redistribution: str = "unknown"
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -461,8 +487,64 @@ class SymbolInfo:
             if not parsed_tick_size.is_finite() or parsed_tick_size <= 0:
                 raise ValueError("price_tick_size must be a positive decimal string")
         self.price_tick_size = tick_size
+        identity = KlineSeriesIdentity.for_exchange(
+            self.exchange,
+            provider_id=self.provider_id or None,
+            venue=self.venue or self.venue_mic or None,
+            asset_class=self.asset_class,
+            series_variant=self.series_variant,
+            price_adjustment=self.price_adjustment,
+            session_variant=self.session_variant,
+            volume_semantics=self.volume_semantics,
+        )
+        for field_name, value in identity.to_dict().items():
+            setattr(self, field_name, value)
+        self.display_name = str(self.display_name or "").strip()
+        self.currency = str(self.currency or "").strip().upper()
+        self.provider_instrument_id = str(
+            self.provider_instrument_id or ""
+        ).strip()
+        self.venue_mic = str(self.venue_mic or "").strip().upper()
+        self.underlying_symbol = str(self.underlying_symbol or "").strip().upper()
+        self.option_right = str(self.option_right or "").strip().lower()
+        if self.option_right not in {"", "call", "put"}:
+            raise ValueError("option_right must be call, put, or empty")
+        for field_name, allow_zero in (
+            ("contract_multiplier", False),
+            ("option_strike", True),
+        ):
+            text = str(getattr(self, field_name) or "").strip()
+            if text:
+                try:
+                    parsed = Decimal(text)
+                except InvalidOperation as exc:
+                    raise ValueError(
+                        f"{field_name} must be a decimal string"
+                    ) from exc
+                if not parsed.is_finite() or parsed < 0 or (parsed == 0 and not allow_zero):
+                    raise ValueError(f"{field_name} must be a valid decimal string")
+            setattr(self, field_name, text)
+        if self.delay_seconds is not None:
+            if isinstance(self.delay_seconds, bool) or not isinstance(
+                self.delay_seconds,
+                int,
+            ):
+                raise TypeError("delay_seconds must be a non-boolean integer or None")
+            if self.delay_seconds < 0:
+                raise ValueError("delay_seconds must be non-negative or None")
+        self.entitlement = str(self.entitlement or "unknown").strip().lower()
+        self.redistribution = str(self.redistribution or "unknown").strip().lower()
 
     def to_dict(self) -> dict[str, Any]:
+        identity = KlineSeriesIdentity(
+            provider_id=self.provider_id,
+            venue=self.venue,
+            asset_class=self.asset_class,
+            series_variant=self.series_variant,
+            price_adjustment=self.price_adjustment,
+            session_variant=self.session_variant,
+            volume_semantics=self.volume_semantics,
+        )
         data = {
             "symbol": self.symbol,
             "baseAsset": self.base_asset,
@@ -475,6 +557,18 @@ class SymbolInfo:
             "continuousTradingAtMs": self.continuous_trading_at_ms,
             "delistedAtMs": self.delisted_at_ms,
             "expiryAtMs": self.expiry_at_ms,
+            "displayName": self.display_name,
+            "currency": self.currency,
+            **identity.to_camel_dict(),
+            "providerInstrumentId": self.provider_instrument_id,
+            "venueMic": self.venue_mic,
+            "contractMultiplier": self.contract_multiplier,
+            "underlyingSymbol": self.underlying_symbol,
+            "optionStrike": self.option_strike,
+            "optionRight": self.option_right,
+            "entitlement": self.entitlement,
+            "delaySeconds": self.delay_seconds,
+            "redistribution": self.redistribution,
         }
         if self.contract_type:
             data["contractType"] = self.contract_type

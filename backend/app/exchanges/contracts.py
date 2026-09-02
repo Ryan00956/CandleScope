@@ -130,7 +130,7 @@ def validate_exchange_plugin_contract(
         if channel_capability is None:
             # Preserve the schema-v1 harness, whose transport support is not
             # expressed as a per-channel matrix.
-            _validate_rest_contract(protocol, case, report)
+            _validate_rest_contract(protocol, case, report, config=config)
             _validate_ws_contract(
                 protocol,
                 case,
@@ -153,7 +153,7 @@ def validate_exchange_plugin_contract(
                 TransportMode.REST_SNAPSHOT.value,
                 TransportMode.REST_HISTORY.value,
             }:
-                _validate_rest_contract(protocol, case, report)
+                _validate_rest_contract(protocol, case, report, config=config)
             if TransportMode.WEBSOCKET.value in realtime_transports:
                 _validate_ws_contract(
                     protocol,
@@ -901,8 +901,14 @@ def _validate_rest_contract(
     protocol: Any,
     case: ExchangeContractCase,
     report: ExchangeContractReport,
+    *,
+    config: Any | None = None,
 ) -> None:
-    spec = _safe_call(report, "protocol.rest_request", lambda: protocol.rest_request(case.request))
+    spec = _safe_call(
+        report,
+        "protocol.rest_request",
+        lambda: protocol.rest_request(case.request, config=config),
+    )
     if spec is None:
         return
     if not getattr(spec, "base_urls", None):

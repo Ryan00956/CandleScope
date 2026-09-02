@@ -29,6 +29,7 @@ import {
   reconcileInitialRepairRetry,
 } from "./feed/initialRepairRetryPolicy.js";
 import { planTargetBarRequest } from "./intervalRequestBudget.js";
+import type { KlineSeriesIdentityInput } from "./klineSeriesIdentity.js";
 
 const INITIAL_BACKFILL_RETRY_MS = 3_000;
 const INITIAL_BACKFILL_TIMEOUT_MS = 10_000;
@@ -179,6 +180,7 @@ export interface UseChartInitialLoadOptions {
   enabled: boolean;
   exchange: ExchangeId;
   marketType: MarketType;
+  seriesIdentity?: KlineSeriesIdentityInput;
   nativeIntervalValues: readonly IntervalString[];
   initialViewportCountBackCap?: number;
   getFromCache(symbol: SymbolCode, interval: IntervalString): KlineBar[];
@@ -348,6 +350,7 @@ export function useChartInitialLoad({
   enabled,
   exchange,
   marketType,
+  seriesIdentity,
   nativeIntervalValues,
   initialViewportCountBackCap,
   getFromCache,
@@ -449,7 +452,13 @@ export function useChartInitialLoad({
     setCrosshairData(null);
     pendingInitialHistoryRef.current = null;
 
-    const series = { exchange: ex, marketType: mt, symbol: sym, interval: intv };
+    const series = {
+      exchange: ex,
+      marketType: mt,
+      symbol: sym,
+      interval: intv,
+      ...(ex === exchange && mt === marketType ? seriesIdentity : {}),
+    };
     const initialHistoryCountBack = planInitialHistoryCountBack(intv, nativeIntervalValues);
     const plannedViewportCountBack = planInitialViewportCountBack(intv, nativeIntervalValues);
     const initialViewportCountBack = initialViewportCountBackCap == null
@@ -921,6 +930,7 @@ export function useChartInitialLoad({
     replaceChartData,
     resolveInitialRows,
     seriesDataFeed,
+    seriesIdentity,
     setConnectionStatus,
     setCrosshairData,
     setDataSource,

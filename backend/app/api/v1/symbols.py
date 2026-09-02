@@ -931,6 +931,68 @@ async def _ensure_requested_catalog(
 # ── API Endpoints ────────────────────────────────────────────
 
 
+async def _search_provider_symbols(
+    *,
+    exchange: str,
+    market_type: str,
+    search: str,
+) -> list[dict[str, Any]] | None:
+    """Use a provider's bounded query API when it cannot expose a safe full catalog."""
+
+    normalized_exchange = exchange.strip().lower()
+    if not normalized_exchange:
+        return None
+    registry = get_exchange_registry()
+    try:
+        adapter = registry.get(normalized_exchange)
+    except KeyError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported exchange: {exchange}",
+        )
+    search_symbols = getattr(adapter, "search_symbols", None)
+    if not callable(search_symbols):
+        return None
+    if not search.strip():
+        # Query-only providers deliberately have no unbounded catalog.  An
+        # empty selection is still a healthy response and lets the picker ask
+        # the user for a bounded search term instead of surfacing a 503.
+        return []
+    try:
+        symbols = await search_symbols(
+            search.strip(),
+            market_type.strip().lower(),
+            limit=120,
+        )
+    except RateLimitDeferred as exc:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "code": "provider_rate_limited",
+                "message": "Symbol provider quota is temporarily exhausted",
+                "retryable": True,
+                "retry_at_ms": exc.retry_at_ms,
+            },
+            headers={"Retry-After": str(max(1, int(exc.retry_after_seconds)))},
+        ) from exc
+    except Exception as exc:
+        logger.warning(
+            "Direct provider symbol search failed for %s:%s: %s",
+            normalized_exchange,
+            market_type,
+            exc,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "provider_symbol_search_unavailable",
+                "message": str(exc),
+                "retryable": False,
+            },
+        ) from exc
+    return [item.to_dict() for item in symbols]
+
+
 @router.get("/exchange-info")
 async def get_exchange_info(
     search: str = Query("", description="Filter by symbol or asset name (case-insensitive)"),
@@ -940,6 +1002,27 @@ async def get_exchange_info(
 ) -> dict:
     """Return cached trading pair list with optional filtering."""
     bootstrap_default_adapters()
+    provider_results = await _search_provider_symbols(
+        exchange=exchange,
+        market_type=market_type,
+        search=search,
+    )
+    if provider_results is not None:
+        if quote_asset:
+            qa = quote_asset.upper().strip()
+            provider_results = [
+                item for item in provider_results if item["quoteAsset"] == qa
+            ]
+        return {
+            "count": len(provider_results),
+            "cached_at": 0.0,
+            "symbols": provider_results,
+            "stale": False,
+            "last_success_at": time.time(),
+            "retry_at_ms": None,
+            "markets": {},
+            "provider_search": True,
+        }
     await _ensure_requested_catalog(exchange, market_type)
     results, cached_at = list_cached_symbols(exchange=exchange, market_type=market_type)
     status = _catalog_status_payload(exchange=exchange, market_type=market_type)

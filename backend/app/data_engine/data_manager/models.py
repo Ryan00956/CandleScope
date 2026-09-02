@@ -37,6 +37,14 @@ from app.data_engine.kline_quality import (
     kline_source_quality,
     normalize_kline_source,
 )
+from app.data_engine.series_identity import (
+    DEFAULT_ASSET_CLASS,
+    DEFAULT_PRICE_ADJUSTMENT,
+    DEFAULT_SERIES_VARIANT,
+    DEFAULT_SESSION_VARIANT,
+    DEFAULT_VOLUME_SEMANTICS,
+    KlineSeriesIdentity,
+)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -46,7 +54,7 @@ from app.data_engine.kline_quality import (
 
 @dataclass(frozen=True, slots=True)
 class SeriesKey:
-    """Immutable identifier for an (exchange, market_type, symbol, interval) series.
+    """Immutable identifier for one routed and semantically distinct series.
 
     Usable as a dict key and set member.
 
@@ -60,6 +68,13 @@ class SeriesKey:
     interval: str
     exchange: str = "binance"
     market_type: str = "spot"  # "spot" or "futures"
+    provider_id: str | None = None
+    venue: str | None = None
+    asset_class: str = DEFAULT_ASSET_CLASS
+    series_variant: str = DEFAULT_SERIES_VARIANT
+    price_adjustment: str = DEFAULT_PRICE_ADJUSTMENT
+    session_variant: str = DEFAULT_SESSION_VARIANT
+    volume_semantics: str = DEFAULT_VOLUME_SEMANTICS
 
     def __post_init__(self) -> None:
         # Normalize symbol to uppercase
@@ -73,6 +88,30 @@ class SeriesKey:
         )
         object.__setattr__(self, "exchange", self.exchange.strip().lower())
         object.__setattr__(self, "market_type", self.market_type.strip().lower())
+        identity = KlineSeriesIdentity.for_exchange(
+            self.exchange,
+            provider_id=self.provider_id,
+            venue=self.venue,
+            asset_class=self.asset_class,
+            series_variant=self.series_variant,
+            price_adjustment=self.price_adjustment,
+            session_variant=self.session_variant,
+            volume_semantics=self.volume_semantics,
+        )
+        for field_name, value in identity.to_dict().items():
+            object.__setattr__(self, field_name, value)
+
+    @property
+    def identity(self) -> KlineSeriesIdentity:
+        return KlineSeriesIdentity(
+            provider_id=str(self.provider_id),
+            venue=str(self.venue),
+            asset_class=self.asset_class,
+            series_variant=self.series_variant,
+            price_adjustment=self.price_adjustment,
+            session_variant=self.session_variant,
+            volume_semantics=self.volume_semantics,
+        )
 
     @property
     def topic(self) -> str:
@@ -83,8 +122,12 @@ class SeriesKey:
             prefixes.append(self.exchange)
         if self.market_type != "spot":
             prefixes.append(self.market_type)
+        routed = f"{':'.join(prefixes)}:{base}" if prefixes else base
+        if not self.identity.is_legacy_default_for(self.exchange):
+            semantic = ":".join(self.identity.storage_values)
+            return f"series:{semantic}:{routed}"
         if prefixes:
-            return f"{':'.join(prefixes)}:{base}"
+            return routed
         return base
 
     def __str__(self) -> str:
@@ -686,9 +729,30 @@ class MissingRange:
     end_ms: int
     exchange: str = "binance"
     market_type: str = "spot"
+    provider_id: str | None = None
+    venue: str | None = None
+    asset_class: str = DEFAULT_ASSET_CLASS
+    series_variant: str = DEFAULT_SERIES_VARIANT
+    price_adjustment: str = DEFAULT_PRICE_ADJUSTMENT
+    session_variant: str = DEFAULT_SESSION_VARIANT
+    volume_semantics: str = DEFAULT_VOLUME_SEMANTICS
     reason: str = "query_gap"
     missing_bars: int | None = None
     status: str = "detected"
+
+    def __post_init__(self) -> None:
+        identity = KlineSeriesIdentity.for_exchange(
+            self.exchange,
+            provider_id=self.provider_id,
+            venue=self.venue,
+            asset_class=self.asset_class,
+            series_variant=self.series_variant,
+            price_adjustment=self.price_adjustment,
+            session_variant=self.session_variant,
+            volume_semantics=self.volume_semantics,
+        )
+        for field_name, value in identity.to_dict().items():
+            setattr(self, field_name, value)
 
     def to_dict(self) -> dict:
         payload = {
@@ -731,6 +795,13 @@ class QueryResult:
     interval: str = ""
     exchange: str = "binance"
     market_type: str = "spot"
+    provider_id: str | None = None
+    venue: str | None = None
+    asset_class: str = DEFAULT_ASSET_CLASS
+    series_variant: str = DEFAULT_SERIES_VARIANT
+    price_adjustment: str = DEFAULT_PRICE_ADJUSTMENT
+    session_variant: str = DEFAULT_SESSION_VARIANT
+    volume_semantics: str = DEFAULT_VOLUME_SEMANTICS
     source: QuerySource = QuerySource.EMPTY
     total: int = 0
     has_more: bool = False
@@ -751,12 +822,33 @@ class QueryResult:
     availability_revision: str | None = None
     excluded_ranges: list[dict[str, Any]] = field(default_factory=list)
 
+    def __post_init__(self) -> None:
+        identity = KlineSeriesIdentity.for_exchange(
+            self.exchange,
+            provider_id=self.provider_id,
+            venue=self.venue,
+            asset_class=self.asset_class,
+            series_variant=self.series_variant,
+            price_adjustment=self.price_adjustment,
+            session_variant=self.session_variant,
+            volume_semantics=self.volume_semantics,
+        )
+        for field_name, value in identity.to_dict().items():
+            setattr(self, field_name, value)
+
     def to_dict(self) -> dict:
         return {
             "symbol": self.symbol,
             "interval": self.interval,
             "exchange": self.exchange,
             "market_type": self.market_type,
+            "provider_id": self.provider_id,
+            "venue": self.venue,
+            "asset_class": self.asset_class,
+            "series_variant": self.series_variant,
+            "price_adjustment": self.price_adjustment,
+            "session_variant": self.session_variant,
+            "volume_semantics": self.volume_semantics,
             "source": self.source.value,
             "total": self.total,
             "has_more": self.has_more,
@@ -873,6 +965,7 @@ class DataEvent:
             "interval": self.key.interval,
             "market_type": self.key.market_type,
             "timestamp_ms": self.timestamp_ms,
+            **self.key.identity.to_dict(),
         }
         if self.bar is not None:
             d["bar"] = self.bar.to_dict()
@@ -970,6 +1063,7 @@ class StreamInfo:
             "symbol": self.key.symbol,
             "interval": self.key.interval,
             "market_type": self.key.market_type,
+            **self.key.identity.to_dict(),
             "topic": self.key.topic,
             "status": self.status.value,
             "subscriber_count": self.subscriber_count,
@@ -1006,6 +1100,7 @@ class StorageBackend(Protocol):
         order: str = "ASC",
         exchange: str = "binance",
         market_type: str = "spot",
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> list[dict]:
         """Query bars from storage.  Returns list of row dicts."""
         ...
@@ -1018,12 +1113,18 @@ class StorageBackend(Protocol):
         source: str = "data_manager",
         exchange: str = "binance",
         market_type: str = "spot",
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> int:
         """Insert or update bars.  Returns number of rows written."""
         ...
 
     def get_bounds(
-        self, symbol: str, interval: str, exchange: str = "binance", market_type: str = "spot",
+        self,
+        symbol: str,
+        interval: str,
+        exchange: str = "binance",
+        market_type: str = "spot",
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> dict:
         """Return {earliest_open_time, latest_open_time, total_count}."""
         ...
@@ -1036,6 +1137,7 @@ class StorageBackend(Protocol):
         end_ms: int | None = None,
         exchange: str = "binance",
         market_type: str = "spot",
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> int:
         """Delete bars in range.  Returns number of rows deleted."""
         ...
@@ -1048,6 +1150,7 @@ class StorageBackend(Protocol):
         limit: int = 500,
         exchange: str = "binance",
         market_type: str = "spot",
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> list[dict]:
         """Fetch bars before a timestamp, ordered ASC."""
         ...

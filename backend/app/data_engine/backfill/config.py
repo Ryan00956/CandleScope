@@ -154,6 +154,15 @@ class BackfillConfig:
     fetch_okx_concurrency: int = field(
         default_factory=lambda: _env_int("BACKFILL_FETCH_OKX_CONCURRENCY", 1),
     )
+    fetch_twelve_data_concurrency: int = field(
+        default_factory=lambda: _env_int("BACKFILL_FETCH_TWELVE_DATA_CONCURRENCY", 1),
+    )
+    fetch_twelve_data_credits_per_minute: int = field(
+        default_factory=lambda: _env_int(
+            "BACKFILL_TWELVE_DATA_CREDITS_PER_MINUTE",
+            8,
+        ),
+    )
     # Bars per REST page (exchange limit is usually 1000)
     fetch_batch_size: int = field(
         default_factory=lambda: _env_int("BACKFILL_FETCH_BATCH_SIZE", 1000),

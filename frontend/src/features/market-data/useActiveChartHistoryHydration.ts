@@ -232,7 +232,7 @@ export function useActiveChartHistoryHydration({
   priorityGate,
   commitMergedChartData,
 }: UseActiveChartHistoryHydrationOptions): void {
-  const { exchange, marketType, symbol, interval } = series;
+  const semanticSeriesKey = String(seriesDataFeed.seriesKey(series));
   useEffect(() => {
     if (!shouldStartActiveHistoryHydration({
       enabled,
@@ -260,7 +260,7 @@ export function useActiveChartHistoryHydration({
       if (cancelled || running) return;
       running = true;
       const outcome = await runActiveHistoryHydration({
-        series: { exchange, marketType, symbol, interval },
+        series,
         sessionKey,
         targetCountBack,
         seriesDataFeed,
@@ -291,15 +291,13 @@ export function useActiveChartHistoryHydration({
   }, [
     commitMergedChartData,
     enabled,
-    exchange,
     historyComplete,
     historyRepairPending,
-    interval,
-    marketType,
     priorityGate,
+    series,
     seriesDataFeed,
+    semanticSeriesKey,
     sessionKey,
-    symbol,
     targetCountBack,
     validatedCountBack,
     viewportCountBack,

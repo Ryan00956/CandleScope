@@ -9,6 +9,7 @@ import type {
   ChartSessionKey,
   ChartSessionTransition,
 } from "../chart-session/chartSessionTypes.js";
+import type { KlineSeriesIdentityInput } from "./klineSeriesIdentity.js";
 
 declare const epochSecondsBrand: unique symbol;
 declare const epochMillisecondsBrand: unique symbol;
@@ -30,7 +31,7 @@ export interface TimeRangeMs {
   end: EpochMilliseconds;
 }
 
-export interface MarketSeries {
+export interface MarketSeries extends KlineSeriesIdentityInput {
   exchange: ExchangeId;
   marketType: MarketType;
   symbol: SymbolCode;

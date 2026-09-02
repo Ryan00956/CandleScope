@@ -438,7 +438,7 @@ class TransportLayer:
 
                 proxy = self._resolve_proxy()
                 async with self._http_session.get(
-                    url, params=params, proxy=proxy
+                    url, params=params, headers=spec.headers, proxy=proxy
                 ) as resp:  # type: ignore[union-attr]
                     headers = {str(k): str(v) for k, v in resp.headers.items()}
                     if resp.status != 200:

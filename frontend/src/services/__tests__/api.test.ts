@@ -415,10 +415,15 @@ test("symbol catalog reads encode exact CCXT markets and forward cancellation", 
     return jsonResponse({ symbols: [] });
   };
 
-  await fetchExchangeInfo("swap.linear", "bybit", { signal: controller.signal });
+  await fetchExchangeInfo("swap.linear", "bybit", {
+    signal: controller.signal,
+    search: "btc & eth",
+  });
 
-  assert.match(capturedUrl, /market_type=swap\.linear/);
-  assert.match(capturedUrl, /exchange=bybit/);
+  const query = new URL(capturedUrl, "http://candlescope.local").searchParams;
+  assert.equal(query.get("market_type"), "swap.linear");
+  assert.equal(query.get("exchange"), "bybit");
+  assert.equal(query.get("search"), "btc & eth");
   assert.equal(capturedSignal, controller.signal);
 });
 

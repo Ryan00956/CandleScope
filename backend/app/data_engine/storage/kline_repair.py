@@ -41,6 +41,13 @@ from app.data_engine.interval_policy import (
     parse_interval_ms,
 )
 from app.data_engine.market_data.kline_metrics import KLINE_ENHANCED_FIELDS
+from app.data_engine.series_identity import (
+    DEFAULT_ASSET_CLASS,
+    DEFAULT_PRICE_ADJUSTMENT,
+    DEFAULT_SERIES_VARIANT,
+    DEFAULT_SESSION_VARIANT,
+    DEFAULT_VOLUME_SEMANTICS,
+)
 
 
 REPAIR_SOURCE = "repair_binance_rest_verified"
@@ -399,18 +406,35 @@ class KlineRepairRunner:
             where.append("open_time <= ?")
             params.append(int(request.end_ms))
 
-        sql = (
-            f"SELECT {', '.join(_ROW_FIELDS)} FROM klines "
-            f"WHERE {' AND '.join(where)} "
-            "ORDER BY exchange, market_type, symbol, interval, open_time "
-            "LIMIT ?"
-        )
-        params.append(request.max_candidates + 1)
         with _read_only_connection(request.db_path) as conn:
             columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(klines)")}
             missing = sorted(set(_ROW_FIELDS) - columns)
             if missing:
                 raise RepairValidationError(f"klines schema is missing columns: {', '.join(missing)}")
+            if _has_semantic_identity(columns):
+                where[:0] = [
+                    "provider_id = exchange",
+                    "venue = exchange",
+                    "asset_class = ?",
+                    "series_variant = ?",
+                    "price_adjustment = ?",
+                    "session_variant = ?",
+                    "volume_semantics = ?",
+                ]
+                params[:0] = [
+                    DEFAULT_ASSET_CLASS,
+                    DEFAULT_SERIES_VARIANT,
+                    DEFAULT_PRICE_ADJUSTMENT,
+                    DEFAULT_SESSION_VARIANT,
+                    DEFAULT_VOLUME_SEMANTICS,
+                ]
+            sql = (
+                f"SELECT {', '.join(_ROW_FIELDS)} FROM klines "
+                f"WHERE {' AND '.join(where)} "
+                "ORDER BY exchange, market_type, symbol, interval, open_time "
+                "LIMIT ?"
+            )
+            params.append(request.max_candidates + 1)
             rows = conn.execute(sql, params).fetchall()
         if len(rows) > request.max_candidates:
             raise RepairValidationError(
@@ -592,7 +616,10 @@ class KlineRepairRunner:
                     raise RepairApplyError(f"candidate drifted before apply: {item.candidate.key}", {})
 
             now_ms = int(self._now().timestamp() * 1000)
-            sql = _repair_upsert_sql()
+            columns = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(klines)")
+            }
+            sql = _repair_upsert_sql(semantic_identity=_has_semantic_identity(columns))
             for index, item in enumerate(plan.repairs):
                 local = item.candidate.row
                 official = item.official
@@ -1018,9 +1045,19 @@ def _read_candidates_by_key(
     keys: Sequence[tuple[str, str, str, str, int]],
 ) -> dict[tuple[str, str, str, str, int], sqlite3.Row]:
     rows: dict[tuple[str, str, str, str, int], sqlite3.Row] = {}
+    columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(klines)")}
+    identity_filter = (
+        " AND provider_id=exchange AND venue=exchange "
+        "AND asset_class='crypto' AND series_variant='native' "
+        "AND price_adjustment='raw' AND session_variant='continuous' "
+        "AND volume_semantics='base_asset'"
+        if _has_semantic_identity(columns)
+        else ""
+    )
     sql = (
         f"SELECT {', '.join(_ROW_FIELDS)} FROM klines "
         "WHERE exchange=? AND market_type=? AND symbol=? AND interval=? AND open_time=?"
+        + identity_filter
     )
     for key in keys:
         row = conn.execute(sql, key).fetchone()
@@ -1029,15 +1066,36 @@ def _read_candidates_by_key(
     return rows
 
 
-def _repair_upsert_sql() -> str:
-    return """
+def _has_semantic_identity(columns: set[str]) -> bool:
+    return {
+        "provider_id",
+        "venue",
+        "asset_class",
+        "series_variant",
+        "price_adjustment",
+        "session_variant",
+        "volume_semantics",
+    } <= columns
+
+
+def _repair_upsert_sql(*, semantic_identity: bool) -> str:
+    conflict_target = (
+        """
+            exchange, market_type, provider_id, venue, asset_class,
+            symbol, interval, series_variant, price_adjustment,
+            session_variant, volume_semantics, open_time
+        """
+        if semantic_identity
+        else "exchange, market_type, symbol, interval, open_time"
+    )
+    return f"""
         INSERT INTO klines (
             exchange, market_type, symbol, interval, open_time,
             close_time, open, high, low, close, volume, quote_volume,
             trades, taker_buy_base, taker_buy_quote,
             source, created_at, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(exchange, market_type, symbol, interval, open_time) DO UPDATE SET
+        ON CONFLICT({conflict_target}) DO UPDATE SET
             close_time=excluded.close_time,
             open=excluded.open,
             high=excluded.high,

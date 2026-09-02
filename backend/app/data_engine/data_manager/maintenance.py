@@ -16,6 +16,7 @@ from app.data_engine.interval_policy import (
     parse_custom_interval,
     parse_interval_ms,
 )
+from app.data_engine.series_identity import KlineSeriesIdentity
 
 from .backfill_coordinator import RepairRequest
 from .models import BarData, SeriesKey
@@ -739,24 +740,31 @@ class MaintenanceService:
         end_ms: int | None = None,
         exchange: str = "binance",
         market_type: str = "spot",
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> int:
         """Delete stored bars for a series through the configured storage backend."""
         storage = self._storage()
+        delete_kwargs: dict[str, Any] = {
+            "symbol": symbol,
+            "interval": interval,
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+            "exchange": exchange,
+            "market_type": market_type,
+        }
+        if series_identity is not None:
+            delete_kwargs["series_identity"] = series_identity
         deleted = await run_storage(
             storage.delete_bars,
-            symbol=symbol,
-            interval=interval,
-            start_ms=start_ms,
-            end_ms=end_ms,
-            exchange=exchange,
-            market_type=market_type,
+            **delete_kwargs,
         )
-        self._cache_invalidator(
-            symbol,
-            interval,
-            exchange=exchange,
-            market_type=market_type,
-        )
+        invalidate_kwargs: dict[str, Any] = {
+            "exchange": exchange,
+            "market_type": market_type,
+        }
+        if series_identity is not None:
+            invalidate_kwargs["series_identity"] = series_identity
+        self._cache_invalidator(symbol, interval, **invalidate_kwargs)
         return int(deleted or 0)
 
     async def run_storage_gc(

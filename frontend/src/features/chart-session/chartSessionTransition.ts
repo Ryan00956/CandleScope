@@ -5,6 +5,10 @@ import type {
   ChartSessionTransitionType,
 } from "./chartSessionTypes.js";
 import { canonicalizeIntervalValue } from "../../utils/intervals.js";
+import {
+  isLegacyKlineSeriesIdentity,
+  klineSeriesIdentityKey,
+} from "../market-data/klineSeriesIdentity.js";
 
 export const CHART_SESSION_TRANSITION_TYPES = Object.freeze({
   SYMBOL_CHANGE: "symbol-change",
@@ -13,13 +17,12 @@ export const CHART_SESSION_TRANSITION_TYPES = Object.freeze({
   CAPABILITY_CORRECTION: "capability-correction",
 } as const satisfies Record<string, ChartSessionTransitionType>);
 
-export function buildChartSessionKey<T extends ChartSession>({
-  exchange,
-  marketType,
-  symbol,
-  interval,
-}: T): ChartSessionKey {
-  return `${exchange}:${marketType}:${symbol}:${canonicalizeIntervalValue(interval) || interval}`;
+export function buildChartSessionKey<T extends ChartSession>(session: T): ChartSessionKey {
+  const { exchange, marketType, symbol, interval } = session;
+  const routed = `${exchange}:${marketType}:${symbol}:${canonicalizeIntervalValue(interval) || interval}`;
+  return isLegacyKlineSeriesIdentity(exchange, session)
+    ? routed
+    : `${klineSeriesIdentityKey(exchange, session)}:${routed}`;
 }
 
 export interface CreateChartSessionTransitionOptions {

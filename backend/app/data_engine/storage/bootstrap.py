@@ -157,7 +157,7 @@ def initialize_market_storage(
             component="bars",
             backend="sqlite",
             path=main_path,
-            schema_version=1,
+            schema_version=2,
             initialized=True,
             roles=("kline_history", "history_archive_imports"),
         ),

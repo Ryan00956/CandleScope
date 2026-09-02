@@ -28,6 +28,10 @@ import type {
   SubscriptionTier,
 } from "../features/watchlist/watchlistTypes.js";
 import { sharedControlRead } from "./sharedControlRead.js";
+import {
+  klineSeriesIdentityQuery,
+  type KlineSeriesIdentityInput,
+} from "../features/market-data/klineSeriesIdentity.js";
 
 const CLIENT_INSTANCE_ID = Math.random().toString(36).slice(2, 10);
 
@@ -51,6 +55,7 @@ export interface RequestSignalOptions {
   signal?: AbortSignal;
   demandScope?: string;
   demandGeneration?: number;
+  seriesIdentity?: KlineSeriesIdentityInput;
 }
 
 export interface KlineHistoryOptions extends RequestSignalOptions {
@@ -207,6 +212,7 @@ export async function fetchKlinesHistory(
     intent: options.intent,
     request_scope: options.demandScope,
     request_generation: options.demandGeneration,
+    ...klineSeriesIdentityQuery(exchange, options.seriesIdentity),
   }), requestSignalOptions(options.signal));
   return parseKlineResponse(payload, "GET /klines/history");
 }
@@ -235,6 +241,7 @@ export async function fetchKlinesHistoryBatch(
         intent: item.options.intent,
         request_scope: item.options.demandScope,
         request_generation: item.options.demandGeneration,
+        ...klineSeriesIdentityQuery(item.exchange, item.options.seriesIdentity),
       })),
     },
     ...(options.signal === undefined ? {} : { signal: options.signal }),
@@ -291,6 +298,7 @@ export async function fetchKlinesBefore(
     max_wait_ms: options.maxWaitMs,
     request_scope: options.demandScope,
     request_generation: options.demandGeneration,
+    ...klineSeriesIdentityQuery(exchange, options.seriesIdentity),
   }), requestSignalOptions(options.signal));
   return parseKlineResponse(payload, "GET /klines/history/before");
 }
@@ -316,6 +324,7 @@ export async function fetchLatestKlines(
     max_wait_ms: options.waitMs,
     request_scope: options.demandScope,
     request_generation: options.demandGeneration,
+    ...klineSeriesIdentityQuery(exchange, options.seriesIdentity),
   }), requestSignalOptions(options.signal));
   return parseKlineResponse(payload, "GET /klines/latest");
 }
@@ -341,6 +350,7 @@ export async function fetchKlinesRange(
     strict: options.strict ?? false,
     request_scope: options.demandScope,
     request_generation: options.demandGeneration,
+    ...klineSeriesIdentityQuery(exchange, options.seriesIdentity),
   }), requestSignalOptions(options.signal));
   return parseKlineResponse(payload, "GET /klines/range");
 }
@@ -389,11 +399,12 @@ export function getBatchKlineStreamUrl(): string {
 export async function fetchExchangeInfo(
   marketType = "",
   exchange = "",
-  options: RequestSignalOptions = {},
+  options: RequestSignalOptions & { search?: string } = {},
 ): Promise<unknown> {
   return request(buildUrl("/symbols/exchange-info", {
     market_type: marketType,
     exchange,
+    search: options.search,
   }), requestSignalOptions(options.signal));
 }
 

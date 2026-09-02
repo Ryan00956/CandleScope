@@ -48,6 +48,7 @@ from .facades import (
     PartialOrderBookFacade,
     TradeDataFacade,
 )
+from app.data_engine.series_identity import KlineSeriesIdentity
 from .storage_intents import StorageIntentRegistry
 from .subscriptions import SubscriptionTier
 from .manager import DataManager, StreamCapacityError
@@ -73,6 +74,7 @@ __all__ = [
     # Models
     "BarData",
     "SeriesKey",
+    "KlineSeriesIdentity",
     "QueryResult",
     "MissingRange",
     "QuerySource",

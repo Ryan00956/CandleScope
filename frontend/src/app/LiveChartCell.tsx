@@ -45,6 +45,7 @@ import {
   type WorkspaceCellDensity,
 } from "../features/chart-workspace/chartWorkspaceGeometry.js";
 import { useMarketDataRuntime } from "../features/market-data/useMarketDataRuntime.js";
+import { resolveKlineSeriesIdentity } from "../features/market-data/klineSeriesIdentity.js";
 import { useLiveReferenceMarketChartSource } from "../features/market-chart-platform/useLiveReferenceMarketChartSource.js";
 import {
   initialViewportCountBackCapForCellCount,
@@ -338,10 +339,36 @@ function LiveChartCell({
     marketType: chartSession.view.marketType,
     symbol: chartSession.view.symbol,
     interval: chartSession.view.interval,
+    ...resolveKlineSeriesIdentity(
+      chartSession.view.exchange,
+      {
+        ...(chartSession.view.providerId === undefined
+          ? {} : { providerId: chartSession.view.providerId }),
+        ...(chartSession.view.venue === undefined
+          ? {} : { venue: chartSession.view.venue }),
+        ...(chartSession.view.assetClass === undefined
+          ? {} : { assetClass: chartSession.view.assetClass }),
+        ...(chartSession.view.seriesVariant === undefined
+          ? {} : { seriesVariant: chartSession.view.seriesVariant }),
+        ...(chartSession.view.priceAdjustment === undefined
+          ? {} : { priceAdjustment: chartSession.view.priceAdjustment }),
+        ...(chartSession.view.sessionVariant === undefined
+          ? {} : { sessionVariant: chartSession.view.sessionVariant }),
+        ...(chartSession.view.volumeSemantics === undefined
+          ? {} : { volumeSemantics: chartSession.view.volumeSemantics }),
+      },
+    ),
   }), [
     chartSession.view.exchange,
     chartSession.view.interval,
     chartSession.view.marketType,
+    chartSession.view.providerId,
+    chartSession.view.venue,
+    chartSession.view.assetClass,
+    chartSession.view.seriesVariant,
+    chartSession.view.priceAdjustment,
+    chartSession.view.sessionVariant,
+    chartSession.view.volumeSemantics,
     chartSession.view.symbol,
   ]);
   const liveReferenceSource = useLiveReferenceMarketChartSource({

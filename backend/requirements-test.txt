@@ -1,0 +1,4 @@
+-r requirements-parquet.txt
+
+# Release-manifest schema validation used by backend and SDK tests.
+jsonschema==4.25.1

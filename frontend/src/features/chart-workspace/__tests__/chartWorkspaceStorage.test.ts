@@ -89,6 +89,45 @@ test("v8 persistence keeps groups, indicators, cell membership, and strategy att
   assert.doesNotMatch(values.get(CHART_WORKSPACE_V8_STORAGE_KEY) ?? "", /must not enter/);
 });
 
+test("workspace persistence keeps a Twelve Data K-line series identity", () => {
+  const { storage } = memoryStorage();
+  const workspace = createDefaultChartWorkspace();
+  const session = chartWorkspaceCell(workspace, "cell-1").session;
+  Object.assign(session, {
+    exchange: "twelvedata",
+    marketType: "stock",
+    symbol: "AAPL:NASDAQ",
+    interval: "1d",
+    providerId: "twelvedata",
+    venue: "XNGS",
+    assetClass: "stock",
+    seriesVariant: "ohlcv",
+    priceAdjustment: "raw",
+    sessionVariant: "regular",
+    volumeSemantics: "shares",
+  });
+
+  saveChartWorkspace(workspace, storage);
+  const restored = chartWorkspaceCell(loadChartWorkspace(storage), "cell-1").session;
+  assert.deepEqual({
+    providerId: restored.providerId,
+    venue: restored.venue,
+    assetClass: restored.assetClass,
+    seriesVariant: restored.seriesVariant,
+    priceAdjustment: restored.priceAdjustment,
+    sessionVariant: restored.sessionVariant,
+    volumeSemantics: restored.volumeSemantics,
+  }, {
+    providerId: "twelvedata",
+    venue: "xngs",
+    assetClass: "stock",
+    seriesVariant: "ohlcv",
+    priceAdjustment: "raw",
+    sessionVariant: "regular",
+    volumeSemantics: "shares",
+  });
+});
+
 test("schema v7 migrates to v8 without changing existing chart state", () => {
   const current = createDefaultChartWorkspace();
   chartWorkspaceCell(current, "cell-1").session.interval = "5m";

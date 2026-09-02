@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+from app.data_engine.ingestion.config import IngestionConfig
 from app.data_engine.ingestion.models import (
     DataSource,
     StreamDescriptor,
@@ -29,7 +30,7 @@ def test_builtin_capability_v3_declares_exact_market_channel_matrix() -> None:
     registry = get_exchange_registry()
     expected_by_exchange = builtin_exchange_channel_expectations()
 
-    assert set(expected_by_exchange) == {"binance", "okx"}
+    assert set(expected_by_exchange) == {"binance", "okx", "twelvedata"}
     for exchange, expected in expected_by_exchange.items():
         capabilities = registry.get_plugin(exchange).capabilities()
         assert capabilities.capability_schema_version == 3
@@ -80,7 +81,11 @@ def test_builtin_capability_fixture_matrix_passes_full_plugin_contract() -> None
     registry = get_exchange_registry()
 
     for exchange, cases in builtin_exchange_contract_cases().items():
-        report = validate_exchange_plugin_contract(registry.get_plugin(exchange), cases)
+        report = validate_exchange_plugin_contract(
+            registry.get_plugin(exchange),
+            cases,
+            config=IngestionConfig(twelve_data_api_key="contract-test-key"),
+        )
         assert report.ok, report.to_dict()
         assert report.cases_checked == len(
             builtin_exchange_channel_expectations()[exchange]
@@ -366,7 +371,7 @@ def _assert_channel_matches(
     actual: Any,
     expected: ChannelCapabilityExpectation,
 ) -> None:
-    assert actual.realtime is True
+    assert actual.realtime is expected.realtime
     assert actual.realtime_transports == expected.realtime_transports
     assert actual.history is expected.history
     assert actual.history_transports == (

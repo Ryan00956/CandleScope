@@ -9,7 +9,7 @@ import type {
     ExchangeCapabilityPayload,
     ExchangeChannelCapabilityPayload,
     ExchangeMarketPayload,
-} from "../../services/apiPayloadParsers.js";
+} from "../../features/settings/exchangeSettingsRuntime.js";
 import {
     exchangeChannelsForMarket,
     exchangeHasDerivatives,

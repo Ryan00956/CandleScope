@@ -9,7 +9,12 @@ import {
   type ExchangeConnectionCheck,
 } from "../exchange-support/exchangeSupportModel.js";
 import { t } from "../../i18n/index.js";
-export type { ExchangeCapabilityPayload } from "../../services/apiPayloadParsers.js";
+export type {
+  CcxtCatalogSummaryPayload,
+  ExchangeCapabilityPayload,
+  ExchangeChannelCapabilityPayload,
+  ExchangeMarketPayload,
+} from "../../services/apiPayloadParsers.js";
 
 export interface ExchangeSettingsRuntime {
   supportedExchanges: ExchangeCapabilityPayload[];

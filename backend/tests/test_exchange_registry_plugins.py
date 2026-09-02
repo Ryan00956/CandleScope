@@ -26,7 +26,7 @@ def test_registry_keeps_adapter_api_and_exposes_plugins() -> None:
         adapter_ids,
     )
     assert plugin_ids == adapter_ids
-    assert len(plugin_ids) == 105
+    assert len(plugin_ids) == 106
     diagnostics = registry.diagnostics()
     assert diagnostics["count"] >= 2
     statuses = {item["plugin_id"]: item for item in diagnostics["plugins"]}

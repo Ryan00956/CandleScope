@@ -75,7 +75,7 @@ def test_market_storage_bootstrap_initializes_manifest_and_domain_tables(
         "market_storage_schema",
     } <= tables
     assert manifest == [
-        ("bars", "sqlite", 1, 1),
+        ("bars", "sqlite", 2, 1),
         ("liquidation_rollup", "sqlite", 1, 1),
         ("market_metrics", "sqlite", 1, 1),
         ("trade_flow_rollup", "sqlite", 1, 1),

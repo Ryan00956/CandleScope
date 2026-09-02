@@ -421,6 +421,9 @@ class RateLimitManager:
         used_weight = _binance_used_weight(normalized_headers)
         if used_weight is not None:
             bucket.tokens = min(bucket.tokens, max(0.0, bucket.capacity - used_weight))
+        credits_left = _api_credits_left(normalized_headers)
+        if credits_left is not None:
+            bucket.tokens = min(bucket.tokens, max(0.0, credits_left))
 
         parsed_retry_after = retry_after
         if parsed_retry_after is None:
@@ -824,6 +827,7 @@ def _rate_limit_headers(headers: Mapping[str, str]) -> dict[str, str]:
             key.startswith("x-mbx-used-weight")
             or key == "retry-after"
             or key.startswith("x-ratelimit")
+            or key.startswith("api-credits-")
         ):
             interesting[key] = value
     return interesting
@@ -837,6 +841,16 @@ def _binance_used_weight(headers: Mapping[str, str]) -> float | None:
         return None
     try:
         return max(float(value) for value in candidates)
+    except (TypeError, ValueError):
+        return None
+
+
+def _api_credits_left(headers: Mapping[str, str]) -> float | None:
+    value = headers.get("api-credits-left")
+    if value is None:
+        return None
+    try:
+        return float(value)
     except (TypeError, ValueError):
         return None
 

@@ -13,11 +13,12 @@ import type {
   SymbolCode,
   SymbolIdentity,
 } from "../../utils/symbolKey.js";
+import type { KlineSeriesIdentityInput } from "../market-data/klineSeriesIdentity.js";
 
 export type DatasetKey = string;
 export type ChartSessionKey = string;
 
-export interface ChartSession extends SymbolIdentity {
+export interface ChartSession extends SymbolIdentity, KlineSeriesIdentityInput {
   interval: IntervalString;
 }
 
@@ -147,7 +148,7 @@ export type NativeIntervalSupport = (
   purpose?: NativeIntervalPurpose,
 ) => boolean;
 
-export interface SelectSymbolInput {
+export interface SelectSymbolInput extends KlineSeriesIdentityInput {
   symbol: SymbolCode;
   marketType?: MarketType;
   exchange?: ExchangeId;
@@ -166,7 +167,7 @@ export interface UseChartSessionOptions {
   visibleRangeScope?: string | null;
 }
 
-export interface ChartSessionView {
+export interface ChartSessionView extends KlineSeriesIdentityInput {
   symbol: SymbolCode;
   exchange: ExchangeId;
   marketType: MarketType;

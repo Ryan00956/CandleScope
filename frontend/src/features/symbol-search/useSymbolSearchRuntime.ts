@@ -25,8 +25,12 @@ import type {
   ExchangeCatalog,
   SymbolSearchItem,
 } from "./symbolSearchTypes.js";
+import {
+  resolveKlineSeriesIdentity,
+  type KlineSeriesIdentityInput,
+} from "../market-data/klineSeriesIdentity.js";
 
-export interface SymbolSelection {
+export interface SymbolSelection extends KlineSeriesIdentityInput {
   symbol: string;
   marketType: string;
   exchange: string;
@@ -123,6 +127,11 @@ export function useSymbolSearchRuntime({
   const [highlightIndex, setHighlightIndex] = useState(0);
   const [scrollTop, setScrollTop] = useState(0);
   const [contextMenu, setContextMenu] = useState<SymbolContextMenu | null>(null);
+  const queryOnlyExchanges = useMemo(() => new Set(
+    Object.entries(exchangeCatalog || {})
+      .filter(([, entry]) => entry.protocolFeatures?.has("rest.symbol_search.query_only"))
+      .map(([exchange]) => exchange),
+  ), [exchangeCatalog]);
 
   const inputRef = useRef<HTMLInputElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -132,6 +141,8 @@ export function useSymbolSearchRuntime({
     currentExchange: currentExchangeKey,
     requestedMarketType: marketType === "favorites" ? currentMarketTypeKey : marketType,
     requestedExchanges: exchangeFilter,
+    providerSearch: search,
+    queryOnlyExchanges,
     open,
   });
   const favoritesStore = useSymbolFavoritesStore();
@@ -146,6 +157,7 @@ export function useSymbolSearchRuntime({
       setSearch("");
       setMarketType(currentMarketTypeKey);
       setExchangeFilter(new Set([currentExchangeKey]));
+      setQuoteFilter(queryOnlyExchanges.has(currentExchangeKey) ? "ALL" : "USDT");
       setHighlightIndex(0);
       setScrollTop(0);
       setContextMenu(null);
@@ -155,7 +167,7 @@ export function useSymbolSearchRuntime({
       clearTimeout(resetTimer);
       clearTimeout(focusTimer);
     };
-  }, [currentExchangeKey, currentMarketTypeKey, open]);
+  }, [currentExchangeKey, currentMarketTypeKey, open, queryOnlyExchanges]);
 
   const exchangeChips = useMemo(() => buildExchangeChips({
     allSymbols: catalog.allSymbols,
@@ -210,10 +222,12 @@ export function useSymbolSearchRuntime({
 
   const selectSymbol = useCallback((entry: SymbolSearchItem) => {
     if (!isSameSymbolEntry(entry, currentSymbol, currentMarketTypeKey, currentExchangeKey)) {
+      const exchange = entry.exchange || "binance";
       onSelect({
         symbol: entry.symbol,
         marketType: entry.marketType,
-        exchange: entry.exchange || "binance",
+        exchange,
+        ...resolveKlineSeriesIdentity(exchange, entry),
       });
     }
     onClose();
@@ -246,7 +260,8 @@ export function useSymbolSearchRuntime({
     const nextMarketType = resolveExchangeMarketType(marketType, nextMarketTabs);
     setExchangeFilter(nextExchangeFilter);
     setMarketType(nextMarketType);
-  }, [catalog.allSymbols, exchangeCatalog, marketType]);
+    if (queryOnlyExchanges.has(exchange)) setQuoteFilter("ALL");
+  }, [catalog.allSymbols, exchangeCatalog, marketType, queryOnlyExchanges]);
 
   const openContextMenu = useCallback((event: ReactMouseEvent, symbol: string, symbolKey: string) => {
     event.preventDefault();

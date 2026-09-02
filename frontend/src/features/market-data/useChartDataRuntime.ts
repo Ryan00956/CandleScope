@@ -34,6 +34,7 @@ import {
 import { MAX_SERIES_BARS } from "./phase1WindowPolicy.js";
 import { WINDOW_DELTA_TYPES } from "./window/windowDeltas.js";
 import type { SeriesWindowStore } from "./window/seriesWindowStore.js";
+import type { KlineSeriesIdentityInput } from "./klineSeriesIdentity.js";
 import {
   buildSeriesWindowKey,
   createDetachedSeriesWindowStore,
@@ -156,7 +157,7 @@ type CommitForwardChartData = (
   options?: ForwardChartDataOptions,
 ) => boolean;
 
-interface UseChartDataRuntimeOptions {
+interface UseChartDataRuntimeOptions extends KlineSeriesIdentityInput {
   exchange: ExchangeId;
   marketType: MarketType;
   symbol: SymbolCode;
@@ -266,6 +267,13 @@ export function useChartDataRuntime({
   marketType,
   symbol,
   interval,
+  providerId,
+  venue,
+  assetClass,
+  seriesVariant,
+  priceAdjustment,
+  sessionVariant,
+  volumeSemantics,
   onIndicatorWindowMeta,
   windowRegistry: configuredWindowRegistry,
 }: UseChartDataRuntimeOptions): ChartDataRuntime {
@@ -305,8 +313,30 @@ export function useChartDataRuntime({
       marketType: mt,
       symbol: sym,
       interval: intv,
+      ...(ex === exchange && mt === marketType && sym === symbol
+        ? {
+            providerId,
+            venue,
+            assetClass,
+            seriesVariant,
+            priceAdjustment,
+            sessionVariant,
+            volumeSemantics,
+          }
+        : {}),
     }),
-    [exchange, marketType],
+    [
+      assetClass,
+      exchange,
+      marketType,
+      priceAdjustment,
+      providerId,
+      seriesVariant,
+      sessionVariant,
+      symbol,
+      venue,
+      volumeSemantics,
+    ],
   );
   const activeSeriesKeyRef = useRef<SeriesKey>(cacheKey(symbol, interval));
   useLayoutEffect(() => {

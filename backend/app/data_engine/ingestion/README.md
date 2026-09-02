@@ -100,6 +100,13 @@ Common knobs:
 | `INGESTION_HTTP_BASE_URLS_FUTURES` | Binance futures HTTP endpoints |
 | `INGESTION_WS_BASE_URLS_FUTURES` | Binance futures WS endpoints |
 | `INGESTION_HTTP_TIMEOUT` | HTTP request timeout |
+| `INGESTION_TWELVE_DATA_API_KEY` | Server-side Twelve Data API key; the provider fails closed when absent |
+| `INGESTION_TWELVE_DATA_HTTP_BASE_URLS` | Twelve Data HTTP endpoints; defaults to `https://api.twelvedata.com` |
+| `INGESTION_TWELVE_DATA_WS_ENABLED` | enable the shared Twelve Data Basic realtime price stream; defaults to `true` |
+| `INGESTION_TWELVE_DATA_WS_MAX_SYMBOLS` | logical subscription ceiling; defaults to and is hard-capped at `8` |
+| `INGESTION_TWELVE_DATA_WS_HEARTBEAT_INTERVAL` | application heartbeat seconds; defaults to `10` |
+| `INGESTION_TWELVE_DATA_CONCURRENCY` | Twelve Data history/search concurrency; defaults to `1` |
+| `INGESTION_TWELVE_DATA_CREDITS_PER_MINUTE` | Shared Twelve Data credit budget; defaults to `8` before the global safety factor |
 | `INGESTION_PROXY_MODE` | `system`, `custom`, or `none` |
 | `INGESTION_HTTP_PROXY` | custom proxy URL |
 | `INGESTION_WS_OPEN_TIMEOUT` | WebSocket open timeout |
@@ -111,6 +118,12 @@ Common knobs:
 | `INGESTION_EXCHANGE` | default exchange id |
 
 Proxy settings are also loaded from persisted app settings in `app.core.config`, so the UI can change proxy mode at runtime.
+
+### Twelve Data M2
+
+M2 adds regular-session intraday history for US-venue stocks/ETFs and a provider-sidecar realtime ticker stream shared by up to eight unique symbols. Twelve Data's WebSocket does not publish OHLC, so realtime K-lines remain disabled; every connection generation obtains a shared-budget `/quote` snapshot to seed intraday fields.
+
+Every Twelve Data bar carries the complete series identity. Stock/ETF volume means `shares`, and a row without volume is rejected. FX, index, and commodity volume is explicitly unavailable; the numeric storage placeholder is `0` and must not be interpreted as zero trading activity. See [Traditional Market Data M2](../../../../docs/TRADITIONAL_MARKET_DATA_M2_zh.md).
 
 ## Delivery Semantics
 

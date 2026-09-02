@@ -354,6 +354,13 @@ def get_exchange_registry() -> ExchangeRegistry:
 
 
 def bootstrap_default_adapters() -> ExchangeRegistry:
+    if not _registry.has("twelvedata"):
+        from .plugins.twelvedata import create_plugin as create_twelve_data_plugin
+
+        _registry.register(
+            create_twelve_data_plugin(),
+            source="builtin:twelvedata:history-first",
+        )
     if not _registry.has("binance"):
         from .ccxt_ext.primary import create_binance_ccxt_plugin
 

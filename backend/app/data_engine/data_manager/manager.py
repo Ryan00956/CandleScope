@@ -99,6 +99,8 @@ from app.data_engine.market_data.ports import (
     OrderBookPort,
     PublicTradePort,
 )
+from app.data_engine.series_identity import KlineSeriesIdentity
+from app.exchanges import supports_history_identity
 
 from .aggregator_bridge import AggregatorBridge
 from .auto_gc import (
@@ -859,6 +861,7 @@ class DataManager:
         backfill_reason: str | None = None,
         backfill_requester: str = "query",
         backfill_metadata: dict[str, Any] | None = None,
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> QueryResult:
         """Query K-line bars.
 
@@ -893,6 +896,7 @@ class DataManager:
             limit=limit,
             exchange=exchange,
             market_type=market_type,
+            series_identity=series_identity,
             auto_backfill=auto_backfill,
         )
         return self._submit_missing_ranges(
@@ -918,6 +922,7 @@ class DataManager:
         backfill_reason: str | None = "latest_refresh",
         backfill_requester: str = "query_latest",
         backfill_metadata: dict[str, Any] | None = None,
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> QueryResult:
         """Get the latest N bars.  Shorthand for ``query(limit=N)``."""
         market_type = self._normalize_market_type(market_type)
@@ -935,6 +940,7 @@ class DataManager:
             limit,
             exchange=exchange,
             market_type=market_type,
+            series_identity=series_identity,
             auto_backfill=auto_backfill,
         )
         return self._submit_missing_ranges(
@@ -957,6 +963,7 @@ class DataManager:
         backfill_requester: str = "query_before",
         auto_backfill: bool | None = None,
         backfill_metadata: dict[str, Any] | None = None,
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> QueryResult:
         """Get bars before a timestamp (for pagination / load-more)."""
         market_type = self._normalize_market_type(market_type)
@@ -975,6 +982,7 @@ class DataManager:
             limit,
             exchange=exchange,
             market_type=market_type,
+            series_identity=series_identity,
             auto_backfill=auto_backfill,
         )
         return self._submit_missing_ranges(
@@ -1001,6 +1009,31 @@ class DataManager:
         """Submit QueryEngine-detected missing ranges via DataManager."""
         if not result.missing_ranges:
             return result
+
+        result_identity = KlineSeriesIdentity(
+            provider_id=str(result.provider_id),
+            venue=str(result.venue),
+            asset_class=result.asset_class,
+            series_variant=result.series_variant,
+            price_adjustment=result.price_adjustment,
+            session_variant=result.session_variant,
+            volume_semantics=result.volume_semantics,
+        )
+        identity_history_supported = supports_history_identity(
+            exchange=result.exchange,
+            market_type=result.market_type,
+            interval=result.interval,
+            identity=result_identity,
+        )
+        if (
+            not result_identity.is_legacy_default_for(result.exchange)
+            and not identity_history_supported
+        ):
+            submit = False
+            result.metadata.setdefault(
+                "backfill_suppressed",
+                "non-default series identity has no registered backfill route",
+            )
 
         original_history_state = result.history_state
         submitted = 0
@@ -1069,6 +1102,15 @@ class DataManager:
             }
             if backfill_metadata:
                 metadata.update(dict(backfill_metadata))
+            if not result_identity.is_legacy_default_for(result.exchange):
+                # These fields select the physical storage partition and its
+                # verification contract.  Callers may add annotations, but
+                # must not redirect a repair into a different series.
+                metadata.update({
+                    "series_identity": result_identity.to_dict(),
+                    "history_verification": "provider_authoritative_sparse",
+                    "requires_trusted_finality": True,
+                })
             if derived_target is not None:
                 metadata.update({
                     "derived_from": missing.interval,
@@ -1257,10 +1299,17 @@ class DataManager:
         interval: str,
         exchange: str = "binance",
         market_type: str = "spot",
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> dict:
         """Get cache + storage bounds for a series."""
         market_type = self._normalize_market_type(market_type)
-        return self.query_engine.get_bounds(symbol, interval, exchange=exchange, market_type=market_type)
+        return self.query_engine.get_bounds(
+            symbol,
+            interval,
+            exchange=exchange,
+            market_type=market_type,
+            series_identity=series_identity,
+        )
 
     def scan_storage_gaps(
         self,
@@ -1271,6 +1320,7 @@ class DataManager:
         exchange: str = "binance",
         market_type: str = "spot",
         limit: int = 50_000,
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> dict:
         """Detect storage continuity gaps without triggering repair."""
         market_type = self._normalize_market_type(market_type)
@@ -1289,15 +1339,18 @@ class DataManager:
                 "truncated": False,
                 "error": "storage does not support gap scanning",
             }
-        return scanner(
-            symbol=symbol,
-            interval=interval,
-            start_ms=start_ms,
-            end_ms=end_ms,
-            exchange=exchange,
-            market_type=market_type,
-            limit=limit,
-        )
+        scan_kwargs: dict[str, Any] = {
+            "symbol": symbol,
+            "interval": interval,
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+            "exchange": exchange,
+            "market_type": market_type,
+            "limit": limit,
+        }
+        if series_identity is not None:
+            scan_kwargs["series_identity"] = series_identity
+        return scanner(**scan_kwargs)
 
     # ═══════════════════════════════════════════════════════════
     #  Advanced Market Data — independent from the bar event bus
@@ -2176,10 +2229,18 @@ class DataManager:
         interval: str,
         exchange: str = "binance",
         market_type: str = "spot",
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> None:
         """Invalidate (clear) cached bars for a series."""
         market_type = self._normalize_market_type(market_type)
-        self.cache.invalidate(SeriesKey(symbol, interval, exchange=exchange, market_type=market_type))
+        identity = series_identity or KlineSeriesIdentity.for_exchange(exchange)
+        self.cache.invalidate(SeriesKey(
+            symbol,
+            interval,
+            exchange=exchange,
+            market_type=market_type,
+            **identity.to_dict(),
+        ))
 
     def cache_clear(self) -> None:
         """Clear all cached data."""
@@ -2771,15 +2832,21 @@ class DataManager:
         end_ms: int | None = None,
         exchange: str = "binance",
         market_type: str = "spot",
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> int:
         """Delete stored bars for a series and invalidate its cache."""
+        kwargs: dict[str, Any] = {
+            "symbol": symbol,
+            "interval": interval,
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+            "exchange": exchange,
+            "market_type": self._normalize_market_type(market_type),
+        }
+        if series_identity is not None:
+            kwargs["series_identity"] = series_identity
         return await self.maintenance.delete_storage_data(
-            symbol=symbol,
-            interval=interval,
-            start_ms=start_ms,
-            end_ms=end_ms,
-            exchange=exchange,
-            market_type=self._normalize_market_type(market_type),
+            **kwargs,
         )
 
     # ═══════════════════════════════════════════════════════════
@@ -2823,6 +2890,7 @@ class DataManager:
         exchange: str = "binance",
         market_type: str = "spot",
         event_detail: dict[str, Any] | None = None,
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> None:
         """Receive backfilled bars and merge into cache.
 
@@ -2835,7 +2903,16 @@ class DataManager:
             return
 
         market_type = self._normalize_market_type(market_type)
-        key = SeriesKey(symbol, interval, exchange=exchange, market_type=market_type)
+        identity_kwargs = (
+            series_identity.to_dict() if series_identity is not None else {}
+        )
+        key = SeriesKey(
+            symbol,
+            interval,
+            exchange=exchange,
+            market_type=market_type,
+            **identity_kwargs,
+        )
         self.cache.bulk_load(key, bars)
 
         detail = {

@@ -155,6 +155,44 @@ class IngestionConfig:
     ))
     # HTTP request timeout (seconds)
     http_timeout: int = field(default_factory=lambda: _env_int("INGESTION_HTTP_TIMEOUT", 8))
+    # Twelve Data credentials remain server-side. REST uses Authorization;
+    # the provider's WebSocket protocol requires the key in its connection
+    # query string, which is built only inside the redacting sidecar runtime.
+    twelve_data_api_key: str = field(
+        default_factory=lambda: _env_str("INGESTION_TWELVE_DATA_API_KEY", ""),
+        repr=False,
+    )
+    twelve_data_http_base_urls: list[str] = field(default_factory=lambda: _env_str_list(
+        "INGESTION_TWELVE_DATA_HTTP_BASE_URLS",
+        ["https://api.twelvedata.com"],
+    ))
+    twelve_data_ws_enabled: bool = field(
+        default_factory=lambda: _env_bool("INGESTION_TWELVE_DATA_WS_ENABLED", True),
+    )
+    twelve_data_ws_base_url: str = field(
+        default_factory=lambda: _env_str(
+            "INGESTION_TWELVE_DATA_WS_BASE_URL",
+            "wss://ws.twelvedata.com/v1/quotes/price",
+        ),
+    )
+    twelve_data_ws_max_symbols: int = field(
+        default_factory=lambda: _env_int("INGESTION_TWELVE_DATA_WS_MAX_SYMBOLS", 8),
+    )
+    twelve_data_ws_queue_size: int = field(
+        default_factory=lambda: _env_int("INGESTION_TWELVE_DATA_WS_QUEUE_SIZE", 512),
+    )
+    twelve_data_ws_heartbeat_interval: float = field(
+        default_factory=lambda: _env_float(
+            "INGESTION_TWELVE_DATA_WS_HEARTBEAT_INTERVAL",
+            10.0,
+        ),
+    )
+    fetch_twelve_data_concurrency: int = field(
+        default_factory=lambda: _env_int("INGESTION_TWELVE_DATA_CONCURRENCY", 1),
+    )
+    fetch_twelve_data_credits_per_minute: int = field(
+        default_factory=lambda: _env_int("INGESTION_TWELVE_DATA_CREDITS_PER_MINUTE", 8),
+    )
     # Premium Index history is split into independent fixed 1m ranges. Keep a
     # dedicated, bounded gate so those pages can overlap without widening all
     # futures REST traffic.
@@ -301,7 +339,10 @@ class IngestionConfig:
     def snapshot(self) -> dict:
         """Return a JSON-serializable snapshot of current configuration."""
         from dataclasses import asdict
-        return asdict(self)
+        snapshot = asdict(self)
+        if snapshot.get("twelve_data_api_key"):
+            snapshot["twelve_data_api_key"] = "***"
+        return snapshot
 
     def get_http_urls(self, market_type: str = "spot") -> list[str]:
         """Return HTTP base URLs for the given market type."""

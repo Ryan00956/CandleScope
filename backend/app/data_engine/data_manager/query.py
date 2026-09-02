@@ -48,6 +48,10 @@ from app.data_engine.interval_resolution import (
 )
 from app.data_engine.market_data.kline_metrics import kline_available_fields
 from app.data_engine.kline_quality import incoming_source_can_replace
+from app.data_engine.series_identity import (
+    KlineSeriesIdentity,
+    resolve_kline_series_identity,
+)
 from app.data_engine.history import (
     AlwaysOpenCalendar,
     BoundaryReason,
@@ -62,7 +66,7 @@ from app.data_engine.history import (
     containing_expected_open_ms,
     latest_closed_expected_open_ms,
 )
-from app.exchanges import HistoryEmptyPageSemantics
+from app.exchanges import HistoryEmptyPageSemantics, supports_history_identity
 
 from .cache import BarCache
 from .config import QueryConfig
@@ -254,6 +258,7 @@ class QueryEngine:
         limit: int | None = None,
         exchange: str = "binance",
         market_type: str = "spot",
+        series_identity: KlineSeriesIdentity | None = None,
         auto_backfill: bool | None = None,
         _materialized_only: bool = False,
     ) -> QueryResult:
@@ -295,8 +300,13 @@ class QueryEngine:
         exchange = route.exchange
         market_type = route.market_type
         interval = route.canonical_interval
+        identity = resolve_kline_series_identity(exchange, series_identity)
 
         if route.kind is IntervalRouteKind.DERIVED and not _materialized_only:
+            if not identity.is_legacy_default_for(exchange):
+                raise ValueError(
+                    "derived intervals do not yet support non-default series identity"
+                )
             result = self.custom_intervals.query_from_base(
                 symbol=symbol,
                 interval=interval,
@@ -312,7 +322,23 @@ class QueryEngine:
             key = SeriesKey(symbol, interval, exchange=exchange, market_type=market_type)
             return self._apply_custom_finality_contract(result, key, end_ms=end_ms)
 
-        key = SeriesKey(symbol, interval, exchange=exchange, market_type=market_type)
+        key = SeriesKey(
+            symbol,
+            interval,
+            exchange=exchange,
+            market_type=market_type,
+            **identity.to_dict(),
+        )
+        if not identity.is_legacy_default_for(exchange):
+            allow_backfill = bool(
+                allow_backfill
+                and supports_history_identity(
+                    exchange=exchange,
+                    market_type=market_type,
+                    interval=interval,
+                    identity=identity,
+                )
+            )
 
         # Ephemeral intervals are cache-only — skip storage and backfill
         if is_ephemeral_interval(interval):
@@ -387,6 +413,7 @@ class QueryEngine:
                 interval=key.interval,
                 exchange=key.exchange,
                 market_type=key.market_type,
+                **key.identity.to_dict(),
                 source=QuerySource.CACHE,
                 total=len(cached),
                 has_more=self._cache.series_count(key) > len(cached),
@@ -473,6 +500,7 @@ class QueryEngine:
                 interval=key.interval,
                 exchange=key.exchange,
                 market_type=key.market_type,
+                **key.identity.to_dict(),
                 source=QuerySource.EMPTY,
                 total=0,
                 has_more=False,
@@ -593,6 +621,7 @@ class QueryEngine:
             interval=key.interval,
             exchange=key.exchange,
             market_type=key.market_type,
+            **key.identity.to_dict(),
             source=source,
             total=len(merged),
             has_more=True,  # conservative — caller can paginate
@@ -609,6 +638,7 @@ class QueryEngine:
         self, symbol: str, interval: str, limit: int = 500,
         exchange: str = "binance",
         market_type: str = "spot",
+        series_identity: KlineSeriesIdentity | None = None,
         auto_backfill: bool | None = None,
     ) -> QueryResult:
         """Shorthand for getting the latest N bars."""
@@ -618,6 +648,7 @@ class QueryEngine:
             limit=limit,
             exchange=exchange,
             market_type=market_type,
+            series_identity=series_identity,
             auto_backfill=auto_backfill,
         )
 
@@ -629,6 +660,7 @@ class QueryEngine:
         limit: int = 500,
         exchange: str = "binance",
         market_type: str = "spot",
+        series_identity: KlineSeriesIdentity | None = None,
         auto_backfill: bool | None = None,
         _materialized_only: bool = False,
     ) -> QueryResult:
@@ -646,7 +678,12 @@ class QueryEngine:
         exchange = route.exchange
         market_type = route.market_type
         interval = route.canonical_interval
+        identity = resolve_kline_series_identity(exchange, series_identity)
         if route.kind is IntervalRouteKind.DERIVED and not _materialized_only:
+            if not identity.is_legacy_default_for(exchange):
+                raise ValueError(
+                    "derived intervals do not yet support non-default series identity"
+                )
             result = self.custom_intervals.query_before(
                 symbol,
                 interval,
@@ -664,7 +701,23 @@ class QueryEngine:
                 end_ms=max(0, int(before_ms) - 1),
             )
 
-        key = SeriesKey(symbol, interval, exchange=exchange, market_type=market_type)
+        key = SeriesKey(
+            symbol,
+            interval,
+            exchange=exchange,
+            market_type=market_type,
+            **identity.to_dict(),
+        )
+        if not identity.is_legacy_default_for(exchange):
+            allow_backfill = bool(
+                allow_backfill
+                and supports_history_identity(
+                    exchange=exchange,
+                    market_type=market_type,
+                    interval=interval,
+                    identity=identity,
+                )
+            )
         before_s = before_ms // 1000
         effective_limit = min(limit, self._cfg.max_limit)
         history_start_ms, history_end_ms = self._before_window(
@@ -692,6 +745,7 @@ class QueryEngine:
                 interval=key.interval,
                 exchange=key.exchange,
                 market_type=key.market_type,
+                **key.identity.to_dict(),
                 source=QuerySource.CACHE,
                 total=len(cached),
                 has_more=self._cache.series_count(key) > len(cached),
@@ -727,6 +781,7 @@ class QueryEngine:
                 interval=key.interval,
                 exchange=key.exchange,
                 market_type=key.market_type,
+                **key.identity.to_dict(),
                 source=QuerySource.CACHE,
                 total=len(cached),
                 has_more=True,
@@ -875,6 +930,7 @@ class QueryEngine:
             interval=key.interval,
             exchange=key.exchange,
             market_type=key.market_type,
+            **key.identity.to_dict(),
             source=QuerySource.MIXED if storage_bars else QuerySource.CACHE,
             total=len(merged),
             has_more=has_more,
@@ -898,9 +954,17 @@ class QueryEngine:
         interval: str,
         exchange: str = "binance",
         market_type: str = "spot",
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> dict:
         """Get cache + storage bounds for a series."""
-        key = SeriesKey(symbol, interval, exchange=exchange, market_type=market_type)
+        identity = resolve_kline_series_identity(exchange, series_identity)
+        key = SeriesKey(
+            symbol,
+            interval,
+            exchange=exchange,
+            market_type=market_type,
+            **identity.to_dict(),
+        )
         ce, cl = self._cache.get_bounds(key)
         result: dict[str, Any] = {
             "cache_earliest": ce,
@@ -910,11 +974,17 @@ class QueryEngine:
 
         if self._storage is not None:
             try:
+                identity_kwargs = (
+                    {}
+                    if key.identity.is_legacy_default_for(key.exchange)
+                    else {"series_identity": key.identity}
+                )
                 sb = self._storage.get_bounds(
                     key.symbol,
                     key.interval,
                     exchange=key.exchange,
                     market_type=key.market_type,
+                    **identity_kwargs,
                 )
                 result.update({
                     "storage_earliest_ms": sb.get("earliest_open_time"),
@@ -979,7 +1049,11 @@ class QueryEngine:
         start_ms: int,
         end_ms: int,
     ) -> tuple[HistoryPlan, ResolvedHistoryContext] | None:
-        if self._history_policy is None or start_ms > end_ms:
+        if (
+            self._history_policy is None
+            or start_ms > end_ms
+            or not key.identity.is_legacy_default_for(key.exchange)
+        ):
             return None
         request = HistoryRequest(
             series=self._history_series_key(key),
@@ -1334,6 +1408,11 @@ class QueryEngine:
         storage = self._storage
         if storage is None:
             return []
+        identity_kwargs = (
+            {}
+            if key.identity.is_legacy_default_for(key.exchange)
+            else {"series_identity": key.identity}
+        )
         compact_query = getattr(storage, "query_bar_components", None)
         if callable(compact_query):
             return self._measure_storage_read(
@@ -1347,6 +1426,7 @@ class QueryEngine:
                     order=order,
                     exchange=key.exchange,
                     market_type=key.market_type,
+                    **identity_kwargs,
                 ),
                 projected=True,
             )
@@ -1361,6 +1441,7 @@ class QueryEngine:
                 order=order,
                 exchange=key.exchange,
                 market_type=key.market_type,
+                **identity_kwargs,
             ),
         )
 
@@ -1376,6 +1457,11 @@ class QueryEngine:
         storage = self._storage
         if storage is None:
             return []
+        identity_kwargs = (
+            {}
+            if key.identity.is_legacy_default_for(key.exchange)
+            else {"series_identity": key.identity}
+        )
         compact_fetch = getattr(storage, "fetch_before_bar_components", None)
         if callable(compact_fetch):
             return self._measure_storage_read(
@@ -1387,6 +1473,7 @@ class QueryEngine:
                     limit=limit,
                     exchange=key.exchange,
                     market_type=key.market_type,
+                    **identity_kwargs,
                 ),
                 projected=True,
             )
@@ -1399,6 +1486,7 @@ class QueryEngine:
                 limit=limit,
                 exchange=key.exchange,
                 market_type=key.market_type,
+                **identity_kwargs,
             ),
         )
 
@@ -1886,6 +1974,7 @@ class QueryEngine:
             interval=key.interval,
             exchange=key.exchange,
             market_type=key.market_type,
+            **key.identity.to_dict(),
             source=QuerySource.CACHE,
             total=len(bars),
             has_more=self._cache.series_count(key) > len(bars),
@@ -2177,6 +2266,7 @@ class QueryEngine:
             interval=key.interval,
             exchange=key.exchange,
             market_type=key.market_type,
+            **key.identity.to_dict(),
             start_ms=int(effective_start),
             end_ms=int(effective_end),
             reason=reason,

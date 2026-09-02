@@ -6,6 +6,13 @@ export interface SymbolSearchItem extends Record<string, unknown> {
   quoteAsset: string;
   exchange: string;
   marketType: string;
+  providerId?: string;
+  venue?: string;
+  assetClass?: string;
+  seriesVariant?: string;
+  priceAdjustment?: string;
+  sessionVariant?: string;
+  volumeSemantics?: string;
   _key: string;
 }
 
@@ -17,6 +24,7 @@ export interface ExchangeMarketDescriptor {
 export interface ExchangeCatalogEntry {
   label?: string;
   markets?: ExchangeMarketDescriptor[];
+  protocolFeatures?: ReadonlySet<string>;
 }
 
 export type ExchangeCatalog = Record<string, ExchangeCatalogEntry>;

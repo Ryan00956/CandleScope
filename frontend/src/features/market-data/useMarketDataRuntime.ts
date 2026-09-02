@@ -48,6 +48,11 @@ import type { IntervalString } from "../../utils/intervals.js";
 import type { ExchangeId, MarketType, SymbolCode } from "../../utils/symbolKey.js";
 import type { MarketDataRuntimeContract } from "./marketDataRuntimeContract.js";
 import { getClientInstanceId } from "../../services/api.js";
+import {
+  isLegacyKlineSeriesIdentity,
+  resolveKlineSeriesIdentity,
+  type KlineSeriesIdentityInput,
+} from "./klineSeriesIdentity.js";
 import { useMarketDataWorkspaceResources } from "./marketDataWorkspaceContext.js";
 import {
   planRightWindowPage,
@@ -212,7 +217,42 @@ export function useMarketDataRuntime({
     prefetchIntervals,
     exchangeConfig,
     nativeIntervals,
+    providerId,
+    venue,
+    assetClass,
+    seriesVariant,
+    priceAdjustment,
+    sessionVariant,
+    volumeSemantics,
   } = session.view;
+  const seriesIdentity = useMemo<KlineSeriesIdentityInput>(() => (
+    resolveKlineSeriesIdentity(exchange, {
+      ...(providerId === undefined ? {} : { providerId }),
+      ...(venue === undefined ? {} : { venue }),
+      ...(assetClass === undefined ? {} : { assetClass }),
+      ...(seriesVariant === undefined ? {} : { seriesVariant }),
+      ...(priceAdjustment === undefined ? {} : { priceAdjustment }),
+      ...(sessionVariant === undefined ? {} : { sessionVariant }),
+      ...(volumeSemantics === undefined ? {} : { volumeSemantics }),
+    })
+  ), [
+    assetClass,
+    exchange,
+    priceAdjustment,
+    providerId,
+    seriesVariant,
+    sessionVariant,
+    venue,
+    volumeSemantics,
+  ]);
+  const activeSeries = useMemo<MarketSeries>(() => ({
+    exchange,
+    marketType,
+    symbol,
+    interval,
+    ...seriesIdentity,
+  }), [exchange, interval, marketType, seriesIdentity, symbol]);
+  const legacySeries = isLegacyKlineSeriesIdentity(exchange, seriesIdentity);
   const {
     handleVisibleRangeChange,
     updateVisibleRangeDataMeta,
@@ -278,6 +318,7 @@ export function useMarketDataRuntime({
     marketType,
     symbol,
     interval,
+    ...seriesIdentity,
     onIndicatorWindowMeta: publishIndicatorWindowRange,
     ...(workspaceResources ? { windowRegistry: workspaceResources.windowRegistry } : {}),
   });
@@ -510,6 +551,7 @@ export function useMarketDataRuntime({
     exchange,
     marketType,
     interval,
+    seriesIdentity,
     nativeIntervalValues,
     chartData,
     loading,
@@ -528,6 +570,7 @@ export function useMarketDataRuntime({
     enabled: marketDataReady,
     exchange,
     marketType,
+    seriesIdentity,
     nativeIntervalValues,
     ...(initialViewportCountBackCap === undefined ? {} : { initialViewportCountBackCap }),
     getFromCache,
@@ -573,7 +616,7 @@ export function useMarketDataRuntime({
       && marketDataReady
       && !loading
       && !initialHistoryPending,
-    series: { exchange, marketType, symbol, interval },
+    series: activeSeries,
     sessionKey,
     viewportCountBack: activeHistoryViewportCountBack,
     targetCountBack: activeHistoryTargetCountBack,
@@ -613,7 +656,7 @@ export function useMarketDataRuntime({
     }
 
     resetPagination();
-    const series = { exchange, marketType, symbol, interval };
+    const series = activeSeries;
     const epoch = seriesDataFeed.beginEpoch(series);
     const controller = new AbortController();
     rightWindowPageAbortRef.current?.abort();
@@ -703,16 +746,15 @@ export function useMarketDataRuntime({
     owner.promise = promise;
     return promise;
   }, [
+    activeSeries,
     activeSeriesStore,
     backgroundPrefetchPriority,
     commitForwardChartData,
-    exchange,
     hasActivePaginationOwnership,
     interval,
     loading,
     loadingMoreLeft,
     marketDataReady,
-    marketType,
     paginationState.phase,
     resetPagination,
     seriesDataFeed,
@@ -749,7 +791,7 @@ export function useMarketDataRuntime({
     ) return Promise.resolve(false);
 
     resetPagination();
-    const series = { exchange, marketType, symbol, interval };
+    const series = activeSeries;
     const epoch = seriesDataFeed.beginEpoch(series);
     const controller = new AbortController();
     rightWindowRestoreAbortRef.current?.abort();
@@ -827,14 +869,13 @@ export function useMarketDataRuntime({
     owner.promise = promise;
     return promise;
   }, [
+    activeSeries,
     backgroundPrefetchPriority,
-    exchange,
     interval,
     hasActivePaginationOwnership,
     loading,
     loadingMoreLeft,
     marketDataReady,
-    marketType,
     nativeIntervalValues,
     paginationState.phase,
     replaceChartData,
@@ -848,21 +889,14 @@ export function useMarketDataRuntime({
     updateLastPrice,
   ]);
 
-  const getSeriesCacheRows = useCallback((series: {
-    exchange: ExchangeId;
-    marketType: MarketType;
-    symbol: SymbolCode;
-    interval: IntervalString;
-  }) => getCache(series.symbol, series.interval, {
+  const getSeriesCacheRows = useCallback((series: MarketSeries) => getCache(series.symbol, series.interval, {
     marketType: series.marketType,
     exchange: series.exchange,
   }) || [], [getCache]);
 
   const handleBackfillCompleted = useCallback((msg: BackfillCompletedMessage) => seriesDataFeed.handleBackfillCompleted(msg, {
     activeSeries: {
-      exchange,
-      marketType,
-      symbol,
+      ...activeSeries,
       interval: intervalRef.current,
     },
     loading: loadingRef.current,
@@ -879,22 +913,20 @@ export function useMarketDataRuntime({
     setConnectionStatus,
     setLoading,
   }), [
-    exchange,
+    activeSeries,
     getSeriesCacheRows,
     intervalRef,
     loadingRef,
-    marketType,
     pendingInitialHistoryRef,
     seriesDataFeed,
     setConnectionStatus,
     setError,
     setLastPrice,
     setLoading,
-    symbol,
   ]);
 
   useKlineStreamRuntime({
-    enabled: marketDataReady,
+    enabled: webSocketReady,
     webSocketEnabled: webSocketReady,
     symbol,
     exchange,
@@ -922,6 +954,7 @@ export function useMarketDataRuntime({
   } | null>(null);
   const isForegroundBusyForPrefetch = useCallback(() => {
     const activeSeries = {
+      ...seriesIdentity,
       exchange,
       marketType,
       symbol,
@@ -943,6 +976,7 @@ export function useMarketDataRuntime({
     intervalRef,
     marketType,
     seriesDataFeed,
+    seriesIdentity,
     symbol,
   ]);
   const foregroundBusyOwnerActive = hasChartForegroundWork({
@@ -952,10 +986,7 @@ export function useMarketDataRuntime({
     loadingMoreLeft,
     pendingInitial: initialHistoryPending,
     pendingRepairs: seriesDataFeed.pendingRepairCount({
-      exchange,
-      marketType,
-      symbol,
-      interval,
+      ...activeSeries,
     }),
     restoringLatestWindow: restoringLatestWindow || loadingMoreRight,
   });
@@ -1005,6 +1036,7 @@ export function useMarketDataRuntime({
     // policy. Keeping this separate prevents four active cells from walking
     // the complete interval catalog while 64 charts are converging.
     enabled: intervalPrefetchEnabled
+      && legacySeries
       && activeChartReady
       && marketDataReady
       && !loading
@@ -1030,7 +1062,6 @@ export function useMarketDataRuntime({
   useLayoutEffect(() => {
     backgroundPrefetchPriority.yieldToForeground();
     resetForSessionTransition(lastSessionTransition);
-    const activeSeries = { exchange, marketType, symbol, interval };
     const requestDemand = requestDemandRef.current!;
     if (marketDataReady) {
       if (!requestDemand.ready || requestDemand.sessionKey !== sessionKey) {
@@ -1088,6 +1119,7 @@ export function useMarketDataRuntime({
     void loadData(symbol, interval, marketType, exchange);
     return undefined;
   }, [
+    activeSeries,
     backgroundPrefetchPriority,
     detachActiveChartData,
     exchange,
@@ -1137,7 +1169,7 @@ export function useMarketDataRuntime({
     backgroundPrefetchPriority.yieldToForeground();
     handleVisibleRangeChange(range, chartDataMeta);
     if (!marketDataReady) return;
-    const series = { exchange, marketType, symbol, interval };
+    const series = activeSeries;
     const heldRows = getSeriesCacheRows(series);
     void seriesDataFeed.repairVisibleGaps(
       series,
@@ -1146,16 +1178,13 @@ export function useMarketDataRuntime({
       { source: "visible-window-gap-planner" },
     );
   }, [
+    activeSeries,
     backgroundPrefetchPriority,
     chartDataMeta,
-    exchange,
     getSeriesCacheRows,
     handleVisibleRangeChange,
-    interval,
     marketDataReady,
-    marketType,
     seriesDataFeed,
-    symbol,
   ]);
   const loadMoreLeftWithPriority = useCallback((
     oldestLoadedTime?: Parameters<typeof handleNeedMoreLeft>[0],

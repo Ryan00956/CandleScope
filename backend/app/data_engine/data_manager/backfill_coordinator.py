@@ -46,6 +46,9 @@ from app.data_engine.kline_quality import (
     repair_requires_trusted_finality,
     source_is_trusted_final,
 )
+from app.data_engine.series_identity import (
+    identity_from_metadata,
+)
 from app.exchanges.models import (
     HistoryAvailabilityPolicy,
     HistoryEmptyPageSemantics,
@@ -209,13 +212,15 @@ class RepairRequest:
         })
 
     @property
-    def series_key(self) -> tuple[str, str, str, str]:
-        return (
+    def series_key(self) -> tuple[str, ...]:
+        identity = identity_from_metadata(self.exchange, self.metadata)
+        base = (
             self.exchange.lower().strip(),
             self.market_type.lower().strip(),
             self.symbol.upper().strip(),
             self.interval,
         )
+        return base + (identity.storage_values if identity is not None else ())
 
     def merged_with(self, other: RepairRequest) -> RepairRequest:
         """Return a range that covers both requests for the same series."""
@@ -537,13 +542,13 @@ class _BackfillScheduler:
         self._chunk_bars = max(1, chunk_bars)
         self._interval_resolver = IntervalResolver()
 
-        self._series: dict[tuple[str, str, str, str], _SeriesState] = {}
+        self._series: dict[tuple[str, ...], _SeriesState] = {}
         self._requests: dict[str, _RequestState] = {}
         self._chunks: dict[str, _FetchChunk] = {}
         self._ready: list[tuple[int, int, int, str]] = []
         self._tasks: dict[str, asyncio.Task] = {}
         self._buckets: dict[str, _TokenBucket] = {}
-        self._coverage: dict[tuple[str, str, str, str], list[dict[str, int]]] = {}
+        self._coverage: dict[tuple[str, ...], list[dict[str, int]]] = {}
         self._outcomes: dict[str, RepairOutcome] = {}
         self._max_retained_outcomes = _SCHEDULER_OUTCOME_HISTORY_LIMIT
         self._seq = 0
@@ -3351,7 +3356,7 @@ class BackfillCoordinator:
 
         now_ms = int(time.time() * 1000)
         remaining_page_budget = _LEDGER_RECONCILE_MAX_TOTAL_PAGES
-        seen_ranges: set[tuple[tuple[str, str, str, str], int, int]] = set()
+        seen_ranges: set[tuple[tuple[str, ...], int, int]] = set()
         for raw_request, ledger_row_id in candidates:
             if self._shutdown:
                 break
@@ -4299,12 +4304,14 @@ class BackfillCoordinator:
 
     @staticmethod
     def _history_series_key(request: RepairRequest) -> HistorySeriesKey:
-        return HistorySeriesKey(
+        identity = identity_from_metadata(request.exchange, request.metadata)
+        return HistorySeriesKey.from_params(
             exchange=request.exchange,
             market_type=request.market_type,
             symbol=request.symbol,
             channel="kline",
             variant=request.interval,
+            params=(identity.to_dict() if identity is not None else None),
         )
 
     @staticmethod
@@ -4684,6 +4691,12 @@ class BackfillCoordinator:
             return 0
 
         total_loaded = 0
+        series_identity = identity_from_metadata(request.exchange, request.metadata)
+        identity_kwargs = (
+            {"series_identity": series_identity}
+            if series_identity is not None
+            else {}
+        )
         derived_targets = _merge_derived_repair_targets(
             request.metadata.get("derived_repair_targets"),
         )
@@ -4711,6 +4724,7 @@ class BackfillCoordinator:
                     order="ASC",
                     exchange=written_range["exchange"],
                     market_type=written_range["market_type"],
+                    **identity_kwargs,
                 )
             bars = [
                 BarData.from_storage_row(
@@ -4730,6 +4744,11 @@ class BackfillCoordinator:
                 bars,
                 exchange=written_range["exchange"],
                 market_type=written_range["market_type"],
+                **(
+                    {"series_identity": series_identity}
+                    if series_identity is not None
+                    else {}
+                ),
                 event_detail={
                     "request_id": request.request_id,
                     "status": self._status_value(report.status),
@@ -4768,6 +4787,7 @@ class BackfillCoordinator:
         derived_targets = _merge_derived_repair_targets(
             request.metadata.get("derived_repair_targets"),
         )
+        series_identity = identity_from_metadata(request.exchange, request.metadata)
         await self._emit_event(DataEvent(
             event_type=DataEventType.BACKFILL_COMPLETED,
             key=SeriesKey(
@@ -4775,6 +4795,7 @@ class BackfillCoordinator:
                 request.interval,
                 exchange=request.exchange,
                 market_type=request.market_type,
+                **(series_identity.to_dict() if series_identity is not None else {}),
             ),
             audience=audience_for_backfill_reason(request.reason),
             detail={
@@ -4807,6 +4828,7 @@ class BackfillCoordinator:
         report: Any | None = None,
         error: str | None = None,
     ) -> None:
+        series_identity = identity_from_metadata(request.exchange, request.metadata)
         await self._emit_event(DataEvent(
             event_type=DataEventType.BACKFILL_FAILED,
             key=SeriesKey(
@@ -4814,6 +4836,7 @@ class BackfillCoordinator:
                 request.interval,
                 exchange=request.exchange,
                 market_type=request.market_type,
+                **(series_identity.to_dict() if series_identity is not None else {}),
             ),
             detail={
                 "request_id": request.request_id,
@@ -4846,6 +4869,12 @@ class BackfillCoordinator:
                 "remaining_missing_bars": None,
             }
 
+        series_identity = identity_from_metadata(request.exchange, request.metadata)
+        identity_kwargs = (
+            {"series_identity": series_identity}
+            if series_identity is not None
+            else {}
+        )
         try:
             rows = await run_storage(
                 query_bars,
@@ -4856,6 +4885,7 @@ class BackfillCoordinator:
                 order="ASC",
                 exchange=request.exchange,
                 market_type=request.market_type,
+                **identity_kwargs,
             )
         except Exception as exc:
             logger.warning(
@@ -4887,6 +4917,20 @@ class BackfillCoordinator:
             if requires_trusted_finality
             else physical_actual
         )
+        if request.metadata.get("history_verification") == "provider_authoritative_sparse":
+            result = {
+                "verified_contiguous": True,
+                "remaining_missing_bars": 0,
+                "expected_bars": None,
+                "actual_bars": len(physical_actual),
+                "verified_bars": len(actual),
+                "verification_mode": "provider_authoritative_sparse",
+            }
+            if include_rows:
+                result["_rows"] = (
+                    trusted_rows if requires_trusted_finality else rows
+                )
+            return result
         calendar = self._context_calendar(
             context,
             self._context_availability(context),

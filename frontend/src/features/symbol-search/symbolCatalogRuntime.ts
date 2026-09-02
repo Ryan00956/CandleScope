@@ -9,6 +9,7 @@ import type { SymbolSearchItem } from "./symbolSearchTypes.js";
 
 const SYMBOL_CATALOG_RETRY_BASE_MS = 1_000;
 const SYMBOL_CATALOG_RETRY_MAX_MS = 15_000;
+const EMPTY_EXCHANGE_SET: ReadonlySet<string> = new Set();
 
 export function symbolCatalogRetryDelayMs(
   attempt: number,
@@ -96,11 +97,15 @@ export function useSymbolCatalogRuntime({
   currentExchange = "binance",
   requestedMarketType = "spot",
   requestedExchanges,
+  providerSearch = "",
+  queryOnlyExchanges = EMPTY_EXCHANGE_SET,
   open,
 }: {
   currentExchange?: string;
   requestedMarketType?: string;
   requestedExchanges?: ReadonlySet<string>;
+  providerSearch?: string;
+  queryOnlyExchanges?: ReadonlySet<string>;
   open: boolean;
 }): SymbolCatalogRuntime {
   const exchangeRequestKey = Array.from(
@@ -111,6 +116,16 @@ export function useSymbolCatalogRuntime({
     .sort()
     .join(",");
   const marketRequestKey = requestedMarketType.trim().toLowerCase();
+  const queryOnlyRequestKey = Array.from(queryOnlyExchanges)
+    .map((exchange) => exchange.trim().toLowerCase())
+    .filter(Boolean)
+    .sort()
+    .join(",");
+  const providerSearchKey = exchangeRequestKey
+    .split(",")
+    .some((exchange) => queryOnlyExchanges.has(exchange))
+    ? providerSearch.trim()
+    : "";
   const initialRequests = exchangeRequestKey.split(",").filter(Boolean).map((exchange) => ({
     exchange,
     marketType: marketRequestKey,
@@ -146,6 +161,9 @@ export function useSymbolCatalogRuntime({
             request,
             data: await fetchExchangeInfo(request.marketType, request.exchange, {
               signal: activeControllers[index]!.signal,
+              ...(queryOnlyExchanges.has(request.exchange)
+                ? { search: providerSearchKey }
+                : {}),
             }),
           })),
         );
@@ -196,21 +214,35 @@ export function useSymbolCatalogRuntime({
       }
     };
 
-    void load();
+    const initialDelay = providerSearchKey ? 250 : 0;
+    retryTimer = setTimeout(() => { void load(); }, initialDelay);
 
     return () => {
       cancelled = true;
       if (retryTimer != null) clearTimeout(retryTimer);
       for (const controller of activeControllers) controller.abort();
     };
-  }, [exchangeRequestKey, marketRequestKey, open, retryEpoch]);
+  }, [
+    exchangeRequestKey,
+    marketRequestKey,
+    open,
+    providerSearchKey,
+    queryOnlyExchanges,
+    queryOnlyRequestKey,
+    retryEpoch,
+  ]);
 
   const refreshSymbols = useCallback(async () => {
     const selectedExchange = exchangeRequestKey.split(",")[0] || currentExchange;
     setRefreshing(true);
     try {
-      await refreshExchangeInfo(selectedExchange, marketRequestKey);
-      const data = await fetchExchangeInfo(marketRequestKey, selectedExchange);
+      const queryOnly = queryOnlyExchanges.has(selectedExchange);
+      if (!queryOnly) {
+        await refreshExchangeInfo(selectedExchange, marketRequestKey);
+      }
+      const data = await fetchExchangeInfo(marketRequestKey, selectedExchange, {
+        ...(queryOnly ? { search: providerSearchKey } : {}),
+      });
       const symbols = symbolList(data);
       if (symbols) {
         const enriched = enrichSymbols(symbols);
@@ -228,7 +260,13 @@ export function useSymbolCatalogRuntime({
     } finally {
       setRefreshing(false);
     }
-  }, [currentExchange, exchangeRequestKey, marketRequestKey]);
+  }, [
+    currentExchange,
+    exchangeRequestKey,
+    marketRequestKey,
+    providerSearchKey,
+    queryOnlyExchanges,
+  ]);
 
   return {
     allSymbols,

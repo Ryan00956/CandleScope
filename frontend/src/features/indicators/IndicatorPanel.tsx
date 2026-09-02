@@ -6,7 +6,7 @@
  * - View & manage active indicators (toggle visibility, remove, edit params)
  * - Open code editor for custom indicators
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import { t, type MessageKey } from "../../i18n/index.js";
 import { useLocale } from "../../i18n/useLocale.js";
 import { useRightDrawerResize } from "../../shared/useRightDrawerResize.js";

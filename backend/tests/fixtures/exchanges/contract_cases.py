@@ -25,8 +25,9 @@ class ChannelCapabilityExpectation:
     history: bool
     sequence: str
     resync: str
-    connection_model: str
+    connection_model: str | None
     available_fields: frozenset[str]
+    realtime: bool = True
     unavailable_fields: frozenset[str] = frozenset()
     derived_fields: frozenset[str] = frozenset()
     params: tuple[tuple[str, tuple[Any, ...]], ...] = ()
@@ -742,9 +743,120 @@ def builtin_exchange_channel_expectations(
             ),
         )
 
+    twelve_data_base_fields = frozenset({
+        "interval",
+        "open_time",
+        "close_time",
+        "open",
+        "high",
+        "low",
+        "close",
+        "is_closed",
+    })
+    twelve_data: dict[
+        tuple[str, MarketChannel],
+        ChannelCapabilityExpectation,
+    ] = {}
+    for market_type in ("stock", "etf", "forex", "index", "commodity"):
+        has_share_volume = market_type in {"stock", "etf"}
+        twelve_data[(market_type, MarketChannel.KLINE)] = (
+            ChannelCapabilityExpectation(
+                delivery=DeliveryClass.APPEND,
+                snapshot=True,
+                delta=False,
+                history=True,
+                sequence="timestamp",
+                resync="replace_snapshot",
+                connection_model=None,
+                available_fields=(
+                    twelve_data_base_fields | {"volume"}
+                    if has_share_volume
+                    else twelve_data_base_fields
+                ),
+                realtime=False,
+                unavailable_fields=(
+                    frozenset()
+                    if has_share_volume
+                    else frozenset({"volume"})
+                ),
+                params=((
+                    "interval",
+                    (
+                        ("1d", "1w", "1M")
+                        if market_type == "index"
+                        else (
+                            "1m", "5m", "15m", "30m", "45m", "1h", "2h",
+                            "4h", "8h", "1d", "1w", "1M",
+                        )
+                    ),
+                ),),
+                limits=(("rest.max_limit", 5000),),
+                known_limitations=(
+                    (
+                        "Intraday history is regular-session only and requires a US venue identity",
+                    )
+                    if market_type in {"stock", "etf"}
+                    else ()
+                ),
+                realtime_transports=(),
+            )
+        )
+
+    ticker_fields = frozenset({
+        "last_price",
+        "open_price",
+        "high_price",
+        "low_price",
+        "price_change_pct",
+    })
+    for market_type in ("stock", "etf", "forex", "commodity"):
+        equity = market_type in {"stock", "etf"}
+        twelve_data[(market_type, MarketChannel.TICKER)] = (
+            ChannelCapabilityExpectation(
+                delivery=DeliveryClass.LATEST,
+                snapshot=True,
+                delta=False,
+                history=False,
+                sequence="timestamp",
+                resync="replace_snapshot",
+                connection_model="plugin_sidecar",
+                available_fields=(
+                    ticker_fields | {"volume"}
+                    if equity
+                    else ticker_fields
+                ),
+                unavailable_fields=(
+                    frozenset({"quote_volume"})
+                    if equity
+                    else frozenset({"volume", "quote_volume"})
+                ),
+                update_intervals_ms=(1000,),
+                limits=(
+                    ("rest.request_weight", 1),
+                    ("websocket.max_symbols", 8),
+                ),
+                known_limitations=(
+                    (
+                        "WebSocket publishes last price and optional day volume, not OHLC bars",
+                        "Basic-plan WebSocket access is limited to provider-entitled trial symbols",
+                    )
+                    if equity
+                    else (
+                        "WebSocket publishes price ticks; volume is not guaranteed",
+                        "Commodity access remains provider-entitlement dependent",
+                    )
+                ),
+                realtime_transports=(
+                    TransportMode.PLUGIN_STREAM,
+                    TransportMode.REST_POLL,
+                ),
+            )
+        )
+
     return {
         "binance": ccxt_primary(binance),
         "okx": ccxt_primary(_OKX_CHANNEL_EXPECTATIONS),
+        "twelvedata": twelve_data,
     }
 
 
@@ -799,7 +911,140 @@ def builtin_exchange_contract_cases() -> dict[str, list[ExchangeContractCase]]:
                 StreamType.LIQUIDATION,
             )
         ],
+        "twelvedata": [
+            _twelve_data_case(market_type)
+            for market_type in ("stock", "etf", "forex", "index", "commodity")
+        ] + [
+            _twelve_data_ticker_case(market_type)
+            for market_type in ("stock", "etf", "forex", "commodity")
+        ],
     }
+
+
+def _twelve_data_case(market_type: str) -> ExchangeContractCase:
+    symbols = {
+        "stock": "AAPL:NASDAQ",
+        "etf": "SPY:NYSE",
+        "forex": "EUR/USD",
+        "index": "SPX",
+        "commodity": "XAU/USD",
+    }
+    interval = "1d" if market_type in {"stock", "etf", "index"} else "1m"
+    descriptor = StreamDescriptor(
+        symbols[market_type],
+        StreamType.KLINE,
+        interval=interval,
+        exchange="twelvedata",
+        market_type=market_type,
+    )
+    row: dict[str, Any] = {
+        "datetime": (
+            "2026-08-28"
+            if interval == "1d"
+            else "2026-08-28 10:00:00"
+        ),
+        "open": "100.0",
+        "high": "102.0",
+        "low": "99.0",
+        "close": "101.0",
+    }
+    if market_type in {"stock", "etf"}:
+        row["volume"] = "12345"
+    meta = {
+        "symbol": symbols[market_type],
+        "interval": "1day" if interval == "1d" else "1min",
+        "type": market_type,
+    }
+    sample_row = {**row, "_twelve_data_meta": meta}
+    required_fields = {
+        "interval",
+        "open_time",
+        "close_time",
+        "open",
+        "high",
+        "low",
+        "close",
+        "is_closed",
+    }
+    if market_type in {"stock", "etf"}:
+        required_fields.add("volume")
+    return ExchangeContractCase(
+        descriptor=descriptor,
+        request=_request(descriptor),
+        sample_http_payload={"status": "ok", "meta": meta, "values": [row]},
+        expected_http_rows=1,
+        normalizer_samples=[
+            NormalizerContractSample(
+                payload=sample_row,
+                source=DataSource.HTTP_BACKFILL,
+                required_data_fields=required_fields,
+            ),
+        ],
+    )
+
+
+def _twelve_data_ticker_case(market_type: str) -> ExchangeContractCase:
+    symbols = {
+        "stock": "AAPL:NASDAQ",
+        "etf": "SPY:NYSE",
+        "forex": "EUR/USD",
+        "commodity": "XAU/USD",
+    }
+    descriptor = StreamDescriptor(
+        symbols[market_type],
+        StreamType.TICKER,
+        exchange="twelvedata",
+        market_type=market_type,
+    )
+    payload: dict[str, Any] = {
+        "symbol": symbols[market_type],
+        "timestamp": 1_777_000_000,
+        "open": "100.0",
+        "high": "102.0",
+        "low": "99.0",
+        "close": "101.0",
+        "previous_close": "99.5",
+        "percent_change": "1.5075",
+    }
+    if market_type in {"stock", "etf"}:
+        payload["volume"] = "12345"
+    required_fields = {
+        "last_price",
+        "open_price",
+        "high_price",
+        "low_price",
+        "price_change_pct",
+    }
+    if market_type in {"stock", "etf"}:
+        required_fields.add("volume")
+    return ExchangeContractCase(
+        descriptor=descriptor,
+        request=_request(descriptor),
+        sample_http_payload=payload,
+        expected_http_rows=1,
+        normalizer_samples=[
+            NormalizerContractSample(
+                payload=payload,
+                source=DataSource.HTTP,
+                required_data_fields=required_fields,
+            ),
+            NormalizerContractSample(
+                payload={
+                    "event": "price",
+                    "symbol": symbols[market_type].split(":", 1)[0],
+                    "timestamp": 1_777_000_001,
+                    "price": "101.5",
+                    **(
+                        {"day_volume": "12350"}
+                        if market_type in {"stock", "etf"}
+                        else {}
+                    ),
+                },
+                source=DataSource.WEBSOCKET,
+                required_data_fields=required_fields,
+            ),
+        ],
+    )
 
 
 def contract_case_channel_key(case: ExchangeContractCase) -> tuple[str, MarketChannel]:

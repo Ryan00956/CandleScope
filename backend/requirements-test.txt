@@ -2,3 +2,6 @@
 
 # Release-manifest schema validation used by backend and SDK tests.
 jsonschema==4.25.1
+
+# Bounded file-level parallelism in frontend/scripts/run-tests.mjs.
+pytest-xdist==3.8.0

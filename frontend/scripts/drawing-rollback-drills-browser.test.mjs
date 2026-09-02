@@ -219,10 +219,16 @@ test("controlled rollback browser CLI rejects every authority-bypassing option",
     "--scenario-module=fake.mjs",
   ];
   for (const argument of forbidden) {
-    const result = runCli([argument]);
-    assert.equal(result.status, 1, argument);
-    assert.match(result.stderr, /is forbidden for the controlled browser authority/, argument);
+    assert.throws(
+      () => parseArgs([argument]),
+      /is forbidden for the controlled browser authority/,
+      argument,
+    );
   }
+  const result = runCli(["--help", "--headless"]);
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, "");
+  assert.match(result.stderr, /is forbidden for the controlled browser authority/);
 });
 
 test("initial controlled report is fail closed for the fixed eight-drill authority", () => {
@@ -530,12 +536,14 @@ test("run authority fails closed when canary retirement is incomplete", () => {
 });
 
 test("controlled rollback browser CLI rejects duplicate and malformed safe options", () => {
-  const duplicate = runCli(["--timeout-ms=1000", "--timeout-ms", "2000"]);
-  assert.equal(duplicate.status, 1);
-  assert.match(duplicate.stderr, /duplicate option/);
-  const malformed = runCli(["--timeout-ms", "0"]);
-  assert.equal(malformed.status, 1);
-  assert.match(malformed.stderr, /must be an integer between 1000 and 600000/);
+  assert.throws(
+    () => parseArgs(["--timeout-ms=1000", "--timeout-ms", "2000"]),
+    /duplicate option/,
+  );
+  assert.throws(
+    () => parseArgs(["--timeout-ms", "0"]),
+    /must be an integer between 1000 and 600000/,
+  );
 
   for (const swallowedAuthorityOption of [
     ["--chrome", "--headless", "--help"],
@@ -543,9 +551,10 @@ test("controlled rollback browser CLI rejects duplicate and malformed safe optio
     ["--chrome=--headless", "--help"],
     ["--out-dir=--artifact=fake.json", "--help"],
   ]) {
-    const result = runCli(swallowedAuthorityOption);
-    assert.equal(result.status, 1);
-    assert.match(result.stderr, /requires a value/);
-    assert.equal(result.stdout, "");
+    assert.throws(() => parseArgs(swallowedAuthorityOption), /requires a value/);
   }
+  const result = runCli(["--chrome", "--headless", "--help"]);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /requires a value/);
+  assert.equal(result.stdout, "");
 });

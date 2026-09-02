@@ -764,7 +764,20 @@ def test_catalog_shutdown_cancels_shielded_physical_refresh(monkeypatch) -> None
 
 
 def test_startup_initializes_data_manager_before_catalog_schedule(monkeypatch) -> None:
+    from starlette.datastructures import State
+
     from app import main as main_module
+    from app.plugin_core_v2 import DisabledCorePluginPlatform
+
+    # Startup writes app.state directly. Keep its test owners out of later
+    # tests and avoid starting the user's installed sidecars for an order check.
+    monkeypatch.setattr(main_module.app, "state", State())
+    monkeypatch.setattr(main_module, "BACKTEST_SETTINGS", SimpleNamespace(enabled=False))
+    monkeypatch.setattr(main_module, "RESEARCH_DATA_LIBRARY_ENABLED", False)
+    monkeypatch.setattr(symbols_api, "initialize_exchange_metadata_cache", lambda: {})
+    monkeypatch.setattr(
+        symbols_api, "configure_exchange_metadata_foreground_probe", lambda _probe: None
+    )
 
     events: list[str] = []
 
@@ -779,6 +792,14 @@ def test_startup_initializes_data_manager_before_catalog_schedule(monkeypatch) -
         main_module.app.state.replay_runtime = None
         main_module.app.state.replay_service = None
 
+    async def init_plugin_plane() -> None:
+        main_module.app.state.plugin_runtime_host = None
+        main_module.app.state.indicator_runtime_service = None
+        main_module.app.state.plugin_platform_v2 = DisabledCorePluginPlatform()
+
+    async def init_alert_delivery() -> None:
+        pass
+
     def schedule_catalog():
         events.append("catalog")
         return None
@@ -790,6 +811,8 @@ def test_startup_initializes_data_manager_before_catalog_schedule(monkeypatch) -
         lambda **_kwargs: SimpleNamespace(to_dict=lambda: {}),
     )
     monkeypatch.setattr(main_module, "_init_replay_runtime", init_replay_runtime)
+    monkeypatch.setattr(main_module, "_start_plugin_plane", init_plugin_plane)
+    monkeypatch.setattr(main_module, "_init_alert_delivery", init_alert_delivery)
     monkeypatch.setattr(main_module, "_init_data_manager", init_data_manager)
     monkeypatch.setattr(main_module, "_schedule_symbol_catalog_refresh", schedule_catalog)
 

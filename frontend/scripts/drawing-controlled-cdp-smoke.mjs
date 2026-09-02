@@ -73,7 +73,7 @@ function optionValue(argv, index, name) {
   return { value, index: inline ? index : index + 1 };
 }
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const parsed = { chromePath: "", timeoutMs: 45_000, outputRoot: DEFAULT_OUTPUT_ROOT, help: false };
   const seen = new Set();
   for (let index = 0; index < argv.length; index += 1) {

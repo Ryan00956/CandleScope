@@ -8,6 +8,7 @@ import test from "node:test";
 
 import {
   assessDrawingWorkerRuntimeEvidence,
+  parseArgs,
   waitForDrawingExerciseSurface,
 } from "./drawing-controlled-cdp-smoke.mjs";
 import {
@@ -112,10 +113,13 @@ test("controlled CDP smoke rejects authority-bypassing and malformed inputs befo
     ["--timeout-ms", "600001", "--help"],
     ["--timeout-ms", "1000", "--timeout-ms", "2000", "--help"],
   ]) {
-    const result = runCli(args);
-    assert.equal(result.status, 1, args.join(" "));
-    assert.equal(result.stdout, "", args.join(" "));
+    assert.throws(() => parseArgs(args), undefined, args.join(" "));
   }
+  // Keep a real process check for CLI wiring, including --help ordering.
+  const result = runCli(["--help", "--headless"]);
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, "");
+  assert.match(result.stderr, /unknown argument/);
 });
 
 test("controlled CDP smoke help validates safe boundary values without creating output", () => {

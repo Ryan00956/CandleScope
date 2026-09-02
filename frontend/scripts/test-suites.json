@@ -1,0 +1,127 @@
+{
+  "areas": {
+    "manual-history": {
+      "backend": ["test_manual_history_", "test_interval_work_plan", "test_history_boundary_repository"],
+      "frontend": ["src/features/data-workbench/"],
+      "sources": ["backend/app/data_engine/manual_history", "backend/app/api/v1/manual_history", "frontend/src/features/data-workbench/"]
+    },
+    "market-data": {
+      "backend": ["test_backfill_", "test_bar_", "test_cache_", "test_calendar_", "test_closed_bar_", "test_custom_", "test_data_", "test_event_bus_", "test_gap_", "test_gc_", "test_history_", "test_ingestion_", "test_interval_", "test_kline", "test_market_", "test_multi_market", "test_price_", "test_snapshot_", "test_storage_", "test_stream_", "test_symbol_"],
+      "frontend": ["src/features/market-data/", "src/features/market-chart-platform/", "src/features/chart-session/", "src/features/watchlist-full-cache/"],
+      "sources": ["backend/app/data_engine/", "backend/app/realtime/", "backend/app/api/v1/klines", "backend/app/api/v1/market", "frontend/src/features/market-data/", "frontend/src/features/market-chart-platform/", "frontend/src/features/chart-session/", "frontend/src/features/watchlist-full-cache/"]
+    },
+    "exchanges": {
+      "backend": ["test_exchange", "test_ccxt_", "test_binance_", "test_okx_", "test_twelve_data_", "test_transport_"],
+      "frontend": ["src/features/exchange-support/", "src/features/advanced-market-data/"],
+      "sources": ["backend/app/exchanges/", "backend/app/api/v1/exchanges", "frontend/src/features/exchange-support/", "frontend/src/features/advanced-market-data/"]
+    },
+    "indicators": {
+      "backend": ["test_indicator_"],
+      "frontend": ["src/features/indicators/", "src/services/__tests__/indicatorApi.test.ts"],
+      "sources": ["backend/app/indicator/", "backend/app/api/v1/indicators", "frontend/src/features/indicators/", "frontend/src/services/indicatorApi."]
+    },
+    "replay": {
+      "backend": ["test_replay_", "test_snapshot_replay_", "test_patch_binance_replay_"],
+      "frontend": ["src/features/replay/", "src/features/replay-launcher/", "src/app/__tests__/marketPageFrame.test.tsx"],
+      "sources": ["backend/app/replay/", "backend/app/api/v1/replay", "frontend/src/features/replay/", "frontend/src/features/replay-launcher/"]
+    },
+    "backtest": {
+      "backend": ["test_backtest_", "backtest_contract/", "test_simulation_", "test_contract_accounting", "test_book_assisted", "test_trade_tape", "test_strategy_provider", "test_pine_strategy", "test_pyne_strategy", "test_python_", "test_external_model_"],
+      "frontend": ["src/features/backtest/"],
+      "sources": ["backend/app/backtest/", "backend/app/simulation/", "backend/app/api/v1/backtests", "frontend/src/features/backtest/"]
+    },
+    "research-data": {
+      "backend": ["test_research_data_", "test_local_", "test_market_dataset_", "test_strategy_research_"],
+      "frontend": ["src/features/research-data/", "src/features/strategy-research/", "src/features/local-data/"],
+      "sources": ["backend/app/research_data/", "backend/app/local_data/", "backend/app/market_dataset/", "backend/app/api/v1/local", "backend/app/api/v1/research", "frontend/src/features/research-data/", "frontend/src/features/strategy-research/", "frontend/src/features/local-data/"]
+    },
+    "plugins": {
+      "backend": ["test_plugin_", "test_first_party_plugin_", "test_pyne_workbench_"],
+      "frontend": ["src/features/plugins/"],
+      "sources": ["backend/app/plugin_", "frontend/src/features/plugins/"]
+    },
+    "alerts": {
+      "backend": ["test_alerts_"],
+      "frontend": ["src/features/alerts/"],
+      "sources": ["backend/app/alerts/", "backend/app/api/v1/alerts", "frontend/src/features/alerts/"]
+    },
+    "order-book": {
+      "backend": ["test_order_book_", "test_full_order_book_", "test_binance_full_depth", "test_binance_partial_depth"],
+      "frontend": ["src/features/order-book/"],
+      "sources": ["backend/app/data_engine/order_book", "backend/app/data_engine/full_order_book", "backend/app/api/v1/order_book", "frontend/src/features/order-book/"]
+    },
+    "trade-flow": {
+      "backend": ["test_trade_flow_"],
+      "frontend": ["src/features/trade-flow/"],
+      "sources": ["backend/app/data_engine/trade_flow", "backend/app/api/v1/trade_flow", "frontend/src/features/trade-flow/"]
+    },
+    "liquidations": {
+      "backend": ["test_liquidation_"],
+      "frontend": ["src/features/liquidations/"],
+      "sources": ["backend/app/data_engine/liquidation", "backend/app/api/v1/liquidation", "frontend/src/features/liquidations/"]
+    },
+    "drawings": {
+      "backend": [],
+      "frontend": ["src/features/drawings/", "src/features/export/"],
+      "sources": ["frontend/src/features/drawings/", "frontend/src/features/export/"]
+    },
+    "workspace": {
+      "backend": ["test_multi_chart_"],
+      "frontend": ["src/features/chart-workspace/"],
+      "sources": ["frontend/src/features/chart-workspace/"]
+    },
+    "settings": {
+      "backend": ["test_settings_api", "test_gc_settings_validation"],
+      "frontend": ["src/features/settings/", "src/components/settings/", "src/stores/__tests__/settings"],
+      "sources": ["frontend/src/features/settings/", "frontend/src/components/settings/", "backend/app/api/v1/settings"]
+    },
+    "tooling": {
+      "backend": [],
+      "frontend": ["scripts/"],
+      "sources": ["frontend/scripts/"]
+    }
+  },
+  "integrationBackend": {
+    "test_plugin_installer.py": "Real isolated venv install, upgrade and rollback",
+    "test_plugin_installer_v2.py": "Real isolated venv install and transaction recovery",
+    "test_plugin_installer_v3_phase1.py": "Real plugin installation",
+    "test_plugin_core_v2.py": "Starts plugins from real installations",
+    "test_plugin_integration_gateway_v2.py": "Installs a real plugin to exercise the integration gateway",
+    "test_plugin_market_v2.py": "Installs and starts a real market plugin",
+    "test_plugin_marketplace_api_v2.py": "Installs signed marketplace bundles and executes Windows sandbox recovery",
+    "test_plugin_marketplace_phase10_service.py": "Installs signed marketplace artifacts and verifies their runtime",
+    "test_plugin_marketplace_v2.py": "Real marketplace installation",
+    "test_plugin_paper_core_v2.py": "Installs a real paper broker and runs its guarded order flow",
+    "test_plugin_provider_v2.py": "Real provider installation",
+    "test_plugin_sandbox_ui_v2.py": "Real plugin installation and sandbox",
+    "test_plugin_platform_multi_runtime_phase0.py": "Executes the real Python bundle lifecycle gate",
+    "test_plugin_platform_multi_runtime_phase1.py": "Executes a real v2 installation and migration gate",
+    "test_plugin_platform_multi_runtime_phase2.py": "Real runtime preparation and installation",
+    "test_plugin_platform_multi_runtime_phase2_gate.py": "Executes runtime installation gate",
+    "test_plugin_platform_multi_runtime_phase3.py": "Native compilation and runtime lifecycle",
+    "test_plugin_platform_multi_runtime_phase3_gate.py": "Native compilation and sandbox gate",
+    "test_plugin_platform_multi_runtime_phase6_api.py": "Installs plugins through the trust API and restarts real sandbox processes",
+    "test_plugin_platform_multi_runtime_phase9_gate.py": "Real reproducible native build, install and rollback",
+    "test_plugin_windows_sandbox_v2.py": "Real Windows sandbox resource limits",
+    "test_python_million_bar_reference.py": "Executes a full one-million-bar Python strategy capacity run"
+  },
+  "serialBackend": {
+    "test_plugin_platform_multi_runtime_phase9_gate.py": "Reserves machine-wide Q: drive during reproducible builds",
+    "test_plugin_windows_sandbox_v2.py": "Measures real CPU, memory and process sandbox limits"
+  },
+  "integrationSources": [
+    "backend/app/plugin_",
+    "backend/app/research_data/",
+    "backend/scripts/plugin_",
+    "backend/tests/plugin_",
+    "backend/app/backtest/python_scale_run.py",
+    "backend/app/backtest/strategy/python_",
+    "backend/app/simulation/"
+  ],
+  "fullSources": [
+    "packages/", "examples/", "backend/app/core/", "backend/app/main.py",
+    "backend/requirements", "backend/pytest.ini", "backend/tests/conftest.py",
+    "frontend/package", "frontend/tsconfig", "frontend/vite.config", "frontend/eslint.config",
+    "frontend/scripts/run-tests", "frontend/scripts/test-suites.json"
+  ]
+}

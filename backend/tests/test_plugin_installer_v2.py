@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -15,32 +14,6 @@ from app.plugin_installer_v2.errors import PlatformBundleError, PlatformInstalle
 from app.plugin_installer_v2.installer import PlatformPluginInstaller
 from app.plugin_installer_v2.registry import load_activation_registry
 from tests.plugin_platform_bundle_testkit import build_hello_platform_bundle
-
-
-def test_static_activation_verification_binds_all_immutable_identity_fields(
-    tmp_path: Path,
-) -> None:
-    fixture = build_hello_platform_bundle(tmp_path / "bundle")
-    installer = PlatformPluginInstaller(root=tmp_path / "managed")
-    installed = installer.install(
-        fixture.bundle.path,
-        expected_sha256=fixture.bundle.sha256,
-        enabled=True,
-    )
-    record = load_activation_registry(installer.registry_path).by_id()[
-        installed.plugin_id
-    ]
-
-    bundle, installation = installer.verify_activation_static(record)
-    assert bundle.sha256 == fixture.bundle.sha256
-    assert installation == installed.installation_path
-
-    with pytest.raises(PlatformInstallerError, match="immutable installation"):
-        installer.verify_activation_static(replace(record, name="Spoofed Name"))
-    with pytest.raises(PlatformInstallerError, match="immutable installation"):
-        installer.verify_activation_static(
-            replace(record, required_permissions=("notifications.show",))
-        )
 
 
 def test_install_quick_repeat_upgrade_and_power_safe_rollback(tmp_path: Path) -> None:

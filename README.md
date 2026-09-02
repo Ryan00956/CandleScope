@@ -133,6 +133,22 @@ Open [http://127.0.0.1:15173/](http://127.0.0.1:15173/). The API runs at
 
 ## Development
 
+Use focused tests while editing, and keep complete regression as a separate step:
+
+```bash
+cd frontend
+npm run test:dev -- manual-history
+npm run test:dev -- drawings --frontend
+npm run test:dev -- --changed --list
+npm run test:check
+npm run test:full
+```
+
+`test:dev` reports its scope and deferred integration files. `test:full` includes
+all backend, frontend and desktop host tests; add `--packages` for Python package
+suites. See the [testing guide](docs/TESTING.md) for selection, bounded parallelism,
+complete profiling and evidence paths.
+
 Backend checks:
 
 Use the virtual environment from Quick start. On Windows, replace `python`

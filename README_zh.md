@@ -126,6 +126,21 @@ npm run dev
 
 ## 开发
 
+日常修改先运行相关模块，完整回归保留独立入口：
+
+```bash
+cd frontend
+npm run test:dev -- manual-history
+npm run test:dev -- drawings --frontend
+npm run test:dev -- --changed --list
+npm run test:check
+npm run test:full
+```
+
+`test:dev` 会显示本次范围及暂未执行的集成测试；`test:full` 包含全部前后端、
+桌面测试。加 `--packages` 可运行各 Python 包测试。模块选择、并行限制、
+完整耗时采样和证据位置见 [测试指南](docs/TESTING.md)。
+
 后端检查：
 
 使用「快速开始」中创建的虚拟环境。Windows 下将以下 `python`

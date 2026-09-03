@@ -5,10 +5,16 @@ import { en } from "../catalogs/en.js";
 import { zhCN } from "../catalogs/zh-CN.js";
 import {
   DEFAULT_LOCALE,
+  LOCALES,
+  LOCALE_OPTIONS,
+  getDateTimeLocale,
   getLocale,
+  getNumberLocale,
   hydrateLocale,
+  isLocaleId,
   messageKeys,
   normalizeLocale,
+  resolveLocale,
   setLocale,
   t,
   tPlural,
@@ -16,6 +22,8 @@ import {
   translateMarketType,
   translateWsStatus,
 } from "../index.js";
+import { formatCatalogMessage, formatCatalogPlural } from "../messageFormat.js";
+import { localeDefinition } from "../registry.js";
 
 function withLocale<T>(locale: string, run: () => T): T {
   const previous = getLocale();
@@ -38,9 +46,64 @@ test("locale normalization keeps the product default and accepts English aliases
   assert.equal(normalizeLocale("fr"), DEFAULT_LOCALE);
 });
 
-test("English and Chinese catalogs expose the same keys", () => {
-  assert.deepEqual(Object.keys(en).sort(), Object.keys(zhCN).sort());
+test("every registered locale exposes all host keys and a language-picker option", () => {
+  for (const locale of LOCALES) {
+    assert.equal(isLocaleId(locale), true);
+    assert.equal(normalizeLocale(locale), locale);
+    assert.ok(LOCALE_OPTIONS.some((option) => option.id === locale && option.nativeLabel));
+    for (const key of messageKeys()) assert.equal(typeof localeDefinition(locale).messages[key], "string");
+  }
+  assert.equal(isLocaleId("en-US"), false);
   assert.deepEqual(messageKeys().slice().sort(), Object.keys(zhCN).sort());
+});
+
+test("locale resolution accepts new languages without changing its matching logic", () => {
+  const registrations = [
+    { id: "en" }, { id: "ja" }, { id: "fr" }, { id: "fr-CA" },
+    { id: "zh-CN", aliases: ["zh", "zh-Hans"] }, { id: "zh-Hant" },
+  ];
+  assert.equal(resolveLocale(" ja-JP ", registrations), "ja");
+  assert.equal(resolveLocale("FR-ca-u-nu-latn", registrations), "fr-CA");
+  assert.equal(resolveLocale("fr-FR", registrations), "fr");
+  assert.equal(resolveLocale("zh-Hant-TW", registrations), "zh-Hant");
+  assert.equal(resolveLocale("zh-Hans-SG", registrations), "zh-CN");
+  assert.equal(resolveLocale("de-DE", registrations), undefined);
+  for (const value of [undefined, "", "en-not-a-locale-!", "../en", "__proto__"]) {
+    assert.equal(resolveLocale(value, registrations), undefined);
+    assert.equal(normalizeLocale(value), DEFAULT_LOCALE);
+  }
+});
+
+test("format profiles preserve existing English dates and numbers and follow runtime changes", () => {
+  withLocale("en", () => {
+    assert.equal(getDateTimeLocale(), "en-GB");
+    assert.equal(getNumberLocale(), "en-US");
+  });
+  withLocale("zh-CN", () => {
+    assert.equal(getDateTimeLocale(), "zh-CN");
+    assert.equal(getNumberLocale(), "zh-CN");
+  });
+});
+
+test("catalog formatting exposes missing messages and preserves unresolved placeholders", () => {
+  assert.equal(formatCatalogMessage({ saved: "Saved {count}" }, "saved", { count: 0 }), "Saved 0");
+  assert.equal(formatCatalogMessage({ saved: "Saved {count}" }, "saved", {}), "Saved {count}");
+  assert.equal(formatCatalogMessage({}, "missing"), "missing");
+  assert.equal(formatCatalogMessage({}, "toString"), "toString");
+});
+
+test("plural selection handles multiple categories and decimal counts in additional languages", () => {
+  const russian = {
+    bars: "{count} бара", "bars.one": "{count} бар", "bars.few": "{count} бара", "bars.many": "{count} баров",
+  };
+  assert.equal(formatCatalogPlural(russian, "ru", "bars", 21), "21 бар");
+  assert.equal(formatCatalogPlural(russian, "ru", "bars", 2), "2 бара");
+  assert.equal(formatCatalogPlural(russian, "ru", "bars", 5), "5 баров");
+  assert.equal(formatCatalogPlural(russian, "ru", "bars", 1.5), "1.5 бара");
+  const arabic = { bars: "other {count}", "bars.zero": "zero {count}", "bars.two": "two {count}" };
+  assert.equal(formatCatalogPlural(arabic, "ar", "bars", 0), "zero 0");
+  assert.equal(formatCatalogPlural(arabic, "ar", "bars", 2), "two 2");
+  assert.equal(formatCatalogPlural(en, "en", "status.barCount", 1, { count: 99 }), "1 bar");
 });
 
 test("t interpolates and switches with the locale store", () => {

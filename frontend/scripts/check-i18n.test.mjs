@@ -4,13 +4,40 @@ import { catalogProblems, lintSourceText } from "./check-i18n.mts";
 
 test("i18n catalog gate catches key, placeholder, and English-locale leaks", () => {
   assert.deepEqual(catalogProblems(
-    { ok: "Saved {count}", leak: "中文" },
-    { ok: "已保存 {total}", extra: "多余" },
+    {
+      "zh-CN": { ok: "已保存 {count}", extra: "多余" },
+      en: { ok: "Saved {total}", leak: "中文", extra: "中文" },
+    },
+    "zh-CN",
   ), [
-    "missing zh-CN key: leak",
-    "missing en key: extra",
-    "placeholder mismatch: ok (count != total)",
+    "placeholder mismatch: en:ok (count != total)",
+    "unknown en key: leak",
+    "English message contains Han text: extra",
   ]);
+});
+
+test("catalog validation includes every language and permits Han text outside English", () => {
+  assert.deepEqual(catalogProblems({
+    "zh-CN": { saved: "已保存 {count}" },
+    en: { saved: "Saved {count}" },
+    ja: { saved: "{count} 件を保存" },
+    fr: {},
+  }, "zh-CN"), ["missing fr key: saved"]);
+});
+
+test("catalog validation requires language-specific plural forms and checks their placeholders", () => {
+  const chinese = { bars: "{count} 根", "bars.one": "{count} 根" };
+  const russian = {
+    bars: "{count} бара", "bars.one": "{count} бар", "bars.few": "{total} бара",
+  };
+  assert.deepEqual(catalogProblems({ "zh-CN": chinese, ru: russian }, "zh-CN"), [
+    "placeholder mismatch: ru:bars.few (count != total)",
+    "missing ru plural form: bars.many",
+  ]);
+  assert.deepEqual(catalogProblems({
+    "zh-CN": chinese,
+    ru: { ...russian, "bars.few": "{count} бара", "bars.many": "{count} баров" },
+  }, "zh-CN"), []);
 });
 
 test("i18n source gate catches literal UI copy and implicit locale formatting", () => {

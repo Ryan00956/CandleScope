@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { t, type LocaleId } from "../i18n/index.js";
+import { getLocale, t, type LocaleId } from "../i18n/index.js";
 import { useLocale } from "../i18n/useLocale.js";
 import {
   canResolveIntervalFromNativeValues,
@@ -120,7 +120,7 @@ function createStatusForValue(
   capabilityLoading: boolean,
   intervalAvailability?: (value: IntervalString) => boolean,
   unavailableIntervalMessage?: (value: IntervalString) => string,
-  locale: LocaleId = "zh-CN",
+  locale: LocaleId = getLocale(),
 ): IntervalStatus {
   const normalized = canonicalizeIntervalValue(value);
   const seconds = parseIntervalSeconds(normalized);

@@ -4,7 +4,7 @@ import type {
 } from "./replayTypes.js";
 import type { ReplayStoreSnapshot } from "./replayStore.js";
 import type { ReplayV2RunState } from "./replayV2Types.js";
-import { getLocale } from "../../i18n/index.js";
+import { getDateTimeLocale } from "../../i18n/index.js";
 
 export const REPLAY_ACTIVITY_VIEW_LIMIT = 20;
 
@@ -59,7 +59,7 @@ export function formatReplayPublicTime(
 ): string {
   if (valueMs === null) return "--";
   if (blindMode && originMs !== null) return formatReplaySyntheticTime(valueMs, originMs);
-  return new Intl.DateTimeFormat(getLocale() === "en" ? "en-GB" : "zh-CN", {
+  return new Intl.DateTimeFormat(getDateTimeLocale(), {
     timeZone: "UTC",
     year: "numeric",
     month: "2-digit",

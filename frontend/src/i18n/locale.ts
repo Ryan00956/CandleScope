@@ -1,35 +1,25 @@
-export const LOCALES = ["zh-CN", "en"] as const;
-export type LocaleId = (typeof LOCALES)[number];
-export const DEFAULT_LOCALE: LocaleId = "zh-CN";
+import { DEFAULT_LOCALE, LOCALES, localeDefinition, type LocaleId } from "./registry.js";
+import { resolveLocale } from "./localeResolution.js";
 
-export const LOCALE_OPTIONS = [
-  { id: "zh-CN", nativeLabel: "简体中文" },
-  { id: "en", nativeLabel: "English" },
-] as const satisfies readonly { id: LocaleId; nativeLabel: string }[];
+export { DEFAULT_LOCALE, LOCALES, LOCALE_OPTIONS, type LocaleId } from "./registry.js";
+
+const registrations = LOCALES.map((id) => ({ id, aliases: localeDefinition(id).aliases ?? [] }));
 
 const listeners = new Set<() => void>();
 let current: LocaleId = DEFAULT_LOCALE;
 
 export function isLocaleId(value: unknown): value is LocaleId {
-  return value === "zh-CN" || value === "en";
+  return typeof value === "string" && LOCALES.some((locale) => locale === value);
 }
 
 export function normalizeLocale(value: unknown): LocaleId {
-  if (typeof value !== "string") return DEFAULT_LOCALE;
-  const trimmed = value.trim();
-  if (trimmed === "en" || trimmed.toLowerCase().startsWith("en-")) return "en";
-  if (
-    trimmed === "zh"
-    || trimmed === "zh-CN"
-    || trimmed.toLowerCase() === "zh-hans"
-    || trimmed.toLowerCase().startsWith("zh-hans-")
-  ) return "zh-CN";
-  return DEFAULT_LOCALE;
+  return resolveLocale(value, registrations) ?? DEFAULT_LOCALE;
 }
 
 function applyDocumentLang(locale: LocaleId): void {
   if (typeof document === "undefined") return;
   document.documentElement.lang = locale;
+  document.documentElement.dir = localeDefinition(locale).direction ?? "ltr";
 }
 
 export function getLocale(): LocaleId {

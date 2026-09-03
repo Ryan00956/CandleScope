@@ -3,7 +3,7 @@ import type {
   PluginRegistries,
   PluginUiContribution,
 } from "./pluginPlatformTypes.js";
-import type { LocaleId } from "../../i18n/index.js";
+import { getLocale, type LocaleId } from "../../i18n/index.js";
 import { localizePluginContribution } from "./pluginLocalization.js";
 
 export const EMPTY_PLUGIN_REGISTRIES: PluginRegistries = {
@@ -18,7 +18,7 @@ export const EMPTY_PLUGIN_REGISTRIES: PluginRegistries = {
 
 export function buildPluginRegistries(
   catalog: PluginCatalog | null,
-  locale: LocaleId = "zh-CN",
+  locale: LocaleId = getLocale(),
 ): PluginRegistries {
   if (!catalog?.platform.enabled) return EMPTY_PLUGIN_REGISTRIES;
   const values: PluginRegistries = {

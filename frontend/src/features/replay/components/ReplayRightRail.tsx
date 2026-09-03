@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
-import { t } from "../../../i18n/index.js";
-import { getLocale } from "../../../i18n/locale.js";
+import { getNumberLocale, t } from "../../../i18n/index.js";
 import { useLocale } from "../../../i18n/useLocale.js";
 
 import {
@@ -271,7 +270,7 @@ function formatDecimal(value: unknown, maximumFractionDigits = 8): string {
   if (value === null || value === undefined || value === "") return "--";
   const parsed = finiteNumber(value);
   if (parsed === null) return String(value);
-  return new Intl.NumberFormat(getLocale() === "en" ? "en-US" : "zh-CN", {
+  return new Intl.NumberFormat(getNumberLocale(), {
     maximumFractionDigits,
     minimumFractionDigits: 0,
     useGrouping: true,

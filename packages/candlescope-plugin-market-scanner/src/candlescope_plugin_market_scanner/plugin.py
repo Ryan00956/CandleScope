@@ -18,22 +18,37 @@ def market_scanner_manifest() -> PluginManifest:
     return PluginManifest.from_wire(loads_strict(resource.read_bytes()))
 
 
-_ZH_CONTRACT_MESSAGES = {
-    "market scanner accepts only an empty scan command": "市场扫描器只接受空参数扫描命令",
-    "market scanner completion token is stale": "市场扫描器完成令牌已失效",
-    "Host returned invalid scanner settings": "宿主返回的扫描器设置无效",
-    "Host returned an invalid symbol page": "宿主返回的标的页面无效",
-    "market scanner phase is invalid": "市场扫描器阶段无效",
+_CONTRACT_LOCALIZATIONS = {
+    "zh-CN": {
+        "market scanner accepts only an empty scan command": "市场扫描器只接受空参数扫描命令",
+        "market scanner completion token is stale": "市场扫描器完成令牌已失效",
+        "Host returned invalid scanner settings": "宿主返回的扫描器设置无效",
+        "Host returned an invalid symbol page": "宿主返回的标的页面无效",
+        "market scanner phase is invalid": "市场扫描器阶段无效",
+        "capabilityUnavailable": "{permission} 能力不可用",
+    },
 }
 
 
 def _localized_contract_error(error: PlatformContractError, locale: str | None) -> PlatformContractError:
-    if locale != "zh-CN":
+    candidate = (locale or "").strip().lower()
+    messages = None
+    while candidate:
+        messages = next(
+            (value for key, value in _CONTRACT_LOCALIZATIONS.items() if key.lower() == candidate),
+            None,
+        )
+        if messages is not None:
+            break
+        candidate = candidate.rpartition("-")[0]
+    if messages is None:
         return error
-    message = _ZH_CONTRACT_MESSAGES.get(error.message)
+    message = messages.get(error.message)
     if message is None and error.message.endswith(" capability is unavailable"):
         permission = error.message.removesuffix(" capability is unavailable")
-        message = f"{permission} 能力不可用"
+        template = messages.get("capabilityUnavailable")
+        if template is not None:
+            message = template.replace("{permission}", permission)
     if message is None:
         return error
     return PlatformContractError(error.code, message, error.path)

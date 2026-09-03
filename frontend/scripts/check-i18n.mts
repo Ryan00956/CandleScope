@@ -2,8 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
-import { en } from "../src/i18n/catalogs/en.js";
-import { zhCN } from "../src/i18n/catalogs/zh-CN.js";
+import { DEFAULT_LOCALE, LOCALES, localeDefinition } from "../src/i18n/registry.js";
 
 const SOURCE_EXTENSIONS = new Set([".ts", ".tsx"]);
 const SKIPPED_SEGMENTS = new Set(["__tests__", "i18n"]);
@@ -31,32 +30,52 @@ export interface I18nProblem {
 }
 
 function placeholders(value: string): string[] {
-  return [...value.matchAll(/\{([A-Za-z][A-Za-z0-9_]*)\}/g)]
+  return [...value.matchAll(/\{([A-Za-z0-9_]+)\}/g)]
     .map((match) => match[1]!)
     .sort();
 }
 
 export function catalogProblems(
-  english: Readonly<Record<string, string>>,
-  chinese: Readonly<Record<string, string>>,
+  catalogs: Readonly<Record<string, Readonly<Record<string, string>>>>,
+  referenceLocale: string,
 ): string[] {
   const problems: string[] = [];
-  const englishKeys = Object.keys(english).sort();
-  const chineseKeys = Object.keys(chinese).sort();
-  for (const key of englishKeys.filter((item) => !(item in chinese))) {
-    problems.push(`missing zh-CN key: ${key}`);
-  }
-  for (const key of chineseKeys.filter((item) => !(item in english))) {
-    problems.push(`missing en key: ${key}`);
-  }
-  for (const key of englishKeys.filter((item) => item in chinese)) {
-    if (/\p{Script=Han}/u.test(english[key]!)) {
-      problems.push(`English message contains Han text: ${key}`);
+  const reference = catalogs[referenceLocale];
+  if (!reference) return [`missing reference catalog: ${referenceLocale}`];
+  const referenceKeys = Object.keys(reference).sort();
+  const pluralBases = new Set(referenceKeys
+    .filter((key) => key.endsWith(".one") && Object.hasOwn(reference, key.slice(0, -4)))
+    .map((key) => key.slice(0, -4)));
+  for (const [locale, messages] of Object.entries(catalogs)) {
+    for (const key of referenceKeys) {
+      if (!Object.hasOwn(messages, key)) problems.push(`missing ${locale} key: ${key}`);
     }
-    const left = placeholders(english[key]!);
-    const right = placeholders(chinese[key]!);
-    if (left.join("\0") !== right.join("\0")) {
-      problems.push(`placeholder mismatch: ${key} (${left.join(",")} != ${right.join(",")})`);
+    for (const [key, message] of Object.entries(messages)) {
+      const plural = /^(.*)\.(zero|one|two|few|many|other)$/.exec(key);
+      const pluralBase = plural && pluralBases.has(plural[1]!) ? plural[1]! : null;
+      const referenceKey = pluralBase ?? key;
+      if (!Object.hasOwn(reference, key) && !pluralBase) {
+        problems.push(`unknown ${locale} key: ${key}`);
+        continue;
+      }
+      if (!message.trim()) problems.push(`empty ${locale} message: ${key}`);
+      if (locale.split("-")[0]!.toLowerCase() === "en" && /\p{Script=Han}/u.test(message)) {
+        problems.push(`English message contains Han text: ${key}`);
+      }
+      const expected = placeholders(reference[referenceKey]!);
+      const actual = placeholders(message);
+      if (expected.join("\0") !== actual.join("\0")) {
+        problems.push(`placeholder mismatch: ${locale}:${key} (${expected.join(",")} != ${actual.join(",")})`);
+      }
+    }
+    for (const category of new Intl.PluralRules(locale).resolvedOptions().pluralCategories) {
+      if (category === "other") continue; // The unsuffixed message is the other form.
+      for (const base of pluralBases) {
+        const key = `${base}.${category}`;
+        if (!Object.hasOwn(messages, key) && !referenceKeys.includes(key)) {
+          problems.push(`missing ${locale} plural form: ${key}`);
+        }
+      }
     }
   }
   return problems;
@@ -147,7 +166,8 @@ export function sourceProblems(root: string): I18nProblem[] {
 
 function main(): void {
   const frontendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-  const catalog = catalogProblems(en, zhCN);
+  const catalogs = Object.fromEntries(LOCALES.map((locale) => [locale, localeDefinition(locale).messages]));
+  const catalog = catalogProblems(catalogs, DEFAULT_LOCALE);
   const sources = sourceProblems(path.join(frontendRoot, "src"));
   const lines = [
     ...catalog.map((message) => `catalog: ${message}`),
@@ -158,7 +178,7 @@ function main(): void {
     process.exitCode = 1;
     return;
   }
-  console.log(`i18n check passed (${Object.keys(en).length} catalog keys, ${sourceFiles(path.join(frontendRoot, "src")).length} source files)`);
+  console.log(`i18n check passed (${LOCALES.length} locales, ${Object.keys(catalogs[DEFAULT_LOCALE]!).length} catalog keys, ${sourceFiles(path.join(frontendRoot, "src")).length} source files)`);
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main();

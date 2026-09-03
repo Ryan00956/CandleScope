@@ -1,4 +1,4 @@
-import { getLocale, t, type LocaleId, type MessageKey } from "../../i18n/index.js";
+import { getLocale, LOCALES, t, type LocaleId, type MessageKey } from "../../i18n/index.js";
 import {
   CHART_CELL_IDS,
   CHART_LINK_GROUP_COLORS,
@@ -101,7 +101,7 @@ function normalizeBuiltinWorkspaceName(
   }
   if (
     id === DEFAULT_CHART_WORKSPACE_ID
-    && (["zh-CN", "en"] as const).some((locale) => name === defaultChartWorkspaceName(locale))
+    && LOCALES.some((locale) => name === defaultChartWorkspaceName(locale))
   ) return { kind: "default" };
   const legacyChineseNames: Partial<Record<ChartWorkspaceTemplateId, string>> = {
     "split-vertical": "左右双图",
@@ -117,7 +117,7 @@ function normalizeBuiltinWorkspaceName(
       : null;
   };
   for (const templateId of Object.keys(CHART_WORKSPACE_TEMPLATE_NAME_KEYS) as ChartWorkspaceTemplateId[]) {
-    const bases = (["zh-CN", "en"] as const).map((locale) => (
+    const bases = LOCALES.map((locale) => (
       chartWorkspaceTemplateName(templateId, locale)
     ));
     const legacyName = legacyChineseNames[templateId];

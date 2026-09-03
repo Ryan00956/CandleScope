@@ -1,5 +1,5 @@
 import React, { useCallback, useMemo, useSyncExternalStore } from "react";
-import { getLocale, t } from "../../i18n/index.js";
+import { getDateTimeLocale, t } from "../../i18n/index.js";
 import { useLocale } from "../../i18n/useLocale.js";
 import { buildTradeFlowProfile } from "./tradeFlowProfile.js";
 import {
@@ -63,7 +63,7 @@ function formatNotional(value: number): string {
 
 function formatTime(value: number): string {
   const date = new Date(value);
-  const base = date.toLocaleTimeString(getLocale() === "zh-CN" ? "zh-CN" : "en-GB", {
+  const base = date.toLocaleTimeString(getDateTimeLocale(), {
     hour12: false,
     hour: "2-digit",
     minute: "2-digit",

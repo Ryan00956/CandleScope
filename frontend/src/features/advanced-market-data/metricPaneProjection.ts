@@ -1,4 +1,4 @@
-import { getLocale, t } from "../../i18n/index.js";
+import { t } from "../../i18n/index.js";
 import type {
   IndicatorPaneLegendItem,
   IndicatorPanePointMetadata,
@@ -270,7 +270,7 @@ function fundingPointMetadata(
     if (target) details.push(t("pane.detail.target", { time: target }));
   }
   const valueLabel = formatFundingValue(value);
-  const sep = getLocale() === "en" ? ", " : "，";
+  const sep = t("common.listSeparator");
   return {
     time,
     value,

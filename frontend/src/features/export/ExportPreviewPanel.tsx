@@ -1,5 +1,5 @@
 import { memo, useMemo, useState } from "react";
-import { getLocale, t } from "../../i18n/index.js";
+import { getDateTimeLocale, t } from "../../i18n/index.js";
 import { useLocale } from "../../i18n/useLocale.js";
 import type { CSSProperties } from "react";
 
@@ -27,7 +27,7 @@ export interface ExportPreviewPanelProps {
 function formatGeneratedAt(value: number | null | undefined): string {
   if (!value) return t("export.notGenerated");
   try {
-    return new Date(value).toLocaleTimeString(getLocale() === "zh-CN" ? "zh-CN" : "en-GB", { hour12: false });
+    return new Date(value).toLocaleTimeString(getDateTimeLocale(), { hour12: false });
   } catch {
     return t("export.justNow");
   }

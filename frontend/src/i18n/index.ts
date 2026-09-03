@@ -10,6 +10,9 @@ export {
   subscribeLocale,
   type LocaleId,
 } from "./locale.js";
+export { resolveLocale } from "./localeResolution.js";
+export { getDateTimeLocale, getNumberLocale } from "./formatting.js";
+export type { MessageCatalog, PluralMessageKey } from "./messageCatalog.js";
 export { bindDocumentLocale, type DocumentLocaleKeys } from "./documentLocale.js";
 export {
   hasMessage,

@@ -7,7 +7,7 @@ import type {
   TickMarkType,
 } from "lightweight-charts";
 import type { ChartTime } from "./chartAdapterTypes.js";
-import { getLocale } from "../i18n/index.js";
+import { getDateTimeLocale } from "../i18n/index.js";
 
 type AdapterTickMarkFormatter = (
   time: ChartTime,
@@ -84,7 +84,7 @@ export function buildLocalizationOptions(
     let tooltipFormatter: Intl.DateTimeFormat;
     let partsFormatter: Intl.DateTimeFormat;
     const formatters = () => {
-      const locale = getLocale() === "en" ? "en-GB" : "zh-CN";
+      const locale = getDateTimeLocale();
       if (locale !== formatterLocale) {
         formatterLocale = locale;
         tooltipFormatter = new Intl.DateTimeFormat(locale, tooltipFormatOptions);

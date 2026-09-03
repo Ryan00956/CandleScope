@@ -1,4 +1,4 @@
-import type { LocaleId } from "../../i18n/index.js";
+import { resolveLocale, type LocaleId } from "../../i18n/index.js";
 import type {
   PluginCatalogContribution,
   PluginContributionLocalization,
@@ -11,11 +11,8 @@ function selectLocalization(
   locale: LocaleId,
 ): PluginContributionLocalization | null {
   if (!localizations) return null;
-  const entries = Object.entries(localizations);
-  const exact = entries.find(([key]) => key.toLowerCase() === locale.toLowerCase())?.[1];
-  if (exact) return exact;
-  const language = locale.split("-", 1)[0]!.toLowerCase();
-  return entries.find(([key]) => key.toLowerCase() === language)?.[1] ?? null;
+  const selected = resolveLocale(locale, Object.keys(localizations).map((id) => ({ id })));
+  return selected ? localizations[selected] ?? null : null;
 }
 
 function localizeSchema(

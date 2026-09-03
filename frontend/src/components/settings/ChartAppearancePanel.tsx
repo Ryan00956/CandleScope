@@ -5,6 +5,7 @@ import type {
 } from "../../features/settings/chartAppearanceSettings.js";
 import {
     LOCALE_OPTIONS,
+    normalizeLocale,
     setLocale,
     t,
     type LocaleId,
@@ -51,8 +52,8 @@ export default function ChartAppearancePanel({ settings, onUpdate }: ChartAppear
                 <div className="st-group-desc">{t("settings.language.description")}</div>
                 <select
                     className="st-select"
-                    value={settings.locale || "zh-CN"}
-                    onChange={(event) => handleLocaleChange(event.target.value === "en" ? "en" : "zh-CN")}
+                    value={normalizeLocale(settings.locale)}
+                    onChange={(event) => handleLocaleChange(normalizeLocale(event.target.value))}
                     aria-label={t("settings.language.title")}
                     data-settings-locale="true"
                 >

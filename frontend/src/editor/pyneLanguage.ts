@@ -11,7 +11,7 @@
  */
 
 import type * as Monaco from "monaco-editor";
-import { getLocale, type LocaleId } from "../i18n/index.js";
+import { getLocale, resolveLocale, t, type LocaleId } from "../i18n/index.js";
 
 // ══════════════════════════════════════════════════════════════
 //  Pyne API Documentation Database
@@ -1223,12 +1223,18 @@ function englishPyneInsertText(value: string): string {
   return value.replace(/[\p{Script=Han}]+/gu, (word) => labels[word] ?? "Label");
 }
 
+// These legacy adapter resources are independent of the Host catalog. Use their
+// English defaults until a plugin supplies editor-intelligence translations.
+export function pyneDocumentationLocale(locale: string = getLocale()): string {
+  return resolveLocale(locale, [{ id: "zh-CN" }, { id: "en" }]) ?? "en";
+}
+
 export function localizePyneItem(
   item: PyneItem,
   key = item.label,
   locale: LocaleId = getLocale(),
 ): PyneItem {
-  if (locale === "zh-CN") return item;
+  if (pyneDocumentationLocale(locale) === "zh-CN") return item;
   return {
     ...item,
     detail: englishPyneDetail(key, item.detail),
@@ -1391,13 +1397,12 @@ export function registerPyneLanguageSupport(monaco: typeof Monaco): () => void {
 
         // Namespace triggers
         for (const ns of ["ta", "input", "color", "math"]) {
-          const english = getLocale() === "en";
           suggestions.push({
             label: ns,
             kind: monaco.languages.CompletionItemKind.Module,
-            detail: english ? `${ns}.* — type "${ns}." to list members` : `${ns}.* — 输入 "${ns}." 查看方法`,
+            detail: t("editor.pyne.namespaceDetail", { ns }),
             documentation: {
-              value: english ? `Type \`${ns}.\` to trigger completion.` : `输入 \`${ns}.\` 触发自动补全`,
+              value: t("editor.pyne.namespaceDocumentation", { ns }),
               isTrusted: true,
             },
             insertText: `${ns}.`,
@@ -1447,7 +1452,7 @@ export function registerPyneLanguageSupport(monaco: typeof Monaco): () => void {
         const info = HOVER_MAP.get(fullKey);
         if (!info) return null;
 
-        const localizedDocumentation = getLocale() === "en"
+        const localizedDocumentation = pyneDocumentationLocale() === "en"
           ? englishPyneDocumentation(fullKey, info.detail)
           : info.documentation;
 

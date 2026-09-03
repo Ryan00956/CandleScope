@@ -1,15 +1,10 @@
-import { en } from "./catalogs/en.js";
 import { zhCN, type MessageKey } from "./catalogs/zh-CN.js";
 import { getLocale, type LocaleId } from "./locale.js";
+import { localeDefinition } from "./registry.js";
+import { formatCatalogMessage, formatCatalogPlural } from "./messageFormat.js";
+import type { PluralMessageKey } from "./messageCatalog.js";
 
 export type { MessageKey };
-
-const catalogs: Record<LocaleId, Record<MessageKey, string>> = {
-  "zh-CN": zhCN,
-  en,
-};
-
-const TOKEN = /\{([A-Za-z0-9_]+)\}/g;
 
 export function messageKeys(): readonly MessageKey[] {
   return Object.keys(zhCN) as MessageKey[];
@@ -24,12 +19,7 @@ export function t(
   vars?: Readonly<Record<string, string | number>>,
   locale: LocaleId = getLocale(),
 ): string {
-  const template = catalogs[locale][key] ?? catalogs["zh-CN"][key] ?? key;
-  if (!vars) return template;
-  return template.replace(TOKEN, (match, name: string) => {
-    const value = vars[name];
-    return value == null ? match : String(value);
-  });
+  return formatCatalogMessage(localeDefinition(locale).messages, key, vars);
 }
 
 export function tKey(
@@ -41,16 +31,12 @@ export function tKey(
 }
 
 export function tPlural(
-  key: MessageKey,
+  key: PluralMessageKey,
   count: number,
   vars?: Readonly<Record<string, string | number>>,
   locale: LocaleId = getLocale(),
 ): string {
-  const oneKey = `${key}.one`;
-  if (count === 1 && hasMessage(oneKey)) {
-    return t(oneKey, { count, ...vars }, locale);
-  }
-  return t(key, { count, ...vars }, locale);
+  return formatCatalogPlural(localeDefinition(locale).messages, locale, key, count, vars);
 }
 
 const WS_STATUS_KEYS = {

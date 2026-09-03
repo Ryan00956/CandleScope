@@ -44,11 +44,23 @@
 
   const normalizeLocale = (value) => {
     if (typeof value !== "string") return "zh-CN";
-    const normalized = value.toLowerCase();
-    if (normalized === "en" || normalized.startsWith("en-")) return "en";
-    return "zh-CN";
+    let candidate;
+    try {
+      candidate = new Intl.Locale(value.trim()).baseName.toLowerCase();
+    } catch {
+      return "en";
+    }
+    const supported = Object.keys(messages);
+    while (candidate) {
+      const exact = supported.find((id) => id.toLowerCase() === candidate);
+      if (exact) return exact;
+      const separator = candidate.lastIndexOf("-");
+      candidate = separator < 0 ? "" : candidate.slice(0, separator);
+    }
+    // Plugin-owned resources fall back to their English defaults.
+    return "en";
   };
-  const translate = (key) => messages[locale][key] ?? key;
+  const translate = (key) => messages[locale][key] ?? messages.en[key] ?? key;
   const applyLocale = (value) => {
     locale = normalizeLocale(value);
     document.documentElement.lang = locale;

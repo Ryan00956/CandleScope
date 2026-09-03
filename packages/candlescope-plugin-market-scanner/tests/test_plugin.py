@@ -11,6 +11,27 @@ from candlescope_plugin_sdk.platform_v2 import (
 from candlescope_plugin_sdk.platform_v2.errors import PlatformContractError
 
 from candlescope_plugin_market_scanner import MarketScannerPlugin, market_scanner_manifest
+from candlescope_plugin_market_scanner.plugin import (
+    _CONTRACT_LOCALIZATIONS,
+    _localized_contract_error,
+)
+
+
+def test_plugin_error_localizations_accept_additional_languages_and_preserve_fallback(monkeypatch):
+    error = PlatformContractError("invalid_request", "market scanner phase is invalid", "phase")
+    assert _localized_contract_error(error, "ja") is error
+    monkeypatch.setitem(_CONTRACT_LOCALIZATIONS, "fr", {
+        "market scanner phase is invalid": "Phase invalide",
+        "capabilityUnavailable": "Capacité indisponible : {permission}",
+    })
+    translated = _localized_contract_error(error, "fr-CA")
+    assert translated.message == "Phase invalide"
+    assert (translated.code, translated.path) == (error.code, error.path)
+    capability = PlatformContractError("unavailable", "market.bars.read capability is unavailable")
+    assert _localized_contract_error(capability, "fr").message == (
+        "Capacité indisponible : market.bars.read"
+    )
+    assert _localized_contract_error(error, "zh-cn").message == "市场扫描器阶段无效"
 
 
 def _context(locale: str = "en") -> RequestContext:

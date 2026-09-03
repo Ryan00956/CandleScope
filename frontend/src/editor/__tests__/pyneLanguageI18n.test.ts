@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { localizePyneItem, type PyneItem } from "../pyneLanguage.js";
+import { localizePyneItem, pyneDocumentationLocale, type PyneItem } from "../pyneLanguage.js";
+
+test("legacy Pyne docs use their English fallback when the app adds another language", () => {
+  assert.equal(pyneDocumentationLocale("ja"), "en");
+  assert.equal(pyneDocumentationLocale("en-GB"), "en");
+  assert.equal(pyneDocumentationLocale("zh-CN"), "zh-CN");
+});
 
 const sample: PyneItem = {
   label: "rsi",

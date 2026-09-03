@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-import { t } from "../../../i18n/index.js";
+import { getNumberLocale, t } from "../../../i18n/index.js";
 import { useLocale } from "../../../i18n/useLocale.js";
 import type { LocaleId } from "../../../i18n/locale.js";
 import { defaultReplayV2Api } from "../replayV2Api.js";
@@ -17,15 +17,11 @@ interface ReplayTrainingResultsPanelProps {
   readonly onClose: () => void;
 }
 
-function numberLocale(locale: LocaleId): string {
-  return locale === "en" ? "en-US" : "zh-CN";
-}
-
 function decimal(value: string | null, digits = 2, locale: LocaleId): string {
   if (value === null) return "--";
   const parsed = Number(value);
   return Number.isFinite(parsed)
-    ? parsed.toLocaleString(numberLocale(locale), { maximumFractionDigits: digits })
+    ? parsed.toLocaleString(getNumberLocale(locale), { maximumFractionDigits: digits })
     : value;
 }
 

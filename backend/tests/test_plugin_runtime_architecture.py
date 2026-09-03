@@ -73,7 +73,10 @@ def test_phase4_indicator_router_depends_only_on_generic_host_contracts() -> Non
 def test_installer_is_offline_wheel_only_and_never_mutates_backend_python() -> None:
     installer = (HOST_ROOT / "installer.py").read_text(encoding="utf-8")
     bundle = (HOST_ROOT / "bundle.py").read_text(encoding="utf-8")
-    combined = installer + bundle
+    wheel_install = (
+        BACKEND_ROOT / "app" / "core" / "python_wheel_install.py"
+    ).read_text(encoding="utf-8")
+    combined = installer + bundle + wheel_install
 
     for forbidden in (
         "urllib",
@@ -84,10 +87,11 @@ def test_installer_is_offline_wheel_only_and_never_mutates_backend_python() -> N
         "build_sdist",
     ):
         assert forbidden not in combined
-    assert '"--no-index"' in installer
-    assert '"--no-deps"' in installer
-    assert '"--only-binary=:all:"' in installer
-    assert '"--isolated"' in installer
+    assert '"--no-index"' in wheel_install
+    assert '"--no-deps"' in wheel_install
+    assert '"--only-binary=:all:"' in wheel_install
+    assert '"--isolated"' in wheel_install
+    assert '"--target"' in wheel_install
     assert '"-m",\n                "venv"' in installer
     assert "runtime-registry.json" not in bundle
 

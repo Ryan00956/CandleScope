@@ -32,6 +32,13 @@ from app.plugin_security_v2.grants import (
     PermissionDiff,
     PluginGrantRecord,
 )
+from app.core.python_wheel_install import (
+    InstalledDependencyError,
+    host_wheel_install_command,
+    installed_distribution_versions,
+    venv_site_packages,
+    verify_installed_dependencies,
+)
 from app.plugin_security_v2.sandbox import SandboxPolicy
 from app.plugin_security_v2.storage import security_lock
 
@@ -1610,74 +1617,37 @@ class PlatformPluginInstaller:
             )
             for item in bundle.wheels
         ]
+        site_packages = venv_site_packages(installation)
+        site_packages.mkdir(parents=True, exist_ok=True)
         _run_command(
-            (
-                str(self._venv_python(installation)),
-                "-I",
-                "-m",
-                "pip",
-                "--isolated",
-                "install",
-                "--disable-pip-version-check",
-                "--no-index",
-                "--no-deps",
-                "--only-binary=:all:",
-                *(str(path) for path in wheels),
+            host_wheel_install_command(
+                self.python_executable,
+                site_packages,
+                wheels,
             ),
             label="offline wheel installation",
             timeout_seconds=300,
-            cwd=installation,
-        )
-        self._pip_check(installation)
-
-    def _pip_check(self, installation: Path) -> None:
-        _run_command(
-            (
-                str(self._venv_python(installation)),
-                "-I",
-                "-m",
-                "pip",
-                "--isolated",
-                "check",
-            ),
-            label="installed dependency check",
-            timeout_seconds=120,
             cwd=installation,
         )
 
     def _verify_distributions(
         self, installation: Path, bundle: VerifiedPlatformBundle
     ) -> None:
-        script = (
-            "import importlib.metadata as m,json,sys;"
-            "print(json.dumps({n:m.version(n) for n in sys.argv[1:]},sort_keys=True))"
-        )
-        names = tuple(item.package for item in bundle.wheels)
-        output = _run_command(
-            (
-                str(self._venv_python(installation)),
-                "-I",
-                "-c",
-                script,
-                *names,
-            ),
-            label="installed distribution verification",
-            timeout_seconds=30,
-            cwd=installation,
-        )
-        try:
-            installed = loads_strict(output)
-        except PlatformContractError as exc:
-            raise PlatformInstallerError(
-                "distribution verification returned invalid JSON"
-            ) from exc
         expected = {item.package: item.version for item in bundle.wheels}
+        installed = installed_distribution_versions(installation, expected)
         if installed != expected:
             raise PlatformInstallerError(
                 "installed distribution versions do not match the bundle",
                 plugin_id=bundle.manifest.plugin.id,
                 details={"expected": expected, "actual": installed},
             )
+        try:
+            verify_installed_dependencies(installation)
+        except InstalledDependencyError as exc:
+            raise PlatformInstallerError(
+                f"installed dependency check failed: {exc}",
+                plugin_id=bundle.manifest.plugin.id,
+            ) from exc
 
     def _run_probe(
         self, installation: Path, bundle: VerifiedPlatformBundle
@@ -1931,7 +1901,6 @@ class PlatformPluginInstaller:
                     "managed virtual environment Python is missing"
                 )
             self._verify_distributions(installation, bundle)
-            self._pip_check(installation)
         probe = self._run_probe(installation, bundle)
         return bundle, receipt, probe
 

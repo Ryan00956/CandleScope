@@ -43,6 +43,14 @@ from .registry import (
     runtime_registry_from_wire,
     runtime_registry_to_wire,
 )
+from app.core.python_wheel_install import (
+    InstalledDependencyError,
+    host_wheel_install_command,
+    installed_distribution_versions,
+    venv_site_packages,
+    verify_installed_dependencies,
+)
+
 from .supervisor import RuntimeSupervisor
 
 
@@ -950,7 +958,7 @@ class PluginInstaller:
             wheels = bundle.extract_wheels(wheels_directory)
             self._create_venv(staging)
             self._install_wheels(staging, wheels)
-            self._verify_distributions(self._venv_python(staging), receipt.manifest)
+            self._verify_distributions(staging, receipt.manifest)
             self._probe(self._build_probe_spec(receipt, staging), receipt.manifest)
             _atomic_write_json(self._receipt_path(staging), receipt.to_wire())
             self._remove_wheel_cache(wheels_directory)
@@ -1002,67 +1010,39 @@ class PluginInstaller:
             )
 
     def _install_wheels(self, installation_path: Path, wheels: Sequence[Path]) -> None:
-        venv_python = self._venv_python(installation_path)
+        site_packages = venv_site_packages(installation_path)
+        site_packages.mkdir(parents=True, exist_ok=True)
         _run_command(
-            (
-                str(venv_python),
-                "-I",
-                "-m",
-                "pip",
-                "--isolated",
-                "install",
-                "--disable-pip-version-check",
-                "--no-index",
-                "--no-deps",
-                "--only-binary=:all:",
-                *(str(path) for path in wheels),
+            host_wheel_install_command(
+                self.python_executable,
+                site_packages,
+                wheels,
             ),
             label="offline wheel installation",
             timeout_seconds=300,
             cwd=installation_path,
         )
-        self._pip_check(venv_python, installation_path)
-
-    def _pip_check(self, venv_python: Path, installation_path: Path) -> None:
-        _run_command(
-            (str(venv_python), "-I", "-m", "pip", "--isolated", "check"),
-            label="installed dependency check",
-            timeout_seconds=120,
-            cwd=installation_path,
-        )
 
     def _verify_distributions(
         self,
-        venv_python: Path,
+        installation_path: Path,
         manifest: BundleManifest,
     ) -> None:
-        script = (
-            "import importlib.metadata as m,json,sys;"
-            "print(json.dumps({name:m.version(name) for name in sys.argv[1:]},sort_keys=True))"
-        )
-        packages = tuple(wheel.package for wheel in manifest.wheels)
-        output = _run_command(
-            (str(venv_python), "-I", "-c", script, *packages),
-            label="installed distribution verification",
-            timeout_seconds=30,
-        )
-        try:
-            installed = json.loads(
-                output.decode("utf-8"),
-                parse_constant=_reject_json_constant,
-                object_pairs_hook=_unique_json_object,
-            )
-        except (UnicodeError, json.JSONDecodeError, ValueError) as exc:
-            raise PluginInstallerError(
-                "installed distribution verification returned invalid JSON"
-            ) from exc
         expected = {wheel.package: wheel.version for wheel in manifest.wheels}
+        installed = installed_distribution_versions(installation_path, expected)
         if installed != expected:
             raise PluginInstallerError(
                 "installed distribution versions do not match the bundle",
                 runtime_id=manifest.runtime_id,
                 details={"expected": expected, "installed": installed},
             )
+        try:
+            verify_installed_dependencies(installation_path)
+        except InstalledDependencyError as exc:
+            raise PluginInstallerError(
+                f"installed dependency check failed: {exc}",
+                runtime_id=manifest.runtime_id,
+            ) from exc
 
     def _verify_managed_environment(
         self,
@@ -1080,8 +1060,7 @@ class PluginInstaller:
                 "managed virtual environment Python executable is missing",
                 runtime_id=receipt.manifest.runtime_id,
             )
-        self._verify_distributions(venv_python, receipt.manifest)
-        self._pip_check(venv_python, installation_path)
+        self._verify_distributions(installation_path, receipt.manifest)
         self._probe(
             self._build_probe_spec(receipt, installation_path), receipt.manifest
         )

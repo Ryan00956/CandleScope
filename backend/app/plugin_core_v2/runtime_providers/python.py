@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import hashlib
-import os
 from pathlib import Path
 
 from candlescope_plugin_sdk.platform_v2 import (
-    PlatformContractError,
     PythonModuleRuntime,
     canonical_sha256,
-    loads_strict,
 )
 
+from app.core.python_wheel_install import (
+    InstalledDependencyError,
+    host_wheel_install_command,
+    installed_distribution_versions,
+    venv_python,
+    venv_site_packages,
+    verify_installed_dependencies,
+)
 from app.plugin_security_v2.python_runtime import SANDBOX_PYTHON_BOOTSTRAP
 
 from .base import (
@@ -90,11 +95,7 @@ def _sha256(path: Path) -> str:
 
 
 def _venv_python(installation: Path) -> Path:
-    return (
-        installation / "venv" / "Scripts" / "python.exe"
-        if os.name == "nt"
-        else installation / "venv" / "bin" / "python"
-    )
+    return venv_python(installation)
 
 
 def _runtime_identity(runtime_id: str, executable: Path) -> str:
@@ -181,19 +182,13 @@ class PythonModuleProvider:
                 "PLUGIN_RUNTIME_PROVIDER_PREPARE_FAILED",
                 "virtual environment did not create Python",
             )
+        site_packages = venv_site_packages(request.installation)
+        site_packages.mkdir(parents=True, exist_ok=True)
         run_command(
-            (
-                str(executable),
-                "-I",
-                "-m",
-                "pip",
-                "--isolated",
-                "install",
-                "--disable-pip-version-check",
-                "--no-index",
-                "--no-deps",
-                "--only-binary=:all:",
-                *(str(path) for path in request.wheel_paths),
+            host_wheel_install_command(
+                request.host_executable,
+                site_packages,
+                request.wheel_paths,
             ),
             label="offline wheel installation",
             timeout_seconds=300,
@@ -207,50 +202,28 @@ class PythonModuleProvider:
         run_command: InstallCommandRunner,
     ) -> tuple[RuntimeProviderBinding, ...]:
         self._validate_installation_request(request)
+        del run_command
         executable = _venv_python(request.installation)
         if not executable.is_file():
             raise RuntimeProviderError(
                 "PLUGIN_RUNTIME_PROVIDER_VERIFY_FAILED",
                 "managed virtual environment Python is missing",
             )
-        run_command(
-            (
-                str(executable),
-                "-I",
-                "-m",
-                "pip",
-                "--isolated",
-                "check",
-            ),
-            label="installed dependency check",
-            timeout_seconds=120,
-            cwd=request.installation,
-        )
-        script = (
-            "import importlib.metadata as m,json,sys;"
-            "print(json.dumps({n:m.version(n) for n in sys.argv[1:]},sort_keys=True))"
-        )
-        names = tuple(name for name, _version in request.distributions)
-        output = run_command(
-            (str(executable), "-I", "-c", script, *names),
-            label="installed distribution verification",
-            timeout_seconds=30,
-            cwd=request.installation,
-        )
-        try:
-            installed = loads_strict(output)
-        except PlatformContractError as exc:
-            raise RuntimeProviderError(
-                "PLUGIN_RUNTIME_PROVIDER_VERIFY_FAILED",
-                "distribution verification returned invalid JSON",
-            ) from exc
         expected = dict(request.distributions)
+        installed = installed_distribution_versions(request.installation, expected)
         if installed != expected:
             raise RuntimeProviderError(
                 "PLUGIN_RUNTIME_PROVIDER_VERIFY_FAILED",
                 "installed distribution versions do not match the bundle",
                 details={"expected": expected, "actual": installed},
             )
+        try:
+            verify_installed_dependencies(request.installation)
+        except InstalledDependencyError as exc:
+            raise RuntimeProviderError(
+                "PLUGIN_RUNTIME_PROVIDER_VERIFY_FAILED",
+                f"installed dependency check failed: {exc}",
+            ) from exc
         return self._bindings(request)
 
     def prepare_runtime(

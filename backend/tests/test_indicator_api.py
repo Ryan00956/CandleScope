@@ -121,7 +121,7 @@ def test_compute_batch_preserves_non_pyne_language_to_runtime(
     runtime_service = object()
     observed: list[tuple[str | None, object | None]] = []
 
-    async def _compute_script(req, *, runtime_service=None):
+    async def _compute_script(req, *, runtime_service=None, origin=None):
         observed.append((req.language, runtime_service))
         return {"ok": True, "schemaVersion": 1, "lines": []}
 

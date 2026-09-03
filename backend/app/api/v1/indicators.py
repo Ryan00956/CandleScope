@@ -45,6 +45,11 @@ from app.api.v1.stream_utils import (
     validate_ws_interval as _validate_interval_name,
 )
 from app.core import config
+from app.core.operator_origin import (
+    effective_pyne_security_mode,
+    is_trusted_operator_origin,
+    origin_from,
+)
 from app.core.executors import (
     executors_snapshot,
     run_indicator,
@@ -779,6 +784,12 @@ def _resolve_range_market_type(req: IndicatorRangeRequest) -> str:
     return _normalize_market_type(str(req.market_type or req.marketType or "spot"))
 
 
+def _trusted_origin(request: Request | None) -> bool:
+    if request is None:
+        return False
+    return is_trusted_operator_origin(origin_from(request.headers))
+
+
 def _resolve_range_script(req: IndicatorRangeRequest) -> tuple[str, str, str | None]:
     script = req.script or ""
     custom_id = (req.customId or req.customIndicatorId or "").strip()
@@ -802,7 +813,9 @@ def _resolve_range_script(req: IndicatorRangeRequest) -> tuple[str, str, str | N
     return script, name, security_mode
 
 
-def _build_range_meta(req: IndicatorRangeRequest) -> dict[str, Any]:
+def _build_range_meta(
+    req: IndicatorRangeRequest, *, trusted_origin: bool = False
+) -> dict[str, Any]:
     exchange = _normalize_exchange(req.exchange)
     market_type = _resolve_range_market_type(req)
     symbol = req.symbol.upper().strip()
@@ -859,7 +872,9 @@ def _build_range_meta(req: IndicatorRangeRequest) -> dict[str, Any]:
             "scriptHash": digest,
             "script": script,
             "params": params,
-            "securityMode": security_mode,
+            "securityMode": effective_pyne_security_mode(
+                security_mode, trusted=trusted_origin
+            ),
         }
         return meta
 
@@ -920,7 +935,7 @@ async def compute_range(req: IndicatorRangeRequest, request: Request):
         )
 
     try:
-        meta = _build_range_meta(req)
+        meta = _build_range_meta(req, trusted_origin=_trusted_origin(request))
         demand_scope, demand_generation = _resolve_indicator_request_demand(req)
         dm = _require_data_manager(request)
         range_service = _resolve_indicator_range_service(request)
@@ -1228,7 +1243,7 @@ async def compute_range_batch(req: IndicatorRangeBatchRequest, request: Request)
             demand_keys.add(_resolve_indicator_request_demand(item))
             jobs.append(IndicatorRangeBatchJob(
                 client_id=client_id,
-                meta=_build_range_meta(item),
+                meta=_build_range_meta(item, trusted_origin=_trusted_origin(request)),
                 start=start_s,
                 end=end_s,
                 reason=item.reason or "range",
@@ -1392,6 +1407,7 @@ async def compute_batch(
             shared_bars=shared_bars,
             shared_bars_error=shared_bars_error,
             runtime_service=_resolve_indicator_runtime_service(request),
+            origin=origin_from(request.headers) if request is not None else None,
         )
         for _, _, compute_req, route, indicator_name, route_error in prepared
     ))
@@ -1431,6 +1447,7 @@ async def compute(req: ComputeRequest, request: Request = None):
         return await _compute_script(
             req,
             runtime_service=_resolve_indicator_runtime_service(request),
+            origin=origin_from(request.headers) if request is not None else None,
         )
     return build_error_payload(
         "INDICATOR_REQUEST_EMPTY",
@@ -1559,6 +1576,7 @@ async def _compute_batch_item(
     shared_bars: list[BarData] | None,
     shared_bars_error: dict[str, Any] | None,
     runtime_service: IndicatorRuntimeService | None = None,
+    origin: str | None = None,
 ) -> dict[str, Any]:
     """Compute one batch item while containing unexpected sibling failures."""
     if route_error is not None:
@@ -1573,7 +1591,9 @@ async def _compute_batch_item(
                 use_preparsed_bars=True,
             )
         if route == "script":
-            return await _compute_script(req, runtime_service=runtime_service)
+            return await _compute_script(
+                req, runtime_service=runtime_service, origin=origin
+            )
         return build_error_payload(
             "INDICATOR_REQUEST_EMPTY",
             "Provide either 'name' or 'script'",
@@ -1689,6 +1709,7 @@ async def _compute_script(
     req: ComputeRequestLike,
     *,
     runtime_service: IndicatorRuntimeService | None = None,
+    origin: str | None = None,
 ) -> dict:
     """Compute a script through its configured isolated runtime plugin."""
     service = runtime_service or _unbound_indicator_runtime_service
@@ -1699,6 +1720,10 @@ async def _compute_script(
             "Script language must not be empty.",
         )
 
+    security_mode = effective_pyne_security_mode(
+        req.securityMode,
+        trusted=is_trusted_operator_origin(origin),
+    )
     runtime_request = IndicatorRuntimeRequest(
         language=language,
         source=req.script or "",
@@ -1708,13 +1733,7 @@ async def _compute_script(
         interval=req.interval,
         bars=tuple(req.ohlcv),
         params=req.params or {},
-        options={
-            **(
-                {"securityMode": req.securityMode}
-                if req.securityMode is not None
-                else {}
-            ),
-        },
+        options={"securityMode": security_mode} if security_mode is not None else {},
         transport="http.compute",
     )
     try:

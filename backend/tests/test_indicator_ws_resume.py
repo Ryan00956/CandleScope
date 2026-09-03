@@ -109,7 +109,7 @@ def test_indicator_ws_canonicalizes_custom_intervals_before_subscription(
             message["script"] = 'plot(close, title="Close")'
 
         await _handle_indicator_subscribe(
-            websocket=SimpleNamespace(),
+            websocket=SimpleNamespace(headers={}),
             dm=dm,
             indicator_engine=engine,
             subscribed=subscribed,
@@ -170,7 +170,7 @@ def test_indicator_ws_stream_failure_is_a_terminal_failed_ack(kind: str) -> None
             message["script"] = 'plot(close, title="Close")'
 
         await _handle_indicator_subscribe(
-            websocket=SimpleNamespace(),
+            websocket=SimpleNamespace(headers={}),
             dm=dm,
             indicator_engine=create_engine(),
             subscribed=subscribed,

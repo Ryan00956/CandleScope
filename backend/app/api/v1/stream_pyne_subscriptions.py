@@ -14,6 +14,7 @@ from app.api.v1.stream_indicator_payloads import (
     confirmed_indicator_seed_bars,
 )
 from app.core import config
+from app.core.operator_origin import effective_pyne_security_mode
 from app.core.executors import run_storage
 from app.api.v1.stream_utils import validate_ws_interval as _validate_ws_interval
 from app.data_engine.data_manager.models import DataEventType
@@ -79,6 +80,7 @@ async def handle_pyne_indicator_subscribe(
     client_correction_revision: int | str | None = None,
     runtime_service: IndicatorRuntimeService | None = None,
     pyne_correction_state: dict[str, Any] | None = None,
+    trusted_origin: bool = False,
     seed_query_cache: dict[tuple[str, str, str, str, int], dict[str, Any]] | None = None,
 ) -> None:
     script_runtime_service = runtime_service or _unbound_indicator_runtime_service
@@ -115,6 +117,9 @@ async def handle_pyne_indicator_subscribe(
             security_mode = record.get("securityMode")
         if language is None:
             language = str(record.get("language") or "pyne")
+    security_mode = effective_pyne_security_mode(
+        security_mode, trusted=trusted_origin
+    )
 
     if not script.strip():
         await send_json(

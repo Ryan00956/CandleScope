@@ -26,6 +26,10 @@ from app.api.v1.stream_utils import (
     validate_ws_interval as _validate_ws_interval,
 )
 from app.core import config
+from app.core.operator_origin import (
+    is_trusted_operator_origin,
+    origin_from,
+)
 from app.core.executors import run_storage
 from app.core.runtime_metrics import ws_runtime_metrics
 from app.data_engine.interval_policy import parse_interval_ms, parse_interval_spec
@@ -466,6 +470,9 @@ async def _handle_indicator_subscribe(
                 script=script,
                 params=params,
                 security_mode=msg.get("securityMode"),
+                trusted_origin=is_trusted_operator_origin(
+                    origin_from(websocket.headers)
+                ),
                 history_limit=history_limit,
                 send_json=send_json,
                 stream_consumer_id=stream_consumer_id,

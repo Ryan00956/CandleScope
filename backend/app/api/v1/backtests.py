@@ -11,6 +11,11 @@ from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.core.operator_origin import (
+    effective_python_runtime_mode,
+    is_trusted_operator_origin,
+    origin_from,
+)
 from app.backtest.errors import BacktestError
 from app.backtest.reports import export_bundle
 from app.backtest.runtime import BacktestRuntime
@@ -368,6 +373,19 @@ def _require_python_strategy() -> None:
         raise BacktestError("FLAG_DISABLED", "Python strategy path is default-off")
 
 
+def _operator_python_payload(request: Request, payload: dict[str, Any]) -> dict[str, Any]:
+    trusted = is_trusted_operator_origin(origin_from(request.headers))
+    mode, confirmed = effective_python_runtime_mode(
+        payload.get("python_runtime_mode"),
+        bool(payload.get("python_trusted_confirmed")),
+        trusted=trusted,
+    )
+    patched = dict(payload)
+    patched["python_runtime_mode"] = mode
+    patched["python_trusted_confirmed"] = confirmed
+    return patched
+
+
 def _error(exc: BacktestError) -> JSONResponse:
     retryable_capacity = exc.code == "RUN_CAPACITY_EXCEEDED"
     return JSONResponse(
@@ -555,7 +573,7 @@ def smoke_strategy_revision(
 ) -> dict[str, Any]:
     try:
         return _service(request).smoke_strategy_revision(
-            revision_id, payload.model_dump()
+            revision_id, _operator_python_payload(request, payload.model_dump())
         )
     except BacktestError as exc:
         return _error(exc)
@@ -583,7 +601,9 @@ def preview_snapshot(
 @router.post("/runs/validate")
 def validate_run(request: Request, payload: RunCreateRequest) -> dict[str, Any]:
     try:
-        validated = _service(request).validate_run(payload.model_dump())
+        validated = _service(request).validate_run(
+            _operator_python_payload(request, payload.model_dump())
+        )
         runtime = _optional_runtime(request)
         if runtime is not None:
             preview = runtime.preview_snapshot(
@@ -632,7 +652,7 @@ def create_run(
             _require_contract_snapshot(preview, payload.contract_data_mode)
             _require_declared_snapshot(preview, payload)
         return _service(request).create_run(
-            payload.model_dump(),
+            _operator_python_payload(request, payload.model_dump()),
             idempotency_key=x_idempotency_key,
         )
     except BacktestError as exc:

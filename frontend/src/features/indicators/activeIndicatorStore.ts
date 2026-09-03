@@ -40,7 +40,9 @@ export function loadActiveIndicators(
   try {
     const raw = storage.getItem(storageKey);
     const parsed: unknown = raw ? JSON.parse(raw) : [];
-    return Array.isArray(parsed) ? parsed.filter(isIndicatorDefinition) : [];
+    return Array.isArray(parsed)
+      ? parsed.filter(isIndicatorDefinition).map((indicator) => ({ ...indicator, visible: indicator.visible !== false }))
+      : [];
   } catch {
     return [];
   }
@@ -300,7 +302,7 @@ export function useActiveIndicatorStore({
     setActiveIndicators((prev) =>
       prev.map((indicator) =>
         indicator.id === indicatorId
-          ? { ...indicator, visible: !indicator.visible }
+          ? { ...indicator, visible: indicator.visible === false }
           : indicator
       )
     );

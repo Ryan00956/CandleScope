@@ -85,6 +85,21 @@ def test_market_order_partially_fills_from_subsequent_tape_quantity() -> None:
     assert broker.model_version == AGG_TRADE_TAPE_MODEL_VERSION
 
 
+def test_non_aligned_tape_fills_whole_lots_and_restores_its_checkpoint() -> None:
+    broker = _broker()
+    order = broker.place_order(
+        request(client_order_id="whole-lots"), command_id="cmd-lots"
+    )
+    assert not broker.apply_trade(_trade(0, quantity="0.0004")).fills
+    assert broker.order(order.order_id).status is OrderStatus.OPEN
+    result = broker.apply_trade(_trade(1, quantity="0.1234"))
+    assert result.fills[0].quantity == "0.123"
+    assert broker.order(order.order_id).remaining_quantity == "0.877"
+    restored = _broker()
+    restored.restore(broker.snapshot())
+    assert restored.snapshot() == broker.snapshot()
+
+
 def test_one_tape_quantity_is_shared_once_by_order_priority() -> None:
     broker = _broker()
     first = broker.place_order(

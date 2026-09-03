@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from app.core.config import getenv as app_getenv
+
 import json
 import os
 import subprocess
 import sys
 import threading
+import tempfile
+import uuid
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -40,7 +44,7 @@ def _real_python() -> Path:
 
 
 def _require_trusted_local(*, confirmed: bool) -> None:
-    if os.environ.get("BACKTEST_PYTHON_TRUSTED_LOCAL_ENABLED", "0").strip() != "1":
+    if app_getenv("BACKTEST_PYTHON_TRUSTED_LOCAL_ENABLED", "0").strip() != "1":
         raise PythonRunnerError(
             "TRUSTED_LOCAL_DISABLED",
             "TRUSTED_LOCAL requires BACKTEST_PYTHON_TRUSTED_LOCAL_ENABLED=1",
@@ -93,43 +97,121 @@ class IsolatedPythonRunner:
         self._process: subprocess.Popen[str] | None = None
         self._transcript: list[dict[str, Any]] = []
         self._transcript_chain = "sha256:GENESIS"
-        self._job: Any = None
+        self._sandbox_sid: str | None = None
+        self._sandbox_read_roots: tuple[Path, ...] = ()
         self._stderr_bytes = 0
+        self._stderr_tail = bytearray()
+        self._stderr_overflow = threading.Event()
+        self._stderr_thread: threading.Thread | None = None
+        self._sandbox_profile: str | None = None
+        self._sandbox_root: tempfile.TemporaryDirectory | None = None
+        self._runtime = _real_python()
 
     def start(self) -> None:
+        if self._process is not None:
+            raise PythonRunnerError(
+                "RUNNER_ALREADY_STARTED", "runner is already running"
+            )
         environment = {
             "PYTHONUTF8": "1",
             "PYTHONIOENCODING": "utf-8",
             "PYTHONNOUSERSITE": "1",
         }
-        self._process = subprocess.Popen(
-            [_real_python(), "-I", "-u", str(WORKER), str(SDK_SRC)],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=environment,
-            cwd=str(self.bundle_dir),
-        )
-        self._attach_job()
-
-    def _attach_job(self) -> None:
-        if os.name != "nt" or self._process is None or self._process.pid is None:
-            return
+        command = [str(self._runtime), "-I", "-u", str(WORKER), str(SDK_SRC)]
+        working = self.bundle_dir
         try:
-            kernel32 = __import__("ctypes").WinDLL("kernel32", use_last_error=True)
-            job = kernel32.CreateJobObjectW(None, None)
-            if not job:
-                return
-            process = kernel32.OpenProcess(0x1F0FFF, False, int(self._process.pid))
-            if process:
-                kernel32.AssignProcessToJobObject(job, process)
-                kernel32.CloseHandle(process)
-            self._job = job
-        except Exception:
-            self._job = None
+            if self.mode == "SANDBOXED_LOCAL":
+                from app.plugin_security_v2.sandbox import (
+                    SandboxPolicy,
+                    prepare_sandbox_launch,
+                    ensure_appcontainer_profile,
+                )
+                from app.plugin_security_v2.python_runtime import (
+                    prepare_pinned_python_runtime,
+                )
 
-    def call(self, method: str, params: Mapping[str, Any] | None = None) -> Any:
+                runtime = prepare_pinned_python_runtime(
+                    Path(tempfile.gettempdir()) / "candlescope-python-runtime-v1",
+                    sys.executable,
+                )
+                self._runtime = runtime.executable
+                self._sandbox_root = tempfile.TemporaryDirectory(
+                    prefix="candlescope-strategy-"
+                )
+                root = Path(self._sandbox_root.name)
+                self._sandbox_profile = "cs.strategy." + uuid.uuid4().hex
+                self._sandbox_sid, _ = ensure_appcontainer_profile(
+                    self._sandbox_profile
+                )
+                self._sandbox_read_roots = (
+                    self.bundle_dir.resolve(),
+                    runtime.root,
+                    SDK_SRC,
+                )
+                prepared = prepare_sandbox_launch(
+                    SandboxPolicy(
+                        profile_name=self._sandbox_profile,
+                        installation_directory=self.bundle_dir,
+                        private_directory=root / "private",
+                        runtime_directory=root / "launcher",
+                        additional_read_only_paths=(runtime.root, SDK_SRC),
+                        max_processes=MAX_JOB_PROCESSES,
+                        memory_limit_bytes=512 * 1024 * 1024,
+                        cpu_time_seconds=3600,
+                        max_wall_seconds=86_400,
+                    ),
+                    (str(runtime.executable), "-I", "-u", str(WORKER), str(SDK_SRC)),
+                    self.bundle_dir,
+                )
+                command, working, environment = (
+                    prepared.command,
+                    prepared.working_directory,
+                    prepared.environment,
+                )
+            self._process = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                env=environment,
+                cwd=str(working),
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+            process = self._process
+
+            def drain_stderr() -> None:
+                assert process.stderr is not None
+                while chunk := process.stderr.buffer.read1(4096):
+                    self._stderr_bytes += len(chunk)
+                    self._stderr_tail.extend(chunk)
+                    del self._stderr_tail[:-MAX_STDERR_BYTES]
+                    if self._stderr_bytes > MAX_STDERR_BYTES:
+                        self._stderr_overflow.set()
+                        process.kill()
+                        break
+
+            self._stderr_thread = threading.Thread(
+                target=drain_stderr, name="python-runner-stderr", daemon=True
+            )
+            self._stderr_thread.start()
+            self.call("ping", _timeout_s=DEFAULT_STARTUP_TIMEOUT_S)
+        except Exception as exc:
+            self.close()
+            if self.mode == "SANDBOXED_LOCAL":
+                raise PythonRunnerError(
+                    "SANDBOX_UNAVAILABLE", "AppContainer worker could not start"
+                ) from exc
+            raise
+
+    def call(
+        self,
+        method: str,
+        params: Mapping[str, Any] | None = None,
+        *,
+        _timeout_s: float | None = None,
+    ) -> Any:
         if (
             self._process is None
             or self._process.stdin is None
@@ -146,17 +228,30 @@ class IsolatedPythonRunner:
                 default=str,
             )
         )
-        self._process.stdin.write(json.dumps(request) + "\n")
-        self._process.stdin.flush()
+        process = self._process
+        if self._stderr_overflow.is_set():
+            self.close()
+            raise PythonRunnerError("STDERR_TOO_LARGE", "worker stderr exceeded budget")
+        wire = json.dumps(request) + "\n"
+        if len(wire.encode("utf-8")) > MAX_MESSAGE_BYTES:
+            raise PythonRunnerError("MESSAGE_TOO_LARGE", "request JSON exceeded budget")
         box: list[str | None] = []
+        io_errors: list[OSError] = []
 
         def _read() -> None:
-            assert self._process is not None and self._process.stdout is not None
-            box.append(self._process.stdout.readline())
+            try:
+                process.stdin.write(wire)
+                process.stdin.flush()
+                box.append(process.stdout.readline(MAX_MESSAGE_BYTES + 1))
+            except OSError as exc:
+                io_errors.append(exc)
 
         reader = threading.Thread(target=_read, name="python-runner-read", daemon=True)
         reader.start()
-        reader.join(self.step_timeout_s)
+        reader.join(self.step_timeout_s if _timeout_s is None else _timeout_s)
+        if self._stderr_overflow.is_set():
+            self.close()
+            raise PythonRunnerError("STDERR_TOO_LARGE", "worker stderr exceeded budget")
         if reader.is_alive():
             self.close()
             raise PythonRunnerError(
@@ -164,6 +259,7 @@ class IsolatedPythonRunner:
             )
         line = box[0] if box else ""
         if not line:
+            self.close()
             raise PythonRunnerError("PROVIDER_EOF", "worker closed stdout")
         encoded = line.encode("utf-8")
         if len(encoded) > MAX_MESSAGE_BYTES:
@@ -194,32 +290,48 @@ class IsolatedPythonRunner:
         process = self._process
         self._process = None
         if process is None:
+            self._cleanup_sandbox()
             return self.receipt()
-        try:
-            if process.stdin:
-                process.stdin.close()
-        except OSError:
-            pass
-        if self._job is not None:
-            try:
-                kernel32 = __import__("ctypes").WinDLL("kernel32", use_last_error=True)
-                kernel32.TerminateJobObject(self._job, 1)
-                kernel32.CloseHandle(self._job)
-            except Exception:
-                pass
-            self._job = None
         process.kill()
         try:
             process.wait(timeout=2)
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=2)
+        if self._stderr_thread is not None:
+            self._stderr_thread.join(timeout=2)
+            self._stderr_thread = None
+        for stream in (process.stdin, process.stdout, process.stderr):
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+        self._cleanup_sandbox()
         return self.receipt()
+
+    def _cleanup_sandbox(self) -> None:
+        if self._sandbox_sid is not None:
+            from app.plugin_security_v2.sandbox import revoke_appcontainer_read_access
+
+            revoke_appcontainer_read_access(self._sandbox_read_roots, self._sandbox_sid)
+            self._sandbox_sid = None
+            self._sandbox_read_roots = ()
+        if self._sandbox_profile is not None:
+            from app.plugin_security_v2.sandbox import delete_appcontainer_profile
+
+            delete_appcontainer_profile(self._sandbox_profile)
+            self._sandbox_profile = None
+        if self._sandbox_root is not None:
+            self._sandbox_root.cleanup()
+            self._sandbox_root = None
 
     def receipt(self) -> dict[str, Any]:
         return {
             "mode": self.mode,
-            "runtime": str(_real_python()),
+            "runtime": str(self._runtime),
+            "stderrBytes": self._stderr_bytes,
+            "stderrOverflow": self._stderr_overflow.is_set(),
             "bundleDir": str(self.bundle_dir),
             "profile": self.mode,
             "limits": {

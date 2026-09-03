@@ -671,55 +671,62 @@ class ConservativeBarBroker:
                 "historical book close prices are not ordered by adverse depth",
             )
         mark_before = target.mark_price
-        order = self.place_order(
-            OrderRequest(
-                client_order_id=f"book-close-{self._next_order:010d}",
-                side=normalized_side,
-                order_type=OrderType.MARKET,
-                quantity=quantity,
-                reduce_only=True,
-                position_side=normalized_position_side,
-            ),
-            command_id=command_id,
-            accepted_source_sequence=accepted_source_sequence,
-            created_time_ms=created_time_ms,
-            _defer_immediate=True,
-        )
-        working = self._working_state()
-        for level in levels:
-            current = working.orders[order.order_id]
-            filled = self._fill_working(
-                working,
-                current,
-                source_sequence=accepted_source_sequence,
-                event_time_ms=created_time_ms,
-                trigger=(
-                    str(level["price"]),
-                    LiquidityRole.TAKER,
-                    FillReason.HISTORICAL_BOOK_LEVEL,
+        checkpoint = self.snapshot()
+        try:
+            order = self.place_order(
+                OrderRequest(
+                    client_order_id=f"book-close-{self._next_order:010d}",
+                    side=normalized_side,
+                    order_type=OrderType.MARKET,
+                    quantity=quantity,
+                    reduce_only=True,
+                    position_side=normalized_position_side,
                 ),
-                historical_execution=True,
-                skip_trigger_risk=True,
-                max_fill_quantity=Decimal(str(level["quantity"])),
-                allow_partial=True,
-                partial_status_reason="HISTORICAL_BOOK_DEPTH_PARTIAL",
+                command_id=command_id,
+                accepted_source_sequence=accepted_source_sequence,
+                created_time_ms=created_time_ms,
+                _defer_immediate=True,
             )
-            if not filled:
+            working = self._working_state()
+            for level in levels:
+                current = working.orders[order.order_id]
+                filled = self._fill_working(
+                    working,
+                    current,
+                    source_sequence=accepted_source_sequence,
+                    event_time_ms=created_time_ms,
+                    trigger=(
+                        str(level["price"]),
+                        LiquidityRole.TAKER,
+                        FillReason.HISTORICAL_BOOK_LEVEL,
+                    ),
+                    historical_execution=True,
+                    skip_trigger_risk=True,
+                    max_fill_quantity=Decimal(str(level["quantity"])),
+                    allow_partial=True,
+                    partial_status_reason="HISTORICAL_BOOK_DEPTH_PARTIAL",
+                )
+                if not filled:
+                    raise ReplayDomainError(
+                        ReplayErrorCode.ORDER_REJECTED,
+                        "historical book close level produced no fill",
+                    )
+            final_order = working.orders[order.order_id]
+            if final_order.status is not OrderStatus.FILLED:
                 raise ReplayDomainError(
                     ReplayErrorCode.ORDER_REJECTED,
-                    "historical book close level produced no fill",
+                    "historical book close did not fill the durable quantity",
                 )
-        final_order = working.orders[order.order_id]
-        if final_order.status is not OrderStatus.FILLED:
-            raise ReplayDomainError(
-                ReplayErrorCode.ORDER_REJECTED,
-                "historical book close did not fill the durable quantity",
+            working.position = mark_position(working.position, mark_before)
+            account = self._account_from(
+                working.ledger or self._ledger, working.position
             )
-        working.position = mark_position(working.position, mark_before)
-        account = self._account_from(working.ledger or self._ledger, working.position)
-        self._commit_working(working, account=account)
-        self._has_trading_activity = True
-        return self._orders[order.order_id]
+            self._commit_working(working, account=account)
+            self._has_trading_activity = True
+            return self._orders[order.order_id]
+        except Exception:
+            self.restore(checkpoint)
+            raise
 
     def execute_revealed_reference_close(
         self,
@@ -779,51 +786,58 @@ class ConservativeBarBroker:
             )
         mark_before = target.mark_price
         normalized_side = OrderSide.SELL if target_quantity > 0 else OrderSide.BUY
-        order = self.place_order(
-            OrderRequest(
-                client_order_id=f"close-{self._next_order:010d}",
-                side=normalized_side,
-                order_type=OrderType.MARKET,
-                quantity=quantity,
-                reduce_only=True,
-                position_side=normalized_position_side,
-            ),
-            command_id=command_id,
-            accepted_source_sequence=accepted_source_sequence,
-            created_time_ms=created_time_ms,
-            _defer_immediate=True,
-        )
-        working = self._working_state()
-        current = working.orders[order.order_id]
-        filled = self._fill_working(
-            working,
-            current,
-            source_sequence=accepted_source_sequence,
-            event_time_ms=created_time_ms,
-            trigger=(
-                execution_price,
-                LiquidityRole.TAKER,
-                FillReason.MARKET_REVEALED_REFERENCE,
-            ),
-            historical_execution=True,
-            skip_trigger_risk=True,
-        )
-        if (
-            not filled
-            or working.orders[order.order_id].status is not OrderStatus.FILLED
-        ):
-            raise ReplayDomainError(
-                ReplayErrorCode.ORDER_REJECTED,
-                "revealed-reference close did not fill the durable quantity",
+        checkpoint = self.snapshot()
+        try:
+            order = self.place_order(
+                OrderRequest(
+                    client_order_id=f"close-{self._next_order:010d}",
+                    side=normalized_side,
+                    order_type=OrderType.MARKET,
+                    quantity=quantity,
+                    reduce_only=True,
+                    position_side=normalized_position_side,
+                ),
+                command_id=command_id,
+                accepted_source_sequence=accepted_source_sequence,
+                created_time_ms=created_time_ms,
+                _defer_immediate=True,
             )
-        # A fill price is not a market-data update. Restore the adapter's
-        # shared chart mark; the trusted training command pins the separate
-        # exchange mark input used by the liquidation engine.
-        working.position = mark_position(working.position, mark_before)
-        account = self._account_from(working.ledger or self._ledger, working.position)
-        self._commit_working(working, account=account)
-        self._has_trading_activity = True
-        return self._orders[order.order_id]
+            working = self._working_state()
+            current = working.orders[order.order_id]
+            filled = self._fill_working(
+                working,
+                current,
+                source_sequence=accepted_source_sequence,
+                event_time_ms=created_time_ms,
+                trigger=(
+                    execution_price,
+                    LiquidityRole.TAKER,
+                    FillReason.MARKET_REVEALED_REFERENCE,
+                ),
+                historical_execution=True,
+                skip_trigger_risk=True,
+            )
+            if (
+                not filled
+                or working.orders[order.order_id].status is not OrderStatus.FILLED
+            ):
+                raise ReplayDomainError(
+                    ReplayErrorCode.ORDER_REJECTED,
+                    "revealed-reference close did not fill the durable quantity",
+                )
+            # A fill price is not a market-data update. Restore the adapter's
+            # shared chart mark; the trusted training command pins the separate
+            # exchange mark input used by the liquidation engine.
+            working.position = mark_position(working.position, mark_before)
+            account = self._account_from(
+                working.ledger or self._ledger, working.position
+            )
+            self._commit_working(working, account=account)
+            self._has_trading_activity = True
+            return self._orders[order.order_id]
+        except Exception:
+            self.restore(checkpoint)
+            raise
 
     def cancel_order(
         self,
@@ -1362,6 +1376,10 @@ class ConservativeBarBroker:
         ]
         eligible.sort(key=lambda order: order.ordinal)
         entry_filled = False
+        old_quantities = {
+            side: Decimal(self._position_for_side(working.position, side).quantity)
+            for side in {order.position_side for order in eligible}
+        }
 
         for order in (order for order in eligible if not order.reduce_only):
             trigger = self._trigger(order, bar)
@@ -1375,6 +1393,16 @@ class ConservativeBarBroker:
                 trigger=trigger,
             ):
                 entry_filled = True
+                old = old_quantities[order.position_side]
+                if (old > 0 and order.side is OrderSide.SELL) or (
+                    old < 0 and order.side is OrderSide.BUY
+                ):
+                    remaining = max(
+                        Decimal(0), abs(old) - Decimal(working.new_fills[-1].quantity)
+                    )
+                    old_quantities[order.position_side] = (
+                        remaining if old > 0 else -remaining
+                    )
 
         reduce_triggers = [
             (order, trigger)
@@ -1420,12 +1448,13 @@ class ConservativeBarBroker:
                     event_time_ms=bar.close_time_ms,
                 )
                 continue
-            if (
-                entry_filled
-                and current_order.order_type
-                in {OrderType.LIMIT, OrderType.TAKE_PROFIT_MARKET}
-                and not stop_ids
-            ):
+            favorable = current_order.order_type in {
+                OrderType.LIMIT,
+                OrderType.TAKE_PROFIT_MARKET,
+            }
+            old = old_quantities[current_order.position_side]
+            favorable_budget = abs(old) if entry_filled and favorable else None
+            if favorable_budget == 0:
                 continue
             filled = self._fill_working(
                 working,
@@ -1433,8 +1462,17 @@ class ConservativeBarBroker:
                 source_sequence=source_sequence,
                 event_time_ms=bar.close_time_ms,
                 trigger=trigger,
+                max_fill_quantity=favorable_budget,
+                allow_partial=favorable_budget is not None,
             )
-            if filled and entry_filled and not entry_exit_warned:
+            if filled:
+                remaining = max(
+                    Decimal(0), abs(old) - Decimal(working.new_fills[-1].quantity)
+                )
+                old_quantities[current_order.position_side] = (
+                    remaining if old > 0 else -remaining
+                )
+            if filled and entry_filled and not favorable and not entry_exit_warned:
                 self._warn(
                     working,
                     WarningCode.ENTRY_EXIT_SAME_BAR_WORST_CASE,
@@ -1519,7 +1557,7 @@ class ConservativeBarBroker:
             if triggered is None:
                 continue
             trigger, partial_reason = triggered
-            if available <= 0:
+            if available < Decimal(self.config.instrument.quantity_step):
                 if (
                     partial_reason == "TAPE_TRIGGERED"
                     and order.status_reason != "TAPE_TRIGGERED"
@@ -2660,6 +2698,13 @@ class ConservativeBarBroker:
                 source_sequence=source_sequence,
                 event_time_ms=event_time_ms,
             )
+            return False
+        fill_quantity = round_to_step(
+            fill_quantity,
+            Decimal(self.config.instrument.quantity_step),
+            upward=False,
+        )
+        if fill_quantity <= 0:
             return False
         quantity = decimal_to_string(fill_quantity, field_name="fill quantity")
         position_result = apply_position_fill(

@@ -12,12 +12,16 @@ export const API_BASE = normalizeApiBase(
   globalThis.window?.candlescopeDesktop?.apiBase || import.meta.env?.VITE_API_BASE,
 );
 
-export function httpBaseToWsBase(httpBase: HttpApiBase): WebSocketApiBase {
+export function httpBaseToWsBase(
+  httpBase: HttpApiBase,
+  location: Pick<Location, "protocol" | "host"> | undefined = globalThis.location,
+): WebSocketApiBase {
   if (httpBase.startsWith("https://")) return `wss://${httpBase.slice("https://".length)}`;
   if (httpBase.startsWith("http://")) return `ws://${httpBase.slice("http://".length)}`;
   if (httpBase.startsWith("/")) {
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    return `${protocol}//${window.location.host}${httpBase}`;
+    if (!location?.host) throw new Error("browser location is unavailable");
+    const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+    return `${protocol}//${location.host}${httpBase}`;
   }
   return httpBase;
 }

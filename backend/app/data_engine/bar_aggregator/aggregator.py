@@ -60,6 +60,12 @@ Architecture::
 """
 from __future__ import annotations
 
+import json
+from app.data_engine.series_identity import (
+    KlineSeriesIdentity,
+    resolve_kline_series_identity,
+)
+
 import asyncio
 import logging
 import time
@@ -176,7 +182,9 @@ class BarAggregator:
 
         # Track which (exchange, market_type, symbol) are active per interval
         # (redundant with router targets, but useful for fast lookup)
-        self._symbol_intervals: dict[tuple[str, str, str], set[str]] = {}
+        self._symbol_intervals: dict[
+            tuple[str, str, str, KlineSeriesIdentity], set[str]
+        ] = {}
 
         # Timeout checker task
         self._timeout_task: asyncio.Task | None = None
@@ -208,12 +216,22 @@ class BarAggregator:
 
     # ── Public: Target Management ────────────────────────────
 
+    @staticmethod
+    def _pipeline_key(
+        interval: str, exchange: str, series_identity: KlineSeriesIdentity | None
+    ) -> str:
+        identity = resolve_kline_series_identity(exchange, series_identity)
+        if identity.is_legacy_default_for(exchange):
+            return interval
+        return json.dumps([interval, *identity.storage_values], separators=(",", ":"))
+
     def add_target(
         self,
         symbol: str,
         interval: str,
         exchange: str = "binance",
         market_type: str = "spot",
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> None:
         """Register a (symbol, interval) aggregation target.
 
@@ -237,19 +255,36 @@ class BarAggregator:
             raise ValueError(f"Cannot parse interval: {interval!r}")
 
         # Create pipeline if needed
-        if interval not in self._pipelines:
-            self._pipelines[interval] = IntervalPipeline(
-                interval, interval_ms, self._cfg,
+        pipeline_key = self._pipeline_key(interval, exchange, series_identity)
+        if pipeline_key not in self._pipelines:
+            self._pipelines[pipeline_key] = IntervalPipeline(
+                interval,
+                interval_ms,
+                self._cfg,
             )
             logger.info(
                 "Created pipeline for interval %s (%d ms)", interval, interval_ms,
             )
 
         # Register with router
-        self._router.register_target(symbol, interval, exchange=exchange, market_type=market_type)
+        self._router.register_target(
+            symbol,
+            interval,
+            exchange=exchange,
+            market_type=market_type,
+            series_identity=series_identity,
+        )
 
         # Track
-        self._symbol_intervals.setdefault((exchange, market_type, symbol), set()).add(interval)
+        self._symbol_intervals.setdefault(
+            (
+                exchange,
+                market_type,
+                symbol,
+                resolve_kline_series_identity(exchange, series_identity),
+            ),
+            set(),
+        ).add(interval)
 
     def remove_target(
         self,
@@ -257,6 +292,7 @@ class BarAggregator:
         interval: str,
         exchange: str = "binance",
         market_type: str = "spot",
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> None:
         """Unregister a (symbol, interval) target.
 
@@ -270,8 +306,16 @@ class BarAggregator:
         spec = parse_interval_spec(interval)
         if spec is not None:
             interval = spec.canonical
-        self._router.unregister_target(symbol, interval, exchange=exchange, market_type=market_type)
-        pipeline = self._pipelines.get(interval)
+        self._router.unregister_target(
+            symbol,
+            interval,
+            exchange=exchange,
+            market_type=market_type,
+            series_identity=series_identity,
+        )
+        pipeline = self._pipelines.get(
+            self._pipeline_key(interval, exchange, series_identity)
+        )
         expired = 0
         if pipeline is not None:
             for state in pipeline.bar_state.get_all_active(exchange, market_type, symbol):
@@ -283,7 +327,12 @@ class BarAggregator:
                     state.bucket_start_ms,
                 ) is not None:
                     expired += 1
-        key = (exchange, market_type, symbol)
+        key = (
+            exchange,
+            market_type,
+            symbol,
+            resolve_kline_series_identity(exchange, series_identity),
+        )
         if key in self._symbol_intervals:
             self._symbol_intervals[key].discard(interval)
             if not self._symbol_intervals[key]:
@@ -319,6 +368,7 @@ class BarAggregator:
         bars: list[Any],
         exchange: str = "binance",
         market_type: str = "spot",
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> None:
         """Feed historical bars from the backfill engine.
 
@@ -326,7 +376,12 @@ class BarAggregator:
         full pipeline.
         """
         await self._router.on_backfill_bars(
-            symbol, interval, bars, exchange=exchange, market_type=market_type,
+            symbol,
+            interval,
+            bars,
+            exchange=exchange,
+            market_type=market_type,
+            series_identity=series_identity,
         )
 
     async def on_custom_data(self, adapter_name: str, raw_data: Any) -> None:
@@ -353,16 +408,34 @@ class BarAggregator:
             emit_events=emit_events,
         )
 
-    def compute_bucket(self, interval: str, open_time_ms: int) -> int | None:
+    def compute_bucket(
+        self,
+        interval: str,
+        open_time_ms: int,
+        *,
+        exchange: str = "binance",
+        series_identity: KlineSeriesIdentity | None = None,
+    ) -> int | None:
         """Return the bucket start for an interval using its pipeline policy."""
-        pipeline = self._pipelines.get(interval)
+        pipeline = self._pipelines.get(
+            self._pipeline_key(interval, exchange, series_identity)
+        )
         if pipeline is None:
             return None
         return pipeline.time_bucket.compute_bucket(open_time_ms)
 
-    def previous_bucket(self, interval: str, bucket_start_ms: int) -> int | None:
+    def previous_bucket(
+        self,
+        interval: str,
+        bucket_start_ms: int,
+        *,
+        exchange: str = "binance",
+        series_identity: KlineSeriesIdentity | None = None,
+    ) -> int | None:
         """Return the previous bucket start for an interval."""
-        pipeline = self._pipelines.get(interval)
+        pipeline = self._pipelines.get(
+            self._pipeline_key(interval, exchange, series_identity)
+        )
         if pipeline is None:
             return None
         return pipeline.time_bucket.prev_bucket(bucket_start_ms)
@@ -374,9 +447,12 @@ class BarAggregator:
         bucket_start_ms: int,
         exchange: str = "binance",
         market_type: str = "spot",
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> BarState | None:
         """Return active state for a specific bucket."""
-        pipeline = self._pipelines.get(interval)
+        pipeline = self._pipelines.get(
+            self._pipeline_key(interval, exchange, series_identity)
+        )
         if pipeline is None:
             return None
         return pipeline.bar_state.get_active(
@@ -393,9 +469,12 @@ class BarAggregator:
         bucket_start_ms: int,
         exchange: str = "binance",
         market_type: str = "spot",
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> BarState | None:
         """Expire an active bucket without exposing BarStateEngine internals."""
-        pipeline = self._pipelines.get(interval)
+        pipeline = self._pipelines.get(
+            self._pipeline_key(interval, exchange, series_identity)
+        )
         if pipeline is None:
             return None
         return pipeline.bar_state.expire_bar(
@@ -424,7 +503,12 @@ class BarAggregator:
             bar_input,
             emit_events=emit_events,
         )
-        bucket_start_ms = self.compute_bucket(interval, bar_input.open_time_ms)
+        bucket_start_ms = self.compute_bucket(
+            interval,
+            bar_input.open_time_ms,
+            exchange=exchange,
+            series_identity=bar_input.identity,
+        )
         if bucket_start_ms is None:
             return None
         return self.get_bucket_state(
@@ -433,6 +517,7 @@ class BarAggregator:
             bucket_start_ms,
             exchange=exchange,
             market_type=market_type,
+            series_identity=bar_input.identity,
         )
 
     async def replay_components(
@@ -446,8 +531,12 @@ class BarAggregator:
         bucket_start_ms: int | None = None,
         expire_existing: bool = True,
         emit_events: bool = False,
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> BarState | None:
         """Replay base components into a target bucket and return its state."""
+        identity = resolve_kline_series_identity(exchange, series_identity)
+        if any(component.identity != identity for component in components):
+            raise ValueError("Component series identity does not match the target")
         if bucket_start_ms is not None and expire_existing:
             self.expire_bucket(
                 symbol,
@@ -455,6 +544,7 @@ class BarAggregator:
                 bucket_start_ms,
                 exchange=exchange,
                 market_type=market_type,
+                series_identity=series_identity,
             )
 
         for component in components:
@@ -470,7 +560,12 @@ class BarAggregator:
             )
 
         if bucket_start_ms is None and components:
-            bucket_start_ms = self.compute_bucket(interval, components[-1].open_time_ms)
+            bucket_start_ms = self.compute_bucket(
+                interval,
+                components[-1].open_time_ms,
+                exchange=exchange,
+                series_identity=series_identity,
+            )
         if bucket_start_ms is None:
             return None
         return self.get_bucket_state(
@@ -479,6 +574,7 @@ class BarAggregator:
             bucket_start_ms,
             exchange=exchange,
             market_type=market_type,
+            series_identity=series_identity,
         )
 
     async def aggregate_batch(
@@ -491,6 +587,7 @@ class BarAggregator:
         market_type: str = "spot",
         *,
         require_authoritative: bool = False,
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> list[BarState]:
         """Aggregate a batch in an isolated aggregator instance.
 
@@ -506,6 +603,7 @@ class BarAggregator:
             target_interval,
             exchange=exchange,
             market_type=market_type,
+            series_identity=series_identity,
         )
         rows_by_open_time: dict[int, BarState] = {}
 
@@ -527,6 +625,7 @@ class BarAggregator:
                     source_interval,
                     exchange=exchange,
                     market_type=market_type,
+                    series_identity=series_identity,
                 )
                 for bar in bars
             ]
@@ -536,6 +635,7 @@ class BarAggregator:
                 [component for component in components if component is not None],
                 exchange=exchange,
                 market_type=market_type,
+                series_identity=series_identity,
                 expire_existing=False,
                 emit_events=True,
             )
@@ -554,6 +654,7 @@ class BarAggregator:
                     [bar],
                     exchange=exchange,
                     market_type=market_type,
+                    series_identity=series_identity,
                 )
         if not require_authoritative:
             for state in temp.get_active_bars(
@@ -561,6 +662,7 @@ class BarAggregator:
                 target_interval,
                 exchange=exchange,
                 market_type=market_type,
+                series_identity=series_identity,
             ):
                 rows_by_open_time.setdefault(state.bucket_start_ms, state)
         return [rows_by_open_time[key] for key in sorted(rows_by_open_time)]
@@ -582,7 +684,13 @@ class BarAggregator:
         """Access L5: Publisher (for subscribing to bar events)."""
         return self._publisher
 
-    def get_pipeline(self, interval: str) -> IntervalPipeline | None:
+    def get_pipeline(
+        self,
+        interval: str,
+        *,
+        exchange: str = "binance",
+        series_identity: KlineSeriesIdentity | None = None,
+    ) -> IntervalPipeline | None:
         """Access a per-interval pipeline for advanced customization.
 
         Returns None if no pipeline exists for this interval.
@@ -593,7 +701,9 @@ class BarAggregator:
             if pipeline:
                 pipeline.bar_state.set_merge_strategy(MyCustomMerge())
         """
-        return self._pipelines.get(interval)
+        return self._pipelines.get(
+            self._pipeline_key(interval, exchange, series_identity)
+        )
 
     def get_time_bucket(self, interval: str) -> TimeBucketEngine | None:
         """Access L2: TimeBucketEngine for a specific interval."""
@@ -618,9 +728,12 @@ class BarAggregator:
         interval: str,
         exchange: str = "binance",
         market_type: str = "spot",
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> BarState | None:
         """Get the most recent bar for a (symbol, interval) pair."""
-        p = self._pipelines.get(interval)
+        p = self.get_pipeline(
+            interval, exchange=exchange, series_identity=series_identity
+        )
         if p is None:
             return None
         return p.bar_state.get_latest_bar(exchange, market_type, symbol)
@@ -631,9 +744,12 @@ class BarAggregator:
         interval: str,
         exchange: str = "binance",
         market_type: str = "spot",
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> list[BarState]:
         """Get all active (FORMING) bars for a (symbol, interval) pair."""
-        p = self._pipelines.get(interval)
+        p = self.get_pipeline(
+            interval, exchange=exchange, series_identity=series_identity
+        )
         if p is None:
             return []
         return p.bar_state.get_all_active(exchange, market_type, symbol)
@@ -645,9 +761,12 @@ class BarAggregator:
         limit: int = 100,
         exchange: str = "binance",
         market_type: str = "spot",
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> list[BarState]:
         """Get recently closed bars for a (symbol, interval) pair."""
-        p = self._pipelines.get(interval)
+        p = self.get_pipeline(
+            interval, exchange=exchange, series_identity=series_identity
+        )
         if p is None:
             return []
         return p.bar_state.get_recent_closed(exchange, market_type, symbol, limit)
@@ -682,7 +801,9 @@ class BarAggregator:
         This is the heart of the aggregator, called by the EventRouter
         for each (symbol, interval, BarInput) tuple.
         """
-        pipeline = self._pipelines.get(interval)
+        pipeline = self._pipelines.get(
+            self._pipeline_key(interval, exchange, bar_input.identity)
+        )
         if pipeline is None:
             logger.warning("No pipeline for interval %s", interval)
             return

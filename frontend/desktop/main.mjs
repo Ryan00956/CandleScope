@@ -1,7 +1,9 @@
 import { app, BrowserWindow, ipcMain, screen } from "electron";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
+import { randomBytes } from "node:crypto";
+import { isTrustedAppUrl, startDesktopAssetServer } from "./app-origin.mjs";
 
 import { ElectronWindowManager } from "./electron-window-manager.mjs";
 import { AppWorkBudgetHub } from "./app-work-budget-hub.mjs";
@@ -30,9 +32,12 @@ if (process.env.CANDLESCOPE_DESKTOP_USER_DATA) {
 app.setAppLogsPath(path.join(app.getPath("userData"), "logs"));
 const multiWindowEnabled = process.env.MULTI_WINDOW_ENABLED === "1"
   || process.env.VITE_MULTI_WINDOW_ENABLED === "1";
-const appUrl = process.env.CANDLESCOPE_DESKTOP_URL || (app.isPackaged
-  ? pathToFileURL(path.join(app.getAppPath(), "dist", "index.html")).href
-  : "http://127.0.0.1:15173/");
+let appUrl = process.env.CANDLESCOPE_DESKTOP_URL || "http://127.0.0.1:15173/";
+let assetServer = null;
+const managementSession = {
+  sessionToken: randomBytes(32).toString("base64url"),
+  csrfToken: randomBytes(32).toString("base64url"),
+};
 const backendPort = Number(process.env.CANDLESCOPE_DESKTOP_BACKEND_PORT || 18080);
 const phase7Scenario = String(process.env.CANDLESCOPE_DESKTOP_PHASE7_SCENARIO || "W1").toUpperCase();
 const phase8Output = process.env.CANDLESCOPE_DESKTOP_PHASE8_OUT || "";
@@ -43,14 +48,14 @@ const phase8ReadyTimeoutMs = Math.max(10_000, Number(process.env.CANDLESCOPE_DES
 const phase8RollbackStage = String(
   process.env.CANDLESCOPE_DESKTOP_PHASE8_ROLLBACK_STAGE || "",
 ).toUpperCase();
-const instrumentedAppUrl = (() => {
+function instrumentedAppUrl() {
   const target = new URL(appUrl);
   if (phase8Output) target.searchParams.set("capacityProbe", "phase8");
   else if (process.env.CANDLESCOPE_DESKTOP_PHASE7_OUT) {
     target.searchParams.set("capacityProbe", "phase7");
   }
   return target.href;
-})();
+}
 if (phase8Output) app.commandLine.appendSwitch("js-flags", "--expose-gc");
 const gotSingleInstanceLock = app.requestSingleInstanceLock({ source: "desktop-shell" });
 
@@ -67,9 +72,25 @@ const phase8RuntimeErrors = [];
 const phase8DisplayEvents = { added: 0, removed: 0, metricsChanged: 0 };
 
 function windowIdForSender(sender) {
-  const window = BrowserWindow.fromWebContents(sender);
-  return [...(manager?.windows || [])].find(([, candidate]) => candidate === window)?.[0] || null;
+  return manager?.windowIdForContents(sender) ?? null;
 }
+
+const trustedIpc = {
+  handle(channel, handler) {
+    ipcMain.handle(channel, (event, ...args) => {
+      manager.assertTrustedSender(event);
+      return handler(event, ...args);
+    });
+  },
+  on(channel, handler) {
+    ipcMain.on(channel, (event, ...args) => {
+      try {
+        manager.assertTrustedSender(event);
+        handler(event, ...args);
+      } catch { event.returnValue = { ok: false, code: "DESKTOP_SENDER_REJECTED" }; }
+    });
+  },
+};
 
 function registerWorkspaceSender(sender) {
   const windowId = windowIdForSender(sender);
@@ -120,6 +141,9 @@ function createSupervisor() {
       CANDLE_HOST: "127.0.0.1",
       CANDLE_PORT: String(backendPort),
       CORS_ORIGINS: new URL(appUrl).origin,
+      CANDLESCOPE_PLUGIN_PLATFORM_V2_MANAGEMENT_ORIGINS: new URL(appUrl).origin,
+      CANDLESCOPE_DESKTOP_PLUGIN_SESSION: managementSession.sessionToken,
+      CANDLESCOPE_DESKTOP_PLUGIN_CSRF: managementSession.csrfToken,
       PYTHONPATH: [
         path.join(runtimeRoot, "packages", "candlescope-plugin-sdk", "src"),
         process.env.PYTHONPATH,
@@ -1954,6 +1978,13 @@ async function runPhase8Evidence(store, output) {
 }
 
 async function boot() {
+  if (app.isPackaged && !process.env.CANDLESCOPE_DESKTOP_URL) {
+    assetServer = await startDesktopAssetServer(path.join(app.getAppPath(), "dist"), {
+      port: Number(process.env.CANDLESCOPE_DESKTOP_UI_PORT || 18079),
+    });
+    appUrl = assetServer.appUrl;
+  }
+  if (!isTrustedAppUrl(appUrl, appUrl)) throw new Error("Desktop URL must be a loopback application page");
   supervisor = createSupervisor();
   await supervisor?.start();
 
@@ -1965,14 +1996,20 @@ async function boot() {
     store,
     channels: DESKTOP_IPC,
     preloadPath: path.join(desktopDir, "preload.cjs"),
-    appUrl: instrumentedAppUrl,
+    appUrl: instrumentedAppUrl(),
     multiWindowEnabled,
   });
 
-  ipcMain.handle(DESKTOP_IPC.bootstrap, (event) => {
-    const window = BrowserWindow.fromWebContents(event.sender);
-    const windowId = [...manager.windows].find(([, candidate]) => candidate === window)?.[0]
-      || "main-window";
+  trustedIpc.on(DESKTOP_IPC.managementSession, (event) => {
+    event.returnValue = supervisor ? {
+      apiBase: `http://127.0.0.1:${backendPort}/api/v2/plugins`,
+      ...managementSession,
+    } : null;
+  });
+  trustedIpc.handle(DESKTOP_IPC.openAppPage, (_event, url) => manager.openAppPage(url));
+
+  trustedIpc.handle(DESKTOP_IPC.bootstrap, (event) => {
+    const windowId = manager.assertTrustedSender(event);
     const state = store.snapshot();
     return {
       mode: "native",
@@ -1986,7 +2023,7 @@ async function boot() {
       logsPath: app.getPath("logs"),
     };
   });
-  ipcMain.handle(DESKTOP_IPC.reconcile, async (_event, raw) => {
+  trustedIpc.handle(DESKTOP_IPC.reconcile, async (_event, raw) => {
     if (process.env.CANDLESCOPE_DESKTOP_SPIKE_OUT
       || process.env.CANDLESCOPE_DESKTOP_RESTORE_PROBE_OUT
       || (process.env.CANDLESCOPE_DESKTOP_PHASE7_OUT && !phase7TopologyArmed)
@@ -2010,7 +2047,7 @@ async function boot() {
       };
     }
   });
-  ipcMain.handle(DESKTOP_IPC.workspaceBusConnect, (event, raw) => {
+  trustedIpc.handle(DESKTOP_IPC.workspaceBusConnect, (event, raw) => {
     try {
       const windowId = registerWorkspaceSender(event.sender);
       return workspaceBus.connect(windowId, raw?.snapshot ?? null);
@@ -2023,7 +2060,7 @@ async function boot() {
       };
     }
   });
-  ipcMain.handle(DESKTOP_IPC.workspaceBusCommit, (event, raw) => {
+  trustedIpc.handle(DESKTOP_IPC.workspaceBusCommit, (event, raw) => {
     try {
       const windowId = registerWorkspaceSender(event.sender);
       return workspaceBus.commit(windowId, raw);
@@ -2038,7 +2075,7 @@ async function boot() {
       };
     }
   });
-  ipcMain.handle(DESKTOP_IPC.workspaceBusLink, (event, raw) => {
+  trustedIpc.handle(DESKTOP_IPC.workspaceBusLink, (event, raw) => {
     try {
       const windowId = registerWorkspaceSender(event.sender);
       return workspaceBus.publishLink(windowId, raw);
@@ -2046,14 +2083,14 @@ async function boot() {
       return { ok: false, code: "WORKSPACE_LINK_REJECTED", message: String(error?.message || error) };
     }
   });
-  ipcMain.on(DESKTOP_IPC.workspaceBusWindow, (event, raw) => {
+  trustedIpc.on(DESKTOP_IPC.workspaceBusWindow, (event, raw) => {
     try {
       workspaceBus.reportWindow(registerWorkspaceSender(event.sender), raw);
     } catch {
       // A destroyed or unmanaged sender has no remaining health authority.
     }
   });
-  ipcMain.handle(DESKTOP_IPC.appWorkAcquire, (event, raw) => {
+  trustedIpc.handle(DESKTOP_IPC.appWorkAcquire, (event, raw) => {
     try {
       const windowId = registerWorkspaceSender(event.sender);
       return appWorkBudget.acquire({ ...raw, windowId });
@@ -2061,28 +2098,28 @@ async function boot() {
       return { released: true };
     }
   });
-  ipcMain.on(DESKTOP_IPC.appWorkRelease, (_event, leaseId) => {
+  trustedIpc.on(DESKTOP_IPC.appWorkRelease, (_event, leaseId) => {
     if (typeof leaseId === "string") appWorkBudget.release(leaseId);
   });
-  ipcMain.handle(DESKTOP_IPC.appPreviewRequest, (event, raw) => {
+  trustedIpc.handle(DESKTOP_IPC.appPreviewRequest, (event, raw) => {
     const windowId = registerWorkspaceSender(event.sender);
     return appWorkBudget.requestPreview({ ...raw, windowId });
   });
-  ipcMain.on(DESKTOP_IPC.appPreviewRelease, (event, raw) => {
+  trustedIpc.on(DESKTOP_IPC.appPreviewRelease, (event, raw) => {
     const windowId = windowIdForSender(event.sender);
     if (windowId) appWorkBudget.releasePreview({ ...raw, windowId });
   });
-  ipcMain.handle(DESKTOP_IPC.appBudgetDiagnostics, () => ({
+  trustedIpc.handle(DESKTOP_IPC.appBudgetDiagnostics, () => ({
     workspaceBus: workspaceBus.diagnostics(),
     appWork: appWorkBudget.diagnostics(),
     seriesSnapshots: seriesSnapshots.diagnostics(),
   }));
-  ipcMain.on(DESKTOP_IPC.seriesSnapshotRead, (event, rawKey) => {
+  trustedIpc.on(DESKTOP_IPC.seriesSnapshotRead, (event, rawKey) => {
     event.returnValue = windowIdForSender(event.sender)
       ? seriesSnapshots.read(rawKey)
       : { ok: false, code: "SERIES_SNAPSHOT_SENDER_UNMANAGED", rows: [] };
   });
-  ipcMain.on(DESKTOP_IPC.seriesSnapshotPublish, (event, raw) => {
+  trustedIpc.on(DESKTOP_IPC.seriesSnapshotPublish, (event, raw) => {
     if (!windowIdForSender(event.sender)) return;
     try {
       seriesSnapshots.publish(raw);
@@ -2090,7 +2127,7 @@ async function boot() {
       // The hub records bounded validation rejects; renderer state is never trusted.
     }
   });
-  ipcMain.handle(DESKTOP_IPC.seriesSnapshotDiagnostics, () => seriesSnapshots.diagnostics());
+  trustedIpc.handle(DESKTOP_IPC.seriesSnapshotDiagnostics, () => seriesSnapshots.diagnostics());
 
   screen.on("display-added", () => {
     phase8DisplayEvents.added += 1;
@@ -2162,15 +2199,16 @@ if (!gotSingleInstanceLock) {
       { flag: "a" },
     );
     await supervisor?.stop();
+    await assetServer?.close();
     app.exit(1);
   });
 }
 
 app.on("before-quit", (event) => {
   manager?.approveQuit();
-  if (shutdownComplete || !supervisor) return;
+  if (shutdownComplete || (!supervisor && !assetServer)) return;
   event.preventDefault();
-  shutdownPromise ??= supervisor.stop().finally(() => {
+  shutdownPromise ??= Promise.all([supervisor?.stop(), assetServer?.close()]).finally(() => {
     shutdownComplete = true;
     app.quit();
   });

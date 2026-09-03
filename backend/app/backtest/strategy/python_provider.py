@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-import os
+from app.core.config import getenv as app_getenv
+
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -76,7 +77,7 @@ class PythonHostProvider:
     ) -> None:
         if mode is None:
             mode = "TRUSTED_LOCAL"
-            if os.environ.get("BACKTEST_PYTHON_TRUSTED_LOCAL_ENABLED", "0").strip() != "1":
+            if app_getenv("BACKTEST_PYTHON_TRUSTED_LOCAL_ENABLED", "0").strip() != "1":
                 mode = "SANDBOXED_LOCAL"
             trusted_confirmed = mode == "TRUSTED_LOCAL"
         from app.backtest.strategy.python_scale import scale_v1_enabled

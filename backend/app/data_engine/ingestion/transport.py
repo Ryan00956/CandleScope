@@ -15,6 +15,8 @@ to connect to and which REST endpoint + params to hit.
 
 from __future__ import annotations
 
+from app.core.config import getenv as app_getenv
+
 import asyncio
 import json
 import logging
@@ -89,7 +91,6 @@ class TransportLayer:
         in the registry rather than environment variables.
         ``urllib.request.getproxies()`` handles this transparently.
         """
-        import os as _os
 
         mode = getattr(self._cfg, "proxy_mode", "system")
 
@@ -102,12 +103,12 @@ class TransportLayer:
 
         # mode == "system" (default) — env vars first, then OS-level settings
         env_proxy = (
-            _os.getenv("HTTPS_PROXY")
-            or _os.getenv("HTTP_PROXY")
-            or _os.getenv("https_proxy")
-            or _os.getenv("http_proxy")
-            or _os.getenv("ALL_PROXY")
-            or _os.getenv("all_proxy")
+            app_getenv("HTTPS_PROXY")
+            or app_getenv("HTTP_PROXY")
+            or app_getenv("https_proxy")
+            or app_getenv("http_proxy")
+            or app_getenv("ALL_PROXY")
+            or app_getenv("all_proxy")
         )
         if env_proxy:
             return env_proxy

@@ -13,6 +13,12 @@ All timestamps are in **milliseconds** (consistent with ingestion/backfill).
 """
 from __future__ import annotations
 
+import json
+from app.data_engine.series_identity import (
+    KlineSeriesIdentity,
+    resolve_kline_series_identity,
+)
+
 import enum
 import time
 from dataclasses import dataclass, field
@@ -127,6 +133,21 @@ class BarInput:
     enhanced_fields: frozenset[str] = field(default_factory=frozenset)
     sequence: int | None = None    # for ordering / dedup
     extra: dict[str, Any] = field(default_factory=dict)
+    series_identity: KlineSeriesIdentity | None = None
+
+    @property
+    def identity(self) -> KlineSeriesIdentity:
+        return resolve_kline_series_identity(self.exchange, self.series_identity)
+
+    @property
+    def identity_prefix(self) -> str:
+        return (
+            ""
+            if self.identity.is_legacy_default_for(self.exchange)
+            else "series:"
+            + json.dumps(self.identity.storage_values, separators=(",", ":"))
+            + ":"
+        )
 
     def __post_init__(self) -> None:
         self.symbol = self.symbol.upper().strip()
@@ -155,7 +176,7 @@ class BarInput:
     def input_key(self) -> str:
         """Unique key for dedup: symbol@interval:open_time."""
         return (
-            f"{self.exchange}:{self.market_type}:{self.symbol}"
+            f"{self.identity_prefix}{self.exchange}:{self.market_type}:{self.symbol}"
             f"@{self.source_interval}:{self.open_time_ms}"
         )
 
@@ -164,6 +185,11 @@ class BarInput:
             "symbol": self.symbol,
             "exchange": self.exchange,
             "market_type": self.market_type,
+            **(
+                {"series_identity": self.identity.to_dict()}
+                if self.identity_prefix
+                else {}
+            ),
             "source_interval": self.source_interval,
             "open_time_ms": self.open_time_ms,
             "close_time_ms": self.close_time_ms,
@@ -221,6 +247,21 @@ class BarState:
     status: BarStatus = BarStatus.FORMING
     created_at_ms: int = field(default_factory=lambda: int(time.time() * 1000))
     updated_at_ms: int = field(default_factory=lambda: int(time.time() * 1000))
+    series_identity: KlineSeriesIdentity | None = None
+
+    @property
+    def identity(self) -> KlineSeriesIdentity:
+        return resolve_kline_series_identity(self.exchange, self.series_identity)
+
+    @property
+    def identity_prefix(self) -> str:
+        return (
+            ""
+            if self.identity.is_legacy_default_for(self.exchange)
+            else "series:"
+            + json.dumps(self.identity.storage_values, separators=(",", ":"))
+            + ":"
+        )
 
     def __post_init__(self) -> None:
         self.symbol = self.symbol.upper().strip()
@@ -235,6 +276,11 @@ class BarState:
             "symbol": self.symbol,
             "exchange": self.exchange,
             "market_type": self.market_type,
+            **(
+                {"series_identity": self.identity.to_dict()}
+                if self.identity_prefix
+                else {}
+            ),
             "interval": self.interval,
             "bucket_start_ms": self.bucket_start_ms,
             "bucket_end_ms": self.bucket_end_ms,
@@ -325,7 +371,7 @@ class BarEvent:
     def bar_key(self) -> str:
         """Unique key for this bar: symbol@interval:bucket_start."""
         return (
-            f"{self.bar.exchange}:{self.bar.market_type}:{self.bar.symbol}"
+            f"{self.bar.identity_prefix}{self.bar.exchange}:{self.bar.market_type}:{self.bar.symbol}"
             f"@{self.bar.interval}:{self.bar.bucket_start_ms}"
         )
 

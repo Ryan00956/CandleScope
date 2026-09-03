@@ -1,6 +1,8 @@
 """Indicator and Pyne WebSocket handlers backed by DataManager events."""
 from __future__ import annotations
 
+from app.indicator.series_reference import identity_for_meta
+
 import asyncio
 import json
 import time
@@ -346,7 +348,27 @@ async def _handle_indicator_subscribe(
     symbol = str(msg.get("symbol") or "BTCUSDT").upper().strip()
     requested_interval = str(msg.get("interval") or "1m").strip()
     interval = requested_interval
-    exchange = _normalize_exchange(str(msg.get("exchange") or "binance"))
+    try:
+        exchange = _normalize_exchange(str(msg.get("exchange") or "binance"))
+    except ValueError as exc:
+        await send_json(
+            build_ws_error_payload(
+                "INDICATOR_EXCHANGE_UNSUPPORTED",
+                str(exc),
+                client_id=client_id,
+            )
+        )
+        return
+    identity = identity_for_meta({**msg, "exchange": exchange})
+    if not identity.is_legacy_default_for(exchange):
+        await send_json(
+            build_ws_error_payload(
+                "INDICATOR_SERIES_STREAM_UNSUPPORTED",
+                "Realtime indicators are unavailable for this series identity; use indicator history.",
+                client_id=client_id,
+            )
+        )
+        return
     market_type = _normalize_market_type(str(msg.get("market_type") or msg.get("marketType") or "spot"))
     indicator_name = str(msg.get("name") or msg.get("indicator") or "").upper().strip()
     params = msg.get("params") if isinstance(msg.get("params"), dict) else {}

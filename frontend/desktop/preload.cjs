@@ -1,6 +1,8 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
 const channels = {
+  managementSession: "candlescope:desktop:management-session",
+  openAppPage: "candlescope:desktop:open-app-page",
   bootstrap: "candlescope:desktop:bootstrap",
   reconcile: "candlescope:desktop:reconcile",
   lifecycle: "candlescope:desktop:lifecycle",
@@ -31,6 +33,8 @@ function subscribe(channel, listener) {
 contextBridge.exposeInMainWorld("candlescopeDesktop", Object.freeze({
   apiBase: `http://127.0.0.1:${process.env.CANDLESCOPE_DESKTOP_BACKEND_PORT || "18080"}/api/v1`,
   getBootstrap: () => ipcRenderer.invoke(channels.bootstrap),
+  getPluginManagementSession: () => ipcRenderer.sendSync(channels.managementSession),
+  openAppPage: (url) => ipcRenderer.invoke(channels.openAppPage, url),
   reconcileWorkspace: (payload) => ipcRenderer.invoke(channels.reconcile, payload),
   onLifecycle: (listener) => subscribe(channels.lifecycle, listener),
   onCloseRequested: (listener) => subscribe(channels.closeRequested, listener),

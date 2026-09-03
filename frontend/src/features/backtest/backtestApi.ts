@@ -1,3 +1,4 @@
+import { API_BASE } from "../../services/apiConfig.js";
 import type {
   BacktestReport,
   BacktestChartData,
@@ -288,7 +289,7 @@ function requestOptions(options: RequestInit, signal?: AbortSignal): RequestInit
   return signal === undefined ? options : { ...options, signal };
 }
 
-export function createBacktestApi(base = "/api/v1/backtests"): BacktestApiClient {
+export function createBacktestApi(base = `${API_BASE}/backtests`): BacktestApiClient {
   return {
     async capabilities(signal) {
       return readJson(await fetch(`${base}/capabilities`, requestOptions({}, signal)));
@@ -557,5 +558,5 @@ const configuredBacktestApiBase = String(
 ).trim().replace(/\/$/, "");
 
 export const defaultBacktestApi = createBacktestApi(
-  configuredBacktestApiBase || "/api/v1/backtests",
+  configuredBacktestApiBase || `${API_BASE}/backtests`,
 );

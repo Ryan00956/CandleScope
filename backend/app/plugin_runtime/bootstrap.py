@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-import os
+from app.core.config import runtime_environment
+
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -43,7 +44,7 @@ def build_runtime_host_from_environment(
     host_version: str,
     environ: Mapping[str, str] | None = None,
 ) -> RuntimeHostService:
-    env = os.environ if environ is None else environ
+    env = runtime_environment() if environ is None else environ
     enabled = _environment_bool(env, PLUGIN_HOST_ENABLED_ENV, default=True)
     if not enabled:
         return RuntimeHostService.disabled(

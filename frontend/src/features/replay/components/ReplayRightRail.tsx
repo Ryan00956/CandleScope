@@ -1447,6 +1447,9 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
     && !viewer.viewerPending
     && store.state !== "ENDED";
   const portfolio = viewer.marketTracks?.portfolio ?? null;
+  const accountView = portfolio ?? store.account;
+  const accountPnl = finiteNumber(accountView?.unrealized_pnl);
+  const pnlTone = accountPnl === null ? undefined : accountPnl >= 0 ? "positive" : "negative";
   const contract = contractPortfolio(portfolio);
   const selectedTrackId = viewer.viewerState?.selected_track_id ?? "track-1";
   const selectedTrack = viewer.marketTracks?.tracks.find((item) => item.track_id === selectedTrackId) ?? null;
@@ -1636,11 +1639,11 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
         <div className="replay-workbench-summary">
           <span>
             <small>{t("replay.wb.equity")}</small>
-            <strong>{formatDecimal(portfolio?.equity ?? store.account?.equity, 2)} {settlementAsset}</strong>
+            <strong>{formatDecimal(accountView?.equity, 2)} {settlementAsset}</strong>
           </span>
           <span>
             <small>{t("replay.wb.available")}</small>
-            <strong>{formatDecimal(portfolio?.available_equity ?? store.account?.available_equity, 2)}</strong>
+            <strong>{formatDecimal(accountView?.available_equity, 2)}</strong>
           </span>
           {warningCount > 0 && <span data-tone="warning">{t("replay.wb.execWarnings", { count: warningCount })}</span>}
         </div>
@@ -1906,13 +1909,13 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
                 <small>{t("replay.wb.trainAccount")}</small>
               </header>
               <dl className="replay-metric-flat">
-                <div><dt>{t("replay.wb.coinEquity")}</dt><dd>{formatDecimal(portfolio?.equity ?? store.account?.equity, 4)}</dd></div>
-                <div><dt>{t("replay.wb.used")}</dt><dd>{formatDecimal(portfolio?.margin_used, 4)}</dd></div>
-                <div><dt>{t("replay.wb.available")}</dt><dd>{formatDecimal(portfolio?.available_equity ?? store.account?.available_equity, 4)}</dd></div>
-                <div><dt>{t("replay.wb.floatPnl")}</dt><dd data-value-tone={(finiteNumber(portfolio?.unrealized_pnl) ?? 0) >= 0 ? "positive" : "negative"}>{formatDecimal(portfolio?.unrealized_pnl, 4)}</dd></div>
+                <div><dt>{t("replay.wb.coinEquity")}</dt><dd>{formatDecimal(accountView?.equity, 4)}</dd></div>
+                <div><dt>{t("replay.wb.used")}</dt><dd>{formatDecimal(accountView?.margin_used, 4)}</dd></div>
+                <div><dt>{t("replay.wb.available")}</dt><dd>{formatDecimal(accountView?.available_equity, 4)}</dd></div>
+                <div><dt>{t("replay.wb.floatPnl")}</dt><dd data-value-tone={pnlTone}>{formatDecimal(accountView?.unrealized_pnl, 4)}</dd></div>
                 <div><dt>{t("replay.wb.riskCover")}</dt><dd>{contract?.risk_ratio == null ? "--" : `${formatDecimal(contract.risk_ratio, 2)}×`}</dd></div>
                 <div><dt>{t("replay.wb.levCap")}</dt><dd>{config?.max_leverage ?? "--"}x</dd></div>
-                <div className="wide"><dt>{t("replay.wb.balance")}</dt><dd>{formatDecimal(portfolio?.cash_balance ?? store.account?.cash_balance, 4)} {settlementAsset}</dd></div>
+                <div className="wide"><dt>{t("replay.wb.balance")}</dt><dd>{formatDecimal(accountView?.cash_balance, 4)} {settlementAsset}</dd></div>
               </dl>
             </section>
 
@@ -2047,10 +2050,10 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
                 <small>{t("replay.wb.initial", { value: formatDecimal(portfolio?.initial_equity, 2) })}</small>
               </header>
               <dl className="replay-metric-flat">
-                <div><dt>{t("replay.wb.coinEquity")}</dt><dd>{formatDecimal(portfolio?.equity, 4)}</dd></div>
-                <div><dt>{t("replay.wb.used")}</dt><dd>{formatDecimal(portfolio?.margin_used, 4)}</dd></div>
-                <div><dt>{t("replay.wb.available")}</dt><dd>{formatDecimal(portfolio?.available_equity, 4)}</dd></div>
-                <div><dt>{t("replay.wb.floatPnl")}</dt><dd data-value-tone={(finiteNumber(portfolio?.unrealized_pnl) ?? 0) >= 0 ? "positive" : "negative"}>{formatDecimal(portfolio?.unrealized_pnl, 4)}</dd></div>
+                <div><dt>{t("replay.wb.coinEquity")}</dt><dd>{formatDecimal(accountView?.equity, 4)}</dd></div>
+                <div><dt>{t("replay.wb.used")}</dt><dd>{formatDecimal(accountView?.margin_used, 4)}</dd></div>
+                <div><dt>{t("replay.wb.available")}</dt><dd>{formatDecimal(accountView?.available_equity, 4)}</dd></div>
+                <div><dt>{t("replay.wb.floatPnl")}</dt><dd data-value-tone={pnlTone}>{formatDecimal(accountView?.unrealized_pnl, 4)}</dd></div>
                 <div><dt>{t("replay.wb.realized")}</dt><dd>{formatDecimal(portfolio?.realized_pnl, 4)}</dd></div>
                 <div><dt>{t("replay.wb.feesPaid")}</dt><dd>{formatDecimal(portfolio?.fees_paid, 6)}</dd></div>
                 <div><dt>{t("replay.wb.mm")}</dt><dd>{formatDecimal(contract?.maintenance_margin, 4)}</dd></div>

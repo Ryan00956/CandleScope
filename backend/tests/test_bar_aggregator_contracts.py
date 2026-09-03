@@ -552,6 +552,7 @@ def test_okx_standard_fanout_updates_price_without_polluting_native_volume() -> 
         )
         assert state is not None
         assert state.close == 11
+        assert state.open == 11
         assert state.volume == 123
         assert state.quote_volume == 1230
         assert state.trades == 45

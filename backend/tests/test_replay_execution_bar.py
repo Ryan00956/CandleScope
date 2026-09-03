@@ -143,6 +143,32 @@ def test_entry_then_adverse_exit_same_bar_is_explicitly_marked() -> None:
     assert broker.position.quantity == "1"
 
 
+def test_same_bar_add_does_not_suppress_existing_position_take_profit() -> None:
+    broker = make_broker()
+    broker.place_order(request(client_order_id="base"), command_id="cmd-base")
+    broker.apply_bar(bar(0, 100))
+    broker.place_order(
+        request(client_order_id="add", order_type=OrderType.LIMIT, limit_price="90"),
+        command_id="cmd-add",
+    )
+    take_profit = broker.place_order(
+        request(
+            client_order_id="tp",
+            side=OrderSide.SELL,
+            order_type=OrderType.LIMIT,
+            limit_price="110",
+            quantity="1",
+            reduce_only=True,
+        ),
+        command_id="cmd-tp",
+    )
+    result = broker.apply_bar(replace(bar(1, 100), low="89", high="111"))
+    assert len(result.fills) == 2
+    assert broker.order(take_profit.order_id).status is OrderStatus.FILLED
+    assert broker.position.quantity == "1"
+    assert not result.warnings
+
+
 def test_failed_source_event_rolls_back_broker_builder_and_ledger() -> None:
     broker = make_broker()
     broker.place_order(request(client_order_id="market"), command_id="cmd-market")

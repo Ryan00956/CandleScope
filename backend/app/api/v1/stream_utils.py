@@ -53,5 +53,5 @@ def normalize_exchange(exchange: str) -> str:
     normalized = (exchange or "binance").strip().lower()
     bootstrap_default_adapters()
     if not get_exchange_registry().has(normalized):
-        return "binance"
+        raise ValueError(f"Unsupported exchange: {normalized}.")
     return normalized

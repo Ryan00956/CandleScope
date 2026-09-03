@@ -1,6 +1,8 @@
 """Bridge DataManager events into the IndicatorEngine."""
 from __future__ import annotations
 
+from .series_reference import identity_kwargs, meta_from_key, series_reference
+
 import asyncio
 import logging
 from collections import OrderedDict
@@ -140,6 +142,7 @@ def _engine_correction_plan(
         market_type=event.key.market_type,
         exchange=event.key.exchange,
         dirty_range=dirty_range,
+        **identity_kwargs(meta_from_key(event.key)),
     )
 
 
@@ -179,14 +182,26 @@ def bridge_indicator_engine(
         if event.event_type == DataEventType.BAR_CLOSED:
             if result_service is not None:
                 result_service.note_closed(
-                    series_key=(
-                        f"{exchange}:{market_type}:{symbol}:{interval}"
-                    ),
+                    series_key=series_reference(meta_from_key(event.key)),
                     closed_through=int(bar.time),
                 )
-            indicator_engine.on_bar_closed(symbol, interval, bar, market_type=market_type, exchange=exchange)
+            indicator_engine.on_bar_closed(
+                symbol,
+                interval,
+                bar,
+                market_type=market_type,
+                exchange=exchange,
+                **identity_kwargs(meta_from_key(event.key)),
+            )
         elif event.event_type == DataEventType.BAR_UPDATED:
-            indicator_engine.on_bar_updated(symbol, interval, bar, market_type=market_type, exchange=exchange)
+            indicator_engine.on_bar_updated(
+                symbol,
+                interval,
+                bar,
+                market_type=market_type,
+                exchange=exchange,
+                **identity_kwargs(meta_from_key(event.key)),
+            )
 
     async def _recompute_after_backfill(
         event: Any,
@@ -212,12 +227,7 @@ def bridge_indicator_engine(
                 if int(getattr(outcome, "bars_loaded", 0) or 0) <= 0:
                     return True
 
-            series_meta = {
-                "exchange": exchange,
-                "market_type": market_type,
-                "symbol": symbol,
-                "interval": interval,
-            }
+            series_meta = meta_from_key(event.key, interval)
             revision_reader = getattr(
                 result_service,
                 "data_revision_for_meta",
@@ -251,6 +261,7 @@ def bridge_indicator_engine(
                             exchange=exchange,
                             dirty_range=dirty_range,
                             data_revision=data_revision,
+                            **identity_kwargs(meta_from_key(event.key)),
                         )
                     return True
 
@@ -288,6 +299,7 @@ def bridge_indicator_engine(
                     exchange=exchange,
                     market_type=market_type,
                     auto_backfill=False,
+                    **identity_kwargs(meta_from_key(event.key)),
                 )
                 if (
                     bool(getattr(result, "missing_ranges", None))
@@ -365,6 +377,7 @@ def bridge_indicator_engine(
                     exchange=exchange,
                     dirty_range=dirty_range,
                     data_revision=emitted_revision,
+                    **identity_kwargs(meta_from_key(event.key)),
                 )
                 return True
             return False
@@ -428,10 +441,7 @@ def bridge_indicator_engine(
             data_manager=data_manager,
             result_service=result_service,
         ):
-            series_key = (
-                f"{event.key.exchange}:{event.key.market_type}:"
-                f"{event.key.symbol}:{interval}"
-            )
+            series_key = series_reference(meta_from_key(event.key, interval))
             completion_key = (
                 f"{request_id}:{series_key}" if request_id else None
             )
@@ -489,6 +499,7 @@ def bridge_indicator_engine(
                         exchange=event.key.exchange,
                         dirty_range=dirty_range,
                         data_revision=data_revision,
+                        **identity_kwargs(meta_from_key(event.key)),
                     )
                 if completion_key:
                     _remember_completed(completion_key)
@@ -784,39 +795,45 @@ def _backfill_refresh_targets(
             )
         candidate_intervals: set[str] = set()
         if callable(resident_intervals):
-            candidate_intervals.update(resident_intervals(
-                event.key.symbol,
-                market_type=event.key.market_type,
-                exchange=event.key.exchange,
-            ))
+            candidate_intervals.update(
+                resident_intervals(
+                    event.key.symbol,
+                    market_type=event.key.market_type,
+                    exchange=event.key.exchange,
+                    **identity_kwargs(meta_from_key(event.key)),
+                )
+            )
         cached_intervals = getattr(
             result_service,
             "resident_series_intervals",
             None,
         )
         if callable(cached_intervals):
-            candidate_intervals.update(cached_intervals(
-                event.key.symbol,
-                market_type=event.key.market_type,
-                exchange=event.key.exchange,
-            ))
+            candidate_intervals.update(
+                cached_intervals(
+                    event.key.symbol,
+                    market_type=event.key.market_type,
+                    exchange=event.key.exchange,
+                    **identity_kwargs(meta_from_key(event.key)),
+                )
+            )
         for interval in sorted(candidate_intervals):
-                if intervals_equivalent(interval, base_interval):
-                    continue
-                inferred = indicator_dirty_range_for_interval(
+            if intervals_equivalent(interval, base_interval):
+                continue
+            inferred = indicator_dirty_range_for_interval(
                     event,
                     interval,
                     data_manager=data_manager,
                 )
-                if inferred is None:
-                    continue
-                existing = derived_ranges.get(interval)
-                if existing is None:
-                    derived_ranges[interval] = inferred
-                    targets.append((interval, inferred))
-                else:
-                    existing["start"] = min(existing["start"], inferred["start"])
-                    existing["end"] = max(existing["end"], inferred["end"])
+            if inferred is None:
+                continue
+            existing = derived_ranges.get(interval)
+            if existing is None:
+                derived_ranges[interval] = inferred
+                targets.append((interval, inferred))
+            else:
+                existing["start"] = min(existing["start"], inferred["start"])
+                existing["end"] = max(existing["end"], inferred["end"])
     return targets
 
 

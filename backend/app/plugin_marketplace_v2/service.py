@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from app.core.config import getenv as app_getenv
+
 import hashlib
 import http.client
 import ipaddress
@@ -79,7 +81,7 @@ def _utc_now() -> str:
 
 
 def _environment_bool(name: str, *, default: bool) -> bool:
-    raw = os.environ.get(name)
+    raw = app_getenv(name)
     if raw is None:
         return default
     normalized = raw.strip().casefold()
@@ -94,7 +96,7 @@ def _environment_bool(name: str, *, default: bool) -> bool:
 
 
 def _rollout_stage(value: str | None) -> str:
-    result = value or os.environ.get(MARKETPLACE_ROLLOUT_ENV, "stable")
+    result = value or app_getenv(MARKETPLACE_ROLLOUT_ENV, "stable")
     if result not in ROLLOUT_STAGES:
         raise MarketplaceError(
             "PLUGIN_MARKETPLACE_CONFIGURATION_INVALID",

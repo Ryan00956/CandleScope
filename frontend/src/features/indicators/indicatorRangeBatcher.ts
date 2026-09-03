@@ -1,4 +1,6 @@
+import { klineSeriesIdentityKey, type KlineSeriesIdentityInput } from "../market-data/klineSeriesIdentity.js";
 interface BatchableIndicatorRangeRequest {
+  seriesIdentity?: KlineSeriesIdentityInput | undefined;
   clientId: string;
   exchange?: string;
   marketType?: string;
@@ -54,6 +56,7 @@ function batchGroupKey(request: BatchableIndicatorRangeRequest): string {
     request?.marketType || request?.market_type || "spot",
     String(request?.symbol || "").toUpperCase(),
     request?.interval || "",
+    klineSeriesIdentityKey(request?.exchange || "binance", request?.seriesIdentity),
     request?.requestScope || "",
     request?.requestGeneration ?? "",
   ].join("|");

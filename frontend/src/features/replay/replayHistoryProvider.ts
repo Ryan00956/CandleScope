@@ -1,3 +1,4 @@
+import { API_BASE } from "../../services/apiConfig.js";
 import type { WindowDelta } from "../market-data/klineContracts.js";
 import type { SeriesWindowStore } from "../market-data/window/seriesWindowStore.js";
 import { surfaceViewportHasAnchorCoverage } from "../chart-representation/surfaceViewportState.js";
@@ -602,12 +603,12 @@ export class ReplayHistoryProvider {
   private epoch: ReplayDigest | null = null;
   private generation = 0;
 
-  constructor({ sessionId, trackId, identity, fetcher = fetch, apiBase = "" }: ReplayHistoryProviderOptions) {
+  constructor({ sessionId, trackId, identity, fetcher = fetch, apiBase }: ReplayHistoryProviderOptions) {
     this.sessionId = sessionId;
     this.trackId = trackId;
     this.identity = identity;
     this.fetcher = fetcher;
-    this.apiBase = apiBase.replace(/\/$/, "");
+    this.apiBase = apiBase === undefined ? API_BASE : `${apiBase.replace(/\/$/, "")}/api/v1`;
   }
 
   get historyEpoch(): ReplayDigest | null {
@@ -639,7 +640,7 @@ export class ReplayHistoryProvider {
       data_epoch: request.dataEpoch,
     });
     if (this.epoch !== null) params.set("history_epoch", this.epoch);
-    const url = `${this.apiBase}/api/v1/replay/runs/session/${encodeURIComponent(this.sessionId)}/history?${params}`;
+    const url = `${this.apiBase}/replay/runs/session/${encodeURIComponent(this.sessionId)}/history?${params}`;
     const expectedEpoch = this.epoch;
     const generation = this.generation;
     const fetcher = this.fetcher;

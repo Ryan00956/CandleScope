@@ -849,6 +849,10 @@ async def root() -> dict:
 async def health_check() -> dict:
     dm = getattr(app.state, "data_manager", None)
     result: dict = {"status": "ok", "runtime_mode": RUNTIME_MODE}
+    import os
+
+    if instance_id := os.environ.get("CANDLESCOPE_DESKTOP_INSTANCE_ID"):
+        result["desktop_instance_id"] = instance_id
     local_runtime = getattr(app.state, "local_offline_runtime", None)
     if local_runtime is not None:
         result["local_offline"] = local_runtime.diagnostics()

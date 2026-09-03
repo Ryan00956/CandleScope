@@ -364,6 +364,41 @@ def test_retry_schedule_survives_worker_recreation(tmp_path: Path) -> None:
     asyncio.run(_run())
 
 
+@pytest.mark.parametrize(
+    "failure,expected",
+    [
+        (ValueError("not allowed"), "dead_letter"),
+        (RuntimeError("sender down"), "retrying"),
+    ],
+)
+def test_sender_exception_leaves_claim_retryable_or_terminal(
+    tmp_path: Path, failure, expected
+) -> None:
+    class FailingSender:
+        async def send(self, entry):
+            raise failure
+
+    async def run():
+        settings = _settings(tmp_path)
+        store = AlertOutboxStore(settings.outbox_path)
+        store.stage(
+            {"id": "event-failure", "ruleId": "rule-1"},
+            {"type": "webhook", "config": {"url": "https://hooks.example.com/a"}},
+        )
+        store.activate_event("event-failure")
+        worker = AlertOutboxWorker(store, FailingSender(), settings)
+        for attempt in range(1, 4):
+            entry = store.list_entries()[0]
+            await worker.run_once(now_ms=entry["nextAttemptAt"])
+            updated = store.list_entries()[0]
+            assert updated["attempts"] == attempt
+            assert updated["status"] == (expected if attempt < 3 else "dead_letter")
+            if updated["status"] == "dead_letter":
+                break
+
+    asyncio.run(run())
+
+
 def test_terminal_outbox_state_waits_for_history_receipt(tmp_path: Path) -> None:
     async def _run() -> None:
         settings = _settings(tmp_path)

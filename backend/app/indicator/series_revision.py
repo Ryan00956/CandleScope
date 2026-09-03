@@ -7,6 +7,11 @@ clients can invalidate only data that may have changed.
 """
 from __future__ import annotations
 
+from app.data_engine.series_identity import (
+    KlineSeriesIdentity,
+    resolve_kline_series_identity,
+)
+
 import threading
 import uuid
 from collections import OrderedDict, deque
@@ -20,12 +25,19 @@ def _series_tuple(
     *,
     exchange: str = "binance",
     market_type: str = "spot",
-) -> tuple[str, str, str, str]:
-    return (
+    series_identity: KlineSeriesIdentity | None = None,
+) -> tuple[str, ...]:
+    routed = (
         str(exchange or "binance").strip().lower(),
         str(market_type or "spot").strip().lower(),
         str(symbol or "").strip().upper(),
         str(interval or "").strip(),
+    )
+    identity = resolve_kline_series_identity(exchange, series_identity)
+    return (
+        routed
+        if identity.is_legacy_default_for(exchange)
+        else (*routed, *identity.storage_values)
     )
 
 
@@ -54,7 +66,7 @@ class SeriesRevisionRegistry:
         self.server_epoch = str(server_epoch or uuid.uuid4().hex)
         self._journal_limit = max(1, int(journal_limit))
         self._event_dedup_limit = max(1, int(event_dedup_limit))
-        self._states: dict[tuple[str, str, str, str], _RevisionState] = {}
+        self._states: dict[tuple[str, ...], _RevisionState] = {}
         self._seen_events: OrderedDict[str, None] = OrderedDict()
         self._lock = threading.RLock()
 
@@ -66,12 +78,14 @@ class SeriesRevisionRegistry:
         *,
         exchange: str = "binance",
         market_type: str = "spot",
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> dict[str, Any]:
         key = _series_tuple(
             symbol,
             interval,
             exchange=exchange,
             market_type=market_type,
+            series_identity=series_identity,
         )
         with self._lock:
             state = self._states.setdefault(key, _RevisionState())
@@ -87,6 +101,7 @@ class SeriesRevisionRegistry:
         *,
         exchange: str = "binance",
         market_type: str = "spot",
+        series_identity: KlineSeriesIdentity | None = None,
         event_id: str | None = None,
     ) -> dict[str, Any]:
         key = _series_tuple(
@@ -94,11 +109,12 @@ class SeriesRevisionRegistry:
             interval,
             exchange=exchange,
             market_type=market_type,
+            series_identity=series_identity,
         )
         start_s = int(start or 0)
         end_s = max(start_s, int(end if end is not None else start_s))
         with self._lock:
-            if event_id and self._event_seen_locked(str(event_id)):
+            if event_id and self._event_seen_locked(repr((key, str(event_id)))):
                 state = self._states.setdefault(key, _RevisionState())
                 return self._snapshot_locked(state)
 
@@ -117,6 +133,7 @@ class SeriesRevisionRegistry:
         *,
         exchange: str = "binance",
         market_type: str = "spot",
+        series_identity: KlineSeriesIdentity | None = None,
         since_correction_revision: int | None = None,
     ) -> dict[str, Any]:
         key = _series_tuple(
@@ -124,6 +141,7 @@ class SeriesRevisionRegistry:
             interval,
             exchange=exchange,
             market_type=market_type,
+            series_identity=series_identity,
         )
         with self._lock:
             state = self._states.setdefault(key, _RevisionState())
@@ -158,12 +176,14 @@ class SeriesRevisionRegistry:
         *,
         exchange: str = "binance",
         market_type: str = "spot",
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> str:
         snapshot = self.snapshot(
             symbol,
             interval,
             exchange=exchange,
             market_type=market_type,
+            series_identity=series_identity,
         )
         return f"{snapshot['serverEpoch']}:{snapshot['correctionRevision']}"
 

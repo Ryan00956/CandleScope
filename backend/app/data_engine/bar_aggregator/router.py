@@ -26,6 +26,12 @@ Usage::
 """
 from __future__ import annotations
 
+from app.data_engine.series_identity import (
+    KlineSeriesIdentity,
+    resolve_kline_series_identity,
+    identity_from_metadata,
+)
+
 import logging
 from dataclasses import replace
 from typing import Callable, Awaitable, Any
@@ -89,6 +95,9 @@ class EventRouter:
         self._symbol_source_intervals: dict[tuple[str, str, str], set[str]] = {}
 
         # User-registered adapters: {name → adapter}
+        self._target_identities: dict[
+            tuple[str, str, str, str], set[KlineSeriesIdentity]
+        ] = {}
         self._adapters: dict[str, BarInputAdapter] = {}
 
         # Downstream callback (set by BarAggregator during assembly)
@@ -102,6 +111,7 @@ class EventRouter:
         interval: str,
         exchange: str = "binance",
         market_type: str = "spot",
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> None:
         """Register a (symbol, interval) aggregation target.
 
@@ -119,6 +129,9 @@ class EventRouter:
             market_type.lower().strip(),
             symbol.upper(),
             canonical_interval,
+        )
+        self._target_identities.setdefault(key, set()).add(
+            resolve_kline_series_identity(exchange, series_identity)
         )
         if key in self._targets:
             logger.debug("Target already registered: %s:%s:%s@%s", key[0], key[1], symbol, interval)
@@ -138,6 +151,7 @@ class EventRouter:
         interval: str,
         exchange: str = "binance",
         market_type: str = "spot",
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> None:
         """Remove a (symbol, interval) aggregation target."""
         spec = parse_interval_spec(interval)
@@ -147,6 +161,11 @@ class EventRouter:
             symbol.upper(),
             spec.canonical if spec is not None else interval,
         )
+        identities = self._target_identities.get(key, set())
+        identities.discard(resolve_kline_series_identity(exchange, series_identity))
+        if identities:
+            return
+        self._target_identities.pop(key, None)
         self._targets.discard(key)
         for purpose in (IntervalPurpose.HISTORY, IntervalPurpose.REALTIME):
             self._route_cache.pop((key[0], key[1], key[3], purpose), None)
@@ -252,6 +271,7 @@ class EventRouter:
         bars: list[Any],
         exchange: str = "binance",
         market_type: str = "spot",
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> None:
         """Accept FetchedBar list from the backfill engine.
 
@@ -272,7 +292,12 @@ class EventRouter:
 
         for bar in bars:
             bar_input = self._convert_fetched_bar(
-                bar, symbol, interval, exchange=exchange, market_type=market_type,
+                bar,
+                symbol,
+                interval,
+                exchange=exchange,
+                market_type=market_type,
+                series_identity=series_identity,
             )
             if bar_input is not None:
                 await self._dispatch(exchange, market_type, symbol, bar_input, symbol_targets)
@@ -335,6 +360,10 @@ class EventRouter:
         src = bar_input.source_interval
 
         for interval in target_intervals:
+            if bar_input.identity not in self._target_identities.get(
+                (exchange, market_type, symbol, interval), set()
+            ):
+                continue
             should_route = False
             merge_mode: MergeMode | None = None
 
@@ -342,12 +371,12 @@ class EventRouter:
             if src == interval or intervals_equivalent(src, interval):
                 should_route = True
                 merge_mode = MergeMode.SNAPSHOT
-            
+
             # Rule 2: Trade ticks apply to everywhere natively
             elif src == "tick":
                 should_route = True
                 merge_mode = MergeMode.INCREMENTAL
-                
+
             # Rule 3: exchange-resolved derived targets accept only their
             # exact native base, regardless of whether the target spelling is
             # globally listed as a standard interval.
@@ -370,9 +399,9 @@ class EventRouter:
                     should_route = True
                     merge_mode = MergeMode.COMPONENT
 
-            # Rule 4: exchange policy can fan out realtime base interval
-            # updates to larger standard intervals when native large-interval
-            # WS channels update too slowly for active charts.
+                # Rule 4: exchange policy can fan out realtime base interval
+                # updates to larger standard intervals when native large-interval
+                # WS channels update too slowly for active charts.
                 elif (
                 route.kind is IntervalRouteKind.NATIVE
                 and bar_input.source == BarInputSource.REALTIME
@@ -384,7 +413,7 @@ class EventRouter:
             # Discard contaminated source intervals
             if not should_route:
                 continue
-                
+
             try:
                 routed_input = (
                     replace(bar_input, merge_mode=merge_mode)
@@ -483,6 +512,7 @@ class EventRouter:
                 symbol=getattr(event, "symbol", "").upper(),
                 source_interval=data.get("interval", "1m"),
                 exchange=exchange,
+                series_identity=identity_from_metadata(exchange, data),
                 open_time_ms=int(data["open_time"]),
                 close_time_ms=int(data["close_time"]),
                 open=float(data["open"]),
@@ -553,6 +583,7 @@ class EventRouter:
         interval: str,
         exchange: str = "binance",
         market_type: str = "spot",
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> BarInput | None:
         """Convert a FetchedBar (or dict) to BarInput."""
         try:
@@ -566,6 +597,11 @@ class EventRouter:
                     symbol=symbol.upper(),
                     source_interval=interval,
                     exchange=resolved_exchange,
+                    series_identity=series_identity
+                    or identity_from_metadata(
+                        resolved_exchange,
+                        bar if isinstance(bar, dict) else getattr(bar, "extra", None),
+                    ),
                     open_time_ms=int(bar["open_time"]),
                     close_time_ms=int(bar["close_time"]),
                     open=float(bar["open"]),
@@ -606,6 +642,11 @@ class EventRouter:
                     symbol=symbol.upper(),
                     source_interval=getattr(bar, "interval", interval),
                     exchange=resolved_exchange,
+                    series_identity=series_identity
+                    or identity_from_metadata(
+                        resolved_exchange,
+                        bar if isinstance(bar, dict) else getattr(bar, "extra", None),
+                    ),
                     open_time_ms=int(getattr(bar, "open_time", 0)),
                     close_time_ms=int(getattr(bar, "close_time", 0)),
                     open=float(getattr(bar, "open", 0)),

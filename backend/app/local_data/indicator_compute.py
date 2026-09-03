@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from app.core.config import getenv as app_getenv
+
 import math
-import os
 import re
 from typing import Any
 
@@ -12,7 +13,7 @@ from app.indicator import create_engine, registry
 
 
 MAX_LOCAL_INDICATOR_BARS = int(
-    os.getenv("CANDLESCOPE_LOCAL_INDICATOR_MAX_BARS", "250000")
+    app_getenv("CANDLESCOPE_LOCAL_INDICATOR_MAX_BARS", "250000")
 )
 if MAX_LOCAL_INDICATOR_BARS < 1:
     raise ValueError("CANDLESCOPE_LOCAL_INDICATOR_MAX_BARS must be positive")

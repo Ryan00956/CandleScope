@@ -128,7 +128,7 @@ export function buildIndicatorPaneData(
   const paneMap = new Map<string, IndicatorSubPane>();
 
   for (const indicator of indicators) {
-    if (!indicator.visible) continue;
+    if (indicator.visible === false) continue;
 
     const linesByPane = new Map<string, IndicatorLine[]>();
     for (const line of indicator.lines || []) {

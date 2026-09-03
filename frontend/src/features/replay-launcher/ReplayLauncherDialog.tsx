@@ -27,6 +27,7 @@ export default function ReplayLauncherDialog({
   const [blockedUrl, setBlockedUrl] = useState<string | null>(null);
   const reserveReplayWindow = useCallback(() => {
     setBlockedUrl(null);
+    if (window.candlescopeDesktop?.openAppPage) return;
     const previous = pendingReplayWindowRef.current;
     pendingReplayWindowRef.current = null;
     if (previous !== null && !previous.closed) previous.close();
@@ -43,6 +44,11 @@ export default function ReplayLauncherDialog({
   }, []);
   const navigateToRun = useCallback((runId: string) => {
     const url = replayRunUrl(runId);
+    if (window.candlescopeDesktop?.openAppPage) {
+      void window.candlescopeDesktop.openAppPage(url)
+        .then(onRequestClose, () => setBlockedUrl(url));
+      return;
+    }
     const reserved = pendingReplayWindowRef.current;
     pendingReplayWindowRef.current = null;
     if (reserved !== null && !reserved.closed) {

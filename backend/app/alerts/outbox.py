@@ -488,7 +488,16 @@ class AlertOutboxWorker:
         return processed
 
     async def _deliver(self, entry: dict[str, Any], *, now_ms: int | None = None) -> None:
-        result = await self.sender.send(entry)
+        try:
+            result = await self.sender.send(entry)
+        except Exception as exc:
+            # Validation failures cannot be repaired by retrying the same payload.
+            # Unexpected sender failures still follow the bounded retry policy.
+            result = WebhookDeliveryResult(
+                delivered=False,
+                retryable=not isinstance(exc, (ValueError, TypeError)),
+                detail=f"sender failed: {type(exc).__name__}",
+            )
         delivery_id = entry["deliveryId"]
         event_id = entry["eventId"]
         attempts = int(entry.get("attempts") or 0)

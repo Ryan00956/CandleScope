@@ -553,6 +553,26 @@ def _grant_acl(path: Path, sid: str, permission: str) -> None:
         )
 
 
+def revoke_appcontainer_read_access(paths: tuple[Path, ...], sid: str) -> None:
+    """Remove this disposable profile's grants, preserving every other principal."""
+    executable = (
+        Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "System32" / "icacls.exe"
+    )
+    for path in paths:
+        if not path.exists():
+            continue
+        command = [str(executable), str(path), "/remove:g", f"*{sid}"]
+        if path.is_dir():
+            command.extend(("/T", "/Q"))
+        result = subprocess.run(command, capture_output=True, timeout=120, shell=False)
+        if result.returncode != 0:
+            raise security_error(
+                "PLUGIN_SANDBOX_ACL_FAILED",
+                "Unable to revoke disposable AppContainer grants",
+                details={"path": str(path)},
+            )
+
+
 def _assert_no_loopback_exemption(sid: str) -> None:
     executable = (
         Path(os.environ.get("SYSTEMROOT", r"C:\Windows"))

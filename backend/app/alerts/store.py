@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import threading
 import time
@@ -13,6 +14,17 @@ from app.alerts.models import DELIVERABLE_ACTION_TYPES, VALID_ACTION_TYPES, VALI
 from app.alerts.validation import normalize_after_trigger, validate_alert_expression
 from app.alerts.webhook import WebhookSettings, validate_webhook_action_config
 from app.core.config import DATA_DIR
+
+
+def _finite_values(value: Any) -> Any:
+    """Represent unavailable numeric observations consistently in JSON and delivery."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {key: _finite_values(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_finite_values(item) for item in value]
+    return value
 
 
 class AlertStore:
@@ -160,21 +172,7 @@ class AlertStore:
         with self._lock:
             data = self._load()
             now = int(time.time() * 1000)
-            event_id = str(event.get("id") or "").strip() or self._new_event_id()
-            record = {
-                "id": event_id,
-                "ruleId": str(event.get("ruleId") or "").strip(),
-                "eventType": event.get("eventType") or "alert.triggered",
-                "target": event.get("target") if isinstance(event.get("target"), dict) else {},
-                "message": event.get("message") or "",
-                "values": event.get("values") if isinstance(event.get("values"), dict) else {},
-                "actions": event.get("actions") if isinstance(event.get("actions"), list) else [],
-                "createdAt": int(event.get("createdAt") or now),
-                "acknowledgedAt": event.get("acknowledgedAt"),
-                "dispatch": event.get("dispatch") if isinstance(event.get("dispatch"), list) else [],
-            }
-            if not record["ruleId"]:
-                raise ValueError("Alert history ruleId is required")
+            record = self._history_record(event, now=now)
 
             data["history"].append(record)
             rule = data["rules"].get(record["ruleId"])
@@ -291,13 +289,23 @@ class AlertStore:
             "id": event_id,
             "ruleId": str(event.get("ruleId") or "").strip(),
             "eventType": event.get("eventType") or "alert.triggered",
-            "target": event.get("target") if isinstance(event.get("target"), dict) else {},
+            "target": (
+                event.get("target") if isinstance(event.get("target"), dict) else {}
+            ),
             "message": event.get("message") or "",
-            "values": event.get("values") if isinstance(event.get("values"), dict) else {},
-            "actions": event.get("actions") if isinstance(event.get("actions"), list) else [],
+            "values": (
+                _finite_values(event.get("values"))
+                if isinstance(event.get("values"), dict)
+                else {}
+            ),
+            "actions": (
+                event.get("actions") if isinstance(event.get("actions"), list) else []
+            ),
             "createdAt": int(event.get("createdAt") or now),
             "acknowledgedAt": event.get("acknowledgedAt"),
-            "dispatch": event.get("dispatch") if isinstance(event.get("dispatch"), list) else [],
+            "dispatch": (
+                event.get("dispatch") if isinstance(event.get("dispatch"), list) else []
+            ),
         }
         if not record["ruleId"]:
             raise ValueError("Alert history ruleId is required")
@@ -308,7 +316,7 @@ class AlertStore:
             return {"schemaVersion": 1, "rules": {}, "history": []}
         try:
             with open(self.path, "r", encoding="utf-8") as f:
-                raw = json.load(f)
+                raw = json.load(f, parse_constant=lambda _: None)
         except json.JSONDecodeError as exc:
             raise ValueError(f"Alert store is corrupt: {self.path}") from exc
 
@@ -344,9 +352,10 @@ class AlertStore:
             "rules": sorted(data["rules"].values(), key=lambda item: item.get("updatedAt", 0), reverse=True),
             "history": sorted(data["history"], key=lambda item: item.get("createdAt", 0), reverse=True)[:5000],
         }
+        serialized = json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False)
         tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
         with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
+            f.write(serialized)
             f.write("\n")
         os.replace(tmp_path, self.path)
 

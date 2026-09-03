@@ -1,3 +1,4 @@
+import { API_BASE } from "../../services/apiConfig.js";
 import {
   parseReplayCapabilities,
   parseReplayCatalog,
@@ -67,7 +68,7 @@ export class ReplayApiClient {
   private readonly basePath: string;
   private readonly fetcher: typeof fetch;
 
-  constructor({ basePath = "/api/v1/replay", fetcher = globalThis.fetch }: ReplayApiClientOptions = {}) {
+  constructor({ basePath = `${API_BASE}/replay`, fetcher = globalThis.fetch }: ReplayApiClientOptions = {}) {
     if (typeof fetcher !== "function") {
       throw new ReplayApiError("REPLAY_TRANSPORT_ERROR", "Fetch API is unavailable");
     }

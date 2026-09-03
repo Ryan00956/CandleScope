@@ -7,6 +7,14 @@ snapshot instead of constructing another temporary indicator engine.
 """
 from __future__ import annotations
 
+from .series_reference import meta_from_key
+
+from app.indicator.series_reference import (
+    series_reference,
+    parse_series_reference,
+    identity_kwargs,
+)
+
 import asyncio
 import copy
 import hashlib
@@ -146,21 +154,11 @@ class IndicatorRangeResultService:
 
     @staticmethod
     def series_key_from_meta(meta: dict[str, Any]) -> str:
-        return ":".join((
-            str(meta.get("exchange") or "binance").lower().strip(),
-            str(meta.get("market_type") or meta.get("marketType") or "spot").lower().strip(),
-            str(meta.get("symbol") or "").upper().strip(),
-            str(meta.get("interval") or "").strip(),
-        ))
+        return series_reference(meta)
 
     @staticmethod
     def series_key_from_indicator_key(key: Any) -> str:
-        return ":".join((
-            str(key.exchange).lower().strip(),
-            str(key.market_type).lower().strip(),
-            str(key.symbol).upper().strip(),
-            str(key.interval).strip(),
-        ))
+        return series_reference(meta_from_key(key))
 
     @classmethod
     def identity_from_meta(cls, meta: dict[str, Any]) -> str:
@@ -186,7 +184,10 @@ class IndicatorRangeResultService:
             str(meta.get("symbol") or ""),
             str(meta.get("interval") or ""),
             exchange=str(meta.get("exchange") or "binance"),
-            market_type=str(meta.get("market_type") or meta.get("marketType") or "spot"),
+            market_type=str(
+                meta.get("market_type") or meta.get("marketType") or "spot"
+            ),
+            **identity_kwargs(meta),
         )
 
     def data_revision_for_meta(self, meta: dict[str, Any]) -> dict[str, Any]:
@@ -194,7 +195,10 @@ class IndicatorRangeResultService:
             str(meta.get("symbol") or ""),
             str(meta.get("interval") or ""),
             exchange=str(meta.get("exchange") or "binance"),
-            market_type=str(meta.get("market_type") or meta.get("marketType") or "spot"),
+            market_type=str(
+                meta.get("market_type") or meta.get("marketType") or "spot"
+            ),
+            **identity_kwargs(meta),
         )
         payload["revisionToken"] = (
             f"{payload['serverEpoch']}:{payload['correctionRevision']}"
@@ -202,13 +206,17 @@ class IndicatorRangeResultService:
         return payload
 
     def note_closed(self, *, series_key: str, closed_through: int) -> None:
-        exchange, market_type, symbol, interval = series_key.split(":", 3)
+        meta = parse_series_reference(series_key)
+        exchange, market_type, symbol, interval = (
+            meta[name] for name in ("exchange", "market_type", "symbol", "interval")
+        )
         self.revisions.observe_closed(
             symbol,
             interval,
             int(closed_through or 0),
             exchange=exchange,
             market_type=market_type,
+            **identity_kwargs(meta),
         )
 
     def note_correction(
@@ -220,12 +228,16 @@ class IndicatorRangeResultService:
         event_id: str | None = None,
     ) -> dict[str, Any]:
         """Advance one series revision and invalidate its derived snapshots."""
-        exchange, market_type, symbol, interval = series_key.split(":", 3)
+        meta = parse_series_reference(series_key)
+        exchange, market_type, symbol, interval = (
+            meta[name] for name in ("exchange", "market_type", "symbol", "interval")
+        )
         previous_token = self.revisions.correction_token(
             symbol,
             interval,
             exchange=exchange,
             market_type=market_type,
+            **identity_kwargs(meta),
         )
         revision = self.revisions.record_correction(
             symbol,
@@ -234,6 +246,7 @@ class IndicatorRangeResultService:
             int(end if end is not None else start or 0),
             exchange=exchange,
             market_type=market_type,
+            **identity_kwargs(meta),
             event_id=event_id,
         )
         revision["revisionToken"] = (
@@ -270,13 +283,7 @@ class IndicatorRangeResultService:
         return revision
 
     def data_revision_for_series_key(self, series_key: str) -> dict[str, Any]:
-        exchange, market_type, symbol, interval = series_key.split(":", 3)
-        return self.data_revision_for_meta({
-            "exchange": exchange,
-            "market_type": market_type,
-            "symbol": symbol,
-            "interval": interval,
-        })
+        return self.data_revision_for_meta(parse_series_reference(series_key))
 
     def resident_series_intervals(
         self,
@@ -284,12 +291,17 @@ class IndicatorRangeResultService:
         *,
         market_type: str = "spot",
         exchange: str = "binance",
+        series_identity=None,
     ) -> tuple[str, ...]:
         """Return bounded cached or in-flight intervals for one market."""
-        prefix = (
-            f"{str(exchange).lower().strip()}:"
-            f"{str(market_type).lower().strip()}:"
-            f"{str(symbol).upper().strip()}:"
+        prefix = series_reference(
+            {
+                "exchange": exchange,
+                "market_type": market_type,
+                "symbol": symbol,
+                "interval": "",
+                "series_identity": series_identity,
+            }
         )
         now = time.monotonic()
         with self._lock:

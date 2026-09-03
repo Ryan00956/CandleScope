@@ -56,6 +56,8 @@ export interface DesktopTopologyResult {
 
 interface NativeDesktopBridge {
   readonly apiBase: string;
+  getPluginManagementSession?(): { apiBase: string; sessionToken: string; csrfToken: string } | null;
+  openAppPage?(url: string): Promise<{ windowId: string }>;
   getBootstrap(): Promise<DesktopBootstrap>;
   reconcileWorkspace(payload: DesktopTopologyPayload): Promise<DesktopTopologyResult>;
   onLifecycle(listener: (event: DesktopWindowLifecycleEvent) => void): () => void;

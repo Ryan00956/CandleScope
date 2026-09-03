@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-import os
+from app.core.config import getenv as app_getenv
+
 import re
 from collections.abc import Iterable
 
@@ -106,7 +107,7 @@ def _provider_enabled(value: bool | None, *, environment_name: str, label: str) 
                 f"{label} Runtime Provider enablement must be a boolean",
             )
         return value
-    raw = os.environ.get(environment_name)
+    raw = app_getenv(environment_name)
     if raw is None:
         return False
     normalized = raw.strip().casefold()

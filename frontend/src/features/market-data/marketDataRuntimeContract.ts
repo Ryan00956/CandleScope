@@ -1,3 +1,4 @@
+import type { KlineSeriesIdentityInput } from "./klineSeriesIdentity.js";
 import type { CacheDiagnosticsEntry } from "../cache-gc/cacheGcTypes.js";
 import type { IndicatorRangeEvent, CrosshairData } from "./klineContracts.js";
 import type { KlineBar } from "./marketDataTypes.js";
@@ -39,6 +40,7 @@ export interface MarketDataDisplayState {
 
 export interface MarketDataRuntimeContract {
   view: {
+    seriesIdentity?: KlineSeriesIdentityInput;
     bars: KlineBar[];
     seriesStore: SeriesWindowStore | null;
     meta: ChartDataCommitMeta;

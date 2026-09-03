@@ -132,6 +132,7 @@ export function buildHostedSubscriptionMessage(
 
   const message: IndicatorSubscribeMessage = {
     action: "subscribe",
+    ...(context.seriesIdentity ? { seriesIdentity: context.seriesIdentity } : {}),
     clientId: indicator.id,
     kind: builtin ? "builtin" : "script",
     exchange,

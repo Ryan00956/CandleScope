@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from app.core.config import getenv as app_getenv
+
 import errno
 import hashlib
 import os
@@ -265,7 +267,7 @@ def _read_json(path: Path, label: str, *, maximum: int) -> Any:
 
 
 def _environment_bool(name: str, *, default: bool) -> bool:
-    raw = os.environ.get(name)
+    raw = app_getenv(name)
     if raw is None:
         return default
     normalized = raw.strip().casefold()

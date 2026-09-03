@@ -8,6 +8,8 @@ and hands the local file to that installer.
 
 from __future__ import annotations
 
+from app.core.config import runtime_environment
+
 import hashlib
 import json
 import os
@@ -479,7 +481,7 @@ def ensure_first_party_plugins_from_environment(
     opener: Callable[..., Any] | None = None,
     installer_factory: Callable[..., PluginInstaller] = PluginInstaller,
 ) -> FirstPartyPluginBootstrapResult:
-    env = os.environ if environ is None else environ
+    env = runtime_environment() if environ is None else environ
     if not _environment_bool(env, PLUGIN_HOST_ENABLED_ENV, default=True):
         return FirstPartyPluginBootstrapResult(
             status="skipped", reason="plugin-host-disabled"

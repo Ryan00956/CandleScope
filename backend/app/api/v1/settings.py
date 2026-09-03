@@ -9,9 +9,10 @@ Provides endpoints for:
 
 from __future__ import annotations
 
+from app.core.config import getenv as app_getenv
+
 import asyncio
 import logging
-import os
 import time
 from typing import Any
 
@@ -113,12 +114,12 @@ def _get_system_proxy() -> str | None:
     reader directly on Windows to avoid this.
     """
     env_proxy = (
-        os.getenv("HTTPS_PROXY")
-        or os.getenv("HTTP_PROXY")
-        or os.getenv("https_proxy")
-        or os.getenv("http_proxy")
-        or os.getenv("ALL_PROXY")
-        or os.getenv("all_proxy")
+        app_getenv("HTTPS_PROXY")
+        or app_getenv("HTTP_PROXY")
+        or app_getenv("https_proxy")
+        or app_getenv("http_proxy")
+        or app_getenv("ALL_PROXY")
+        or app_getenv("all_proxy")
     )
     if env_proxy:
         return env_proxy

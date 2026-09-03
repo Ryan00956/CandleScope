@@ -224,10 +224,14 @@ async def kline_stream(
     """
     symbol = symbol.upper().strip()
     interval = interval.strip()
-    exchange = _normalize_exchange(exchange)
-    market_type = _normalize_market_type(market_type)
-
     await websocket.accept()
+    try:
+        exchange = _normalize_exchange(exchange)
+    except ValueError as exc:
+        await _send_json_with_timeout(websocket, {"type": "error", "detail": str(exc)})
+        await websocket.close(code=1008)
+        return
+    market_type = _normalize_market_type(market_type)
 
     if not _validate_ws_interval(interval):
         await _send_json_with_timeout(websocket, {
@@ -269,9 +273,14 @@ async def kline_stream_multi(
         "ping"  -> responds "pong"
     """
     symbol = symbol.upper().strip()
-    exchange = _normalize_exchange(exchange)
-    market_type = _normalize_market_type(market_type)
     await websocket.accept()
+    try:
+        exchange = _normalize_exchange(exchange)
+    except ValueError as exc:
+        await _send_json_with_timeout(websocket, {"type": "error", "detail": str(exc)})
+        await websocket.close(code=1008)
+        return
+    market_type = _normalize_market_type(market_type)
 
     try:
         await _send_json_with_timeout(websocket, {

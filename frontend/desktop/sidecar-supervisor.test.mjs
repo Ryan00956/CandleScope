@@ -20,7 +20,7 @@ test("supervisor starts exactly one child, waits for health, logs, and reclaims 
   const port = await freePort();
   const source = [
     "const http=require('node:http');",
-    `const s=http.createServer((q,r)=>{r.statusCode=200;r.end('ok')});`,
+    `const s=http.createServer((q,r)=>{r.statusCode=200;r.end(JSON.stringify({desktop_instance_id:process.env.CANDLESCOPE_DESKTOP_INSTANCE_ID}))});`,
     `s.listen(${port},'127.0.0.1',()=>console.log('ready'));`,
     "process.on('SIGTERM',()=>s.close(()=>process.exit(0)));",
   ].join("");
@@ -58,4 +58,24 @@ test("startup failure is fail closed and leaves no running child", async () => {
   });
   await assert.rejects(() => supervisor.start(), SidecarStartupError);
   assert.equal(supervisor.diagnostics().running, false);
+});
+
+test("an existing healthy listener cannot impersonate the launched child", async () => {
+  const server = http.createServer((_request, response) => response.end(JSON.stringify({ desktop_instance_id: "old-instance" })));
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+  const root = await mkdtemp(path.join(os.tmpdir(), "candlescope-stale-sidecar-"));
+  const supervisor = new SidecarSupervisor({
+    command: process.execPath, args: ["-e", `setTimeout(() => require('node:http').createServer().listen(${port}, '127.0.0.1'), 100)`],
+    cwd: root, env: {}, healthUrl: `http://127.0.0.1:${port}/health`, healthTimeoutMs: 1000,
+    shutdownTimeoutMs: 100, logPath: path.join(root, "child.log"),
+  });
+  try {
+    await assert.rejects(supervisor.start(), SidecarStartupError);
+    assert.equal(supervisor.diagnostics().readyMs, null);
+    assert.equal((await fetch(`http://127.0.0.1:${port}/health`)).status, 200);
+  } finally {
+    await supervisor.stop();
+    await new Promise((resolve) => server.close(resolve));
+  }
 });

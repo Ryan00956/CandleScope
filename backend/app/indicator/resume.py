@@ -55,8 +55,14 @@ def plan_indicator_resume(
     limit = max(0, int(max_patch_bars))
     if limit <= 0 or len(times) > limit:
         return IndicatorResumePlan("history_required", "resume-gap-too-large", bars=len(times))
-    if interval_seconds and interval_seconds > 0 and times[0] > resume_s + int(interval_seconds):
-        return IndicatorResumePlan("history_required", "resume-gap-not-contiguous", bars=len(times))
+    if interval_seconds and interval_seconds > 0:
+        previous = resume_s
+        for timestamp in times:
+            if timestamp - previous != int(interval_seconds):
+                return IndicatorResumePlan(
+                    "history_required", "resume-gap-not-contiguous", bars=len(times)
+                )
+            previous = timestamp
     return IndicatorResumePlan(
         "patch",
         "small-contiguous-gap",

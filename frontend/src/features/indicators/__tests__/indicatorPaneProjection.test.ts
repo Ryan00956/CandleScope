@@ -15,6 +15,12 @@ const hiddenIndicator = {
   }],
 };
 
+test("restored indicators without a visible flag use the visible default", () => {
+  const indicator = { id: "restored", name: "MA", lines: [{ id: "ma", pane: "separate", type: "line", data: [{ time: 10, value: 42 }] }] };
+  assert.equal(buildIndicatorPaneData([indicator]).subPanes.length, 1);
+  assert.equal(buildIndicatorPaneData([{ ...indicator, visible: false }]).subPanes.length, 0);
+});
+
 test("hidden-only separate output does not materialize an empty pane", () => {
   const projected = buildIndicatorPaneData([hiddenIndicator]);
 

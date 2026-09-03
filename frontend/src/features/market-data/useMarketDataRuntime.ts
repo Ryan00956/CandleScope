@@ -1213,6 +1213,7 @@ export function useMarketDataRuntime({
 
   return {
     view: {
+      seriesIdentity,
       bars: chartData,
       seriesStore: activeSeriesStore,
       meta: chartDataMeta,

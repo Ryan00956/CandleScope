@@ -1,9 +1,10 @@
 """Alert rule and history API."""
 from __future__ import annotations
 
+from app.core.config import getenv as app_getenv
+
 import asyncio
 import json
-import os
 import time
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -37,7 +38,7 @@ def _manual_trigger_enabled(request: Request) -> bool:
     override = getattr(request.app.state, "alert_manual_trigger_enabled", None)
     if isinstance(override, bool):
         return override
-    return os.getenv("ALERT_MANUAL_TRIGGER_ENABLED", "0").strip() == "1"
+    return app_getenv("ALERT_MANUAL_TRIGGER_ENABLED", "0").strip() == "1"
 
 
 async def _sync_runtime_rule(request: Request, rule: dict) -> None:

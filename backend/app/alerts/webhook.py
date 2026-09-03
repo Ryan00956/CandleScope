@@ -1,12 +1,13 @@
 """Fail-closed webhook delivery policy and HTTP sender."""
 from __future__ import annotations
 
+from app.core.config import getenv as app_getenv
+
 import asyncio
 import hashlib
 import hmac
 import ipaddress
 import json
-import os
 import socket
 import time
 from dataclasses import dataclass
@@ -21,14 +22,14 @@ HostResolver = Callable[[str, int], Awaitable[list[str]]]
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
-    raw = os.getenv(name)
+    raw = app_getenv(name)
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
-    raw = os.getenv(name)
+    raw = app_getenv(name)
     if raw is None or not raw.strip():
         return default
     try:
@@ -60,17 +61,19 @@ class WebhookSettings:
 
     @classmethod
     def from_env(cls) -> "WebhookSettings":
-        outbox_raw = os.getenv("ALERT_WEBHOOK_OUTBOX_PATH", "").strip()
+        outbox_raw = app_getenv("ALERT_WEBHOOK_OUTBOX_PATH", "").strip()
         allowed_hosts = tuple(
-            sorted({
-                host.strip().lower().rstrip(".")
-                for host in os.getenv("ALERT_WEBHOOK_ALLOWED_HOSTS", "").split(",")
-                if host.strip()
-            })
+            sorted(
+                {
+                    host.strip().lower().rstrip(".")
+                    for host in app_getenv("ALERT_WEBHOOK_ALLOWED_HOSTS", "").split(",")
+                    if host.strip()
+                }
+            )
         )
         return cls(
             enabled=_env_bool("ALERT_WEBHOOK_ENABLED"),
-            secret=os.getenv("ALERT_WEBHOOK_SECRET", ""),
+            secret=app_getenv("ALERT_WEBHOOK_SECRET", ""),
             require_signature=_env_bool("ALERT_WEBHOOK_REQUIRE_SIGNATURE", True),
             allow_http=_env_bool("ALERT_WEBHOOK_ALLOW_HTTP"),
             allow_private_network=_env_bool("ALERT_WEBHOOK_ALLOW_PRIVATE_NETWORK"),

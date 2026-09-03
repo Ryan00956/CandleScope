@@ -20,6 +20,11 @@
     ],
     "extraResources": [
       {
+        "from": "../packages/candlescope-backtest-sdk/src",
+        "to": "packages/candlescope-backtest-sdk/src",
+        "filter": ["**/*"]
+      },
+      {
         "from": "../backend",
         "to": "backend",
         "filter": [

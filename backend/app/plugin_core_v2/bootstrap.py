@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from app.core.config import runtime_environment
+
 import os
 from collections.abc import Mapping
 from pathlib import Path
@@ -117,7 +119,7 @@ def build_core_plugin_platform_from_environment(
     host_version: str,
     environ: Mapping[str, str] | None = None,
 ) -> CorePluginPlatform | DisabledCorePluginPlatform:
-    env = os.environ if environ is None else environ
+    env = runtime_environment() if environ is None else environ
     if not _environment_bool(env, PLUGIN_PLATFORM_V2_ENABLED_ENV, default=True):
         return DisabledCorePluginPlatform()
     root_value = env.get(PLUGIN_PLATFORM_V2_ROOT_ENV)
@@ -202,10 +204,10 @@ def build_management_guard_from_environment(
 ) -> LocalManagementGuard | None:
     if isinstance(platform, DisabledCorePluginPlatform):
         return None
-    env = os.environ if environ is None else environ
+    env = runtime_environment() if environ is None else environ
     raw = env.get(
         PLUGIN_PLATFORM_V2_MANAGEMENT_ORIGINS_ENV,
-        "http://127.0.0.1:5173",
+        "http://127.0.0.1:15173",
     )
     origins = tuple(item.strip() for item in raw.split(",") if item.strip())
     if not origins:
@@ -213,4 +215,8 @@ def build_management_guard_from_environment(
             "PLUGIN_CORE_ENVIRONMENT_INVALID",
             "at least one exact loopback management origin is required",
         )
-    return LocalManagementGuard(origins)
+    return LocalManagementGuard(
+        origins,
+        session_token=env.get("CANDLESCOPE_DESKTOP_PLUGIN_SESSION"),
+        csrf_token=env.get("CANDLESCOPE_DESKTOP_PLUGIN_CSRF"),
+    )

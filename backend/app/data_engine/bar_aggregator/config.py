@@ -11,14 +11,15 @@ and ``backfill.config.BackfillConfig``.
 """
 from __future__ import annotations
 
-import os
+from app.core.config import getenv as app_getenv
+
 from dataclasses import dataclass, field
 
 
 # ─── Environment helpers ─────────────────────────────────────
 
 def _env_int(key: str, default: int) -> int:
-    raw = os.getenv(key)
+    raw = app_getenv(key)
     if raw is None:
         return default
     try:
@@ -28,7 +29,7 @@ def _env_int(key: str, default: int) -> int:
 
 
 def _env_float(key: str, default: float) -> float:
-    raw = os.getenv(key)
+    raw = app_getenv(key)
     if raw is None:
         return default
     try:
@@ -38,18 +39,18 @@ def _env_float(key: str, default: float) -> float:
 
 
 def _env_str(key: str, default: str) -> str:
-    return os.getenv(key, default)
+    return app_getenv(key, default)
 
 
 def _env_bool(key: str, default: bool) -> bool:
-    raw = os.getenv(key)
+    raw = app_getenv(key)
     if raw is None:
         return default
     return raw.lower() in ("true", "1", "yes")
 
 
 def _env_str_list(key: str, default: list[str]) -> list[str]:
-    raw = os.getenv(key)
+    raw = app_getenv(key)
     if raw is None:
         return list(default)
     return [s.strip() for s in raw.split(",") if s.strip()]

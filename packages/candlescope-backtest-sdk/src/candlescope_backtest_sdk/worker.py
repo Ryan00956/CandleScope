@@ -53,7 +53,9 @@ def main() -> int:
             request_id = request.get("id")
             method = str(request.get("method") or "")
             params = request.get("params") or {}
-            if method == "prepare":
+            if method == "ping":
+                result = {"ready": True}
+            elif method == "prepare":
                 bundle_dir = Path(str(params["bundleDir"]))
                 strategy = _load_strategy(bundle_dir, str(params["entrypoint"]))
                 strategy.prepare(

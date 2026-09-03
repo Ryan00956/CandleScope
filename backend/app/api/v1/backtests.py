@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from app.core.config import getenv as app_getenv
+
 import base64
-import os
 from typing import Any, Literal
 
 from fastapi import APIRouter, Header, Request
@@ -359,7 +360,7 @@ def _optional_runtime(request: Request) -> BacktestRuntime | None:
 
 
 def _python_strategy_enabled() -> bool:
-    return os.environ.get("BACKTEST_PYTHON_STRATEGY_ENABLED", "0").strip() == "1"
+    return app_getenv("BACKTEST_PYTHON_STRATEGY_ENABLED", "0").strip() == "1"
 
 
 def _require_python_strategy() -> None:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from typing import Any
+import math
 
 from app.data_engine.data_manager.models import BarData
 from app.indicator.indicators.ma import MAIndicator
@@ -44,7 +45,7 @@ def merge_alert_bar_window(
 
 def indicator_readiness(values: dict[str, Any]) -> dict[str, bool]:
     return {
-        key: isinstance(values.get(key), (int, float))
+        key: isinstance(values.get(key), (int, float)) and math.isfinite(values[key])
         for key in ("rsi", "macdHist", "ma20")
     }
 
@@ -53,4 +54,4 @@ def _optional_float(value: Any) -> float | None:
     if value is None:
         return None
     parsed = float(value)
-    return parsed if parsed == parsed else None
+    return parsed if math.isfinite(parsed) else None

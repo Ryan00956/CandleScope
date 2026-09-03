@@ -8,6 +8,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
+from collections import ChainMap
 
 from dotenv import load_dotenv
 
@@ -29,6 +30,16 @@ _DOTENV_PROXY_VALUES = {
     )
     if key in _DOTENV_ADDED_VALUES
 }
+
+
+def runtime_environment() -> Mapping[str, str]:
+    """Application defaults from .env with live process overrides, without inheritance."""
+    return ChainMap(os.environ, _DOTENV_ADDED_VALUES)
+
+
+def getenv(name: str, default=None):
+    return runtime_environment().get(name, default)
+
 
 logger = logging.getLogger("candlescope.config")
 
@@ -952,10 +963,14 @@ KLINE_UPSTREAM_MAX_DESCRIPTORS_PER_SHARD = _bounded_multi_chart_int(
 )
 
 # CORS
-CORS_ORIGINS = os.getenv(
-    "CORS_ORIGINS",
-    "http://localhost:5173,http://localhost:3000",
-).split(",")
+CORS_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv(
+        "CORS_ORIGINS",
+        "http://localhost:15173,http://127.0.0.1:15173",
+    ).split(",")
+    if origin.strip()
+]
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1079,4 +1094,4 @@ def get_effective_proxy() -> str | None:
 for _name, _loaded_value in _DOTENV_ADDED_VALUES.items():
     if os.environ.get(_name) == _loaded_value:
         os.environ.pop(_name, None)
-del _DOTENV_ADDED_VALUES, _ENVIRONMENT_KEYS_BEFORE_DOTENV
+del _ENVIRONMENT_KEYS_BEFORE_DOTENV

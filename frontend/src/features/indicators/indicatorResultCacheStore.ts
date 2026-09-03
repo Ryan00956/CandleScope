@@ -1,3 +1,4 @@
+import { isLegacyKlineSeriesIdentity, klineSeriesIdentityKey, resolveKlineSeriesIdentity, type KlineSeriesIdentityInput } from "../market-data/klineSeriesIdentity.js";
 import {
   getBuiltinIndicatorName,
   isBuiltinIndicator,
@@ -157,6 +158,7 @@ function normalizeContext(
   context: IndicatorContextInput = {},
 ): IndicatorCacheContext {
   return {
+    ...(isLegacyKlineSeriesIdentity(context.exchange ?? "binance", context.seriesIdentity) ? {} : { seriesIdentity: resolveKlineSeriesIdentity(context.exchange, context.seriesIdentity) }),
     exchange: normalizeSeriesPart(context.exchange, "binance").toLowerCase(),
     marketType: normalizeSeriesPart(context.marketType, "spot").toLowerCase(),
     symbol: normalizeSeriesPart(context.symbol, "UNKNOWN").toUpperCase(),
@@ -169,6 +171,7 @@ function normalizeContext(
 function indicatorDependencyKey(context: IndicatorContextInput = {}): string {
   const normalized = normalizeContext(context);
   return klineDependencyKey({
+    ...normalized.seriesIdentity,
     exchange: normalized.exchange,
     marketType: normalized.marketType,
     symbol: normalized.symbol,
@@ -675,6 +678,7 @@ export function buildIndicatorResultCacheKey(
     normalizedContext.marketType,
     normalizedContext.symbol,
     normalizedContext.interval,
+    ...(isLegacyKlineSeriesIdentity(normalizedContext.exchange, normalizedContext.seriesIdentity) ? [] : [klineSeriesIdentityKey(normalizedContext.exchange, normalizedContext.seriesIdentity)]),
     indicatorIdentity(indicator, normalizedContext),
   ].join("::");
 }

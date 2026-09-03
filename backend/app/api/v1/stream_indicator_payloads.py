@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from app.indicator.series_reference import identity_kwargs
+
 import asyncio
 import time
 from typing import Any
@@ -551,6 +553,7 @@ def _query_indicator_compute_result(
         "exchange": meta["exchange"],
         "market_type": meta["market_type"],
         "auto_backfill": auto_backfill,
+        **identity_kwargs(meta),
     }
     result = dm.query(
         meta["symbol"],
@@ -743,6 +746,7 @@ def _compute_builtin_range_patch_from_bars(
         params=params,
         bars=bars,
         exchange=meta["exchange"],
+        **identity_kwargs(meta),
     )
     payload = build_indicator_snapshot_payload(
         client_id=client_id,
@@ -790,6 +794,7 @@ def _query_pyne_snapshot_bars(
             exchange=meta["exchange"],
             market_type=meta["market_type"],
             auto_backfill=False,
+            **identity_kwargs(meta),
         )
         resolved_bars = (
             confirmed_indicator_seed_bars(query_result.bars)[-history_limit:]

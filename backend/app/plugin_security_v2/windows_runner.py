@@ -9,6 +9,7 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import stat
 import subprocess
 import sys
 import threading
@@ -511,23 +512,36 @@ def _stop_stdin_forwarding(
         thread.join(timeout=timeout)
 
 
-def _directory_size(path: Path) -> int:
+def _directory_size(path: Path, *, deadline: float | None = None) -> int:
     total = 0
-    if not path.exists():
-        return 0
-    for root, directories, files in os.walk(path, followlinks=False):
-        root_path = Path(root)
-        directories[:] = [
-            name for name in directories if not (root_path / name).is_symlink()
-        ]
-        for name in files:
-            item = root_path / name
-            if item.is_symlink():
+    pending = [path]
+    visited: set[tuple[int, int]] = set()
+    while pending:
+        if deadline is not None and time.monotonic() >= deadline:
+            return total
+        current = pending.pop()
+        try:
+            info = current.lstat()
+            if (
+                stat.S_ISLNK(info.st_mode)
+                or getattr(info, "st_file_attributes", 0)
+                & stat.FILE_ATTRIBUTE_REPARSE_POINT
+            ):
                 continue
-            try:
-                total += item.stat().st_size
-            except OSError:
+            if not stat.S_ISDIR(info.st_mode):
+                total += info.st_size
                 continue
+            identity = (info.st_dev, info.st_ino)
+            if identity in visited:
+                continue
+            visited.add(identity)
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    if deadline is not None and time.monotonic() >= deadline:
+                        return total
+                    pending.append(Path(entry.path))
+        except OSError:
+            continue
     return total
 
 
@@ -702,18 +716,30 @@ def run(config_path: Path) -> int:
             thread.start()
 
         monitored = tuple(Path(item) for item in config["monitoredDirectories"])
+        deadline = started + int(config["limits"]["wallSeconds"])
+        disk_sizes: list[int] = []
+        disk_scan: threading.Thread | None = None
+
+        def scan_disk() -> None:
+            disk_sizes.append(
+                sum(_directory_size(path, deadline=deadline) for path in monitored)
+            )
+
         while True:
             wait = kernel32.WaitForSingleObject(process_info.hProcess, 50)
             if wait == WAIT_OBJECT_0:
                 break
             if wait != WAIT_TIMEOUT:
                 raise _last_error("WaitForSingleObject")
-            if time.monotonic() - started > int(config["limits"]["wallSeconds"]):
+            if time.monotonic() >= deadline:
                 violation = "wall-time"
-            elif sum(_directory_size(path) for path in monitored) > int(
-                config["limits"]["diskBytes"]
-            ):
-                violation = "disk"
+            elif disk_scan is None or not disk_scan.is_alive():
+                if disk_sizes and disk_sizes.pop() > int(config["limits"]["diskBytes"]):
+                    violation = "disk"
+                else:
+                    # Filesystem work must never delay the process wall-time watchdog.
+                    disk_scan = threading.Thread(target=scan_disk, daemon=True)
+                    disk_scan.start()
             if violation is not None:
                 kernel32.TerminateJobObject(job, 246)
                 kernel32.WaitForSingleObject(process_info.hProcess, 5_000)

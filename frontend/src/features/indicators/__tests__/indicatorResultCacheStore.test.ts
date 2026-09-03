@@ -92,6 +92,16 @@ const maIndicator = {
   params: { period: 20 },
 };
 
+test("indicator cache keys separate venues and normalize equivalent semantic identities", () => {
+  const context = { ...baseContext, exchange: "twelvedata", marketType: "stock", symbol: "AAPL" };
+  const first = { venue: "xnas", assetClass: "equity" };
+  const second = { venue: "xnys", assetClass: "equity" };
+  assert.notEqual(buildIndicatorResultCacheKey(maIndicator, { ...context, seriesIdentity: first }),
+    buildIndicatorResultCacheKey(maIndicator, { ...context, seriesIdentity: second }));
+  assert.equal(buildIndicatorResultCacheKey(maIndicator, { ...context, seriesIdentity: first }),
+    buildIndicatorResultCacheKey(maIndicator, { ...context, seriesIdentity: { assetClass: "EQUITY", venue: "XNAS" } }));
+});
+
 function registerBaseKline() {
   registerCacheResource("chart-data-cache", "binance-spot-BTCUSDT-1m", {
     type: "kline",

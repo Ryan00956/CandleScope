@@ -1,3 +1,4 @@
+import { API_BASE, httpBaseToWsBase } from "../../services/apiConfig.js";
 import {
   assertReplayEventCausality,
   parseReplayErrorEnvelope,
@@ -98,15 +99,14 @@ export function buildReplayStreamUrl({
   dataEpoch?: ReplayDigest;
 }): string {
   if (!SESSION_ID.test(sessionId)) throw new Error("invalid replay session id");
-  const origin = baseUrl?.replace(/\/$/, "") ?? (() => {
-    if (!location?.host) throw new Error("browser location is unavailable");
-    return `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}`;
-  })();
+  const apiBase = baseUrl === undefined
+    ? httpBaseToWsBase(API_BASE, location)
+    : `${baseUrl.replace(/\/$/, "")}/api/v1`;
   const params = new URLSearchParams();
   if (afterSequence !== undefined) params.set("after_sequence", String(afterSequence));
   if (dataEpoch !== undefined) params.set("data_epoch", dataEpoch);
   const suffix = params.size ? `?${params.toString()}` : "";
-  return `${origin}/api/v1/stream/replay/${encodeURIComponent(sessionId)}${suffix}`;
+  return `${apiBase}/stream/replay/${encodeURIComponent(sessionId)}${suffix}`;
 }
 
 export class ReplayStreamController {

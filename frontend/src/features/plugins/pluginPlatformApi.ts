@@ -89,7 +89,8 @@ function consumeManagementSession(): PluginManagementSession | null {
     managementSession = null;
     return managementSession;
   }
-  const bootstrap = window.__CANDLESCOPE_PLUGIN_MANAGEMENT_V1__;
+  const bootstrap = window.candlescopeDesktop?.getPluginManagementSession?.()
+    ?? window.__CANDLESCOPE_PLUGIN_MANAGEMENT_V1__;
   delete window.__CANDLESCOPE_PLUGIN_MANAGEMENT_V1__;
   managementSession = null;
   if (!bootstrap || typeof bootstrap !== "object") return managementSession;

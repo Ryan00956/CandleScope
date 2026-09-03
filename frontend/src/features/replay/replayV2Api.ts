@@ -1,3 +1,4 @@
+import { API_BASE } from "../../services/apiConfig.js";
 import { ReplayApiClient } from "./replayApi.js";
 import type { ReplayApiClientOptions, ReplayCatalogQuery } from "./replayApi.js";
 import type { ReplayCapabilities, ReplayCatalog } from "./replayTypes.js";
@@ -252,7 +253,7 @@ export class ReplayV2ApiClient {
   private readonly commandAcknowledgementTimeoutMs: number;
 
   constructor({
-    basePath = "/api/v1/replay",
+    basePath = `${API_BASE}/replay`,
     fetcher = globalThis.fetch,
     commandAcknowledgementTimeoutMs = DEFAULT_COMMAND_ACKNOWLEDGEMENT_TIMEOUT_MS,
   }: ReplayV2ApiClientOptions = {}) {

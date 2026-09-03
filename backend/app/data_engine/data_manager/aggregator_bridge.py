@@ -48,6 +48,7 @@ class AggregatorBridge:
             bar_state.interval,
             exchange=bar_state.exchange,
             market_type=bar_state.market_type,
+            **bar_state.identity.to_dict(),
         )
 
         dm_event_type = {
@@ -179,6 +180,11 @@ class AggregatorBridge:
                 source,
                 bar_state.exchange,
                 bar_state.market_type,
+                **(
+                    {"series_identity": bar_state.identity}
+                    if not bar_state.identity.is_legacy_default_for(bar_state.exchange)
+                    else {}
+                ),
             )
             if affected is None:
                 return None

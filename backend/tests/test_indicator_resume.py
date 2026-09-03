@@ -55,6 +55,7 @@ def test_resume_revision_mismatch_requires_history():
 def test_resume_large_or_non_contiguous_gap_requires_history():
     assert _plan(max_patch_bars=2).reason == "resume-gap-too-large"
     assert _plan(closed_bar_times=[100, 220]).reason == "resume-gap-not-contiguous"
+    assert _plan(closed_bar_times=[100, 160, 280]).reason == "resume-gap-not-contiguous"
 
 
 def test_subscription_revision_returns_dirty_range_since_client_version():

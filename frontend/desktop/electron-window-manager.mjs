@@ -1,5 +1,6 @@
 import { restoreWindowPlacement, snapshotDisplay } from "./window-placement.mjs";
 import { DesktopTopologyRevisionConflictError } from "./shell-state-store.mjs";
+import { isTrustedAppUrl } from "./app-origin.mjs";
 
 function sameJson(left, right) {
   return JSON.stringify(left) === JSON.stringify(right);
@@ -9,6 +10,8 @@ export class ElectronWindowManager {
   constructor(options) {
     this.options = options;
     this.windows = new Map();
+    this.appWindows = new Map();
+    this.nextAppWindow = 1;
     this.closingApproved = new Set();
     this.boundTimers = new Map();
     this.quitting = false;
@@ -21,6 +24,69 @@ export class ElectronWindowManager {
       displays: this.options.screen.getAllDisplays().map(snapshotDisplay),
       multiWindowEnabled: this.options.multiWindowEnabled,
     };
+  }
+
+  windowIdForContents(sender) {
+    return [...this.windows, ...this.appWindows]
+      .find(([, window]) => !window.isDestroyed() && window.webContents === sender)?.[0] ?? null;
+  }
+
+  assertTrustedSender(event) {
+    const id = this.windowIdForContents(event.sender);
+    if (!id || !event.senderFrame || event.senderFrame !== event.sender.mainFrame
+      || !isTrustedAppUrl(event.sender.getURL(), this.options.appUrl)) {
+      throw new Error("Desktop IPC requires a managed application main frame");
+    }
+    return id;
+  }
+
+  protectWindow(window) {
+    window.webContents.setWindowOpenHandler(({ url }) => {
+      if (isTrustedAppUrl(url, this.options.appUrl)) void this.openAppPage(url).catch(() => {});
+      return { action: "deny" };
+    });
+    const protectNavigation = (event, url) => {
+      if (!isTrustedAppUrl(url, this.options.appUrl)) {
+        event.preventDefault();
+      } else if ([...this.appWindows.values()].includes(window) && this.isLivePage(url)) {
+        event.preventDefault();
+        void this.openAppPage(url).catch(() => {});
+      }
+    };
+    window.webContents.on("will-navigate", protectNavigation);
+    window.webContents.on("will-redirect", protectNavigation);
+    window.webContents.on("will-attach-webview", (event) => event.preventDefault());
+  }
+
+  isLivePage(value) {
+    const path = new URL(value, this.options.appUrl).pathname;
+    const base = new URL(".", this.options.appUrl).pathname;
+    return path === base || path === `${base}index.html`;
+  }
+
+  async openAppPage(value) {
+    const target = new URL(value, this.options.appUrl);
+    if (!isTrustedAppUrl(target.href, this.options.appUrl)) throw new Error("Untrusted application page");
+    if (this.isLivePage(target.href)) {
+      const live = this.windows.get("main-window") ?? this.windows.values().next().value;
+      if (!live || live.isDestroyed()) throw new Error("Live workspace window is unavailable");
+      if (live.isMinimized()) live.restore();
+      live.show();
+      live.focus();
+      return { windowId: this.windowIdForContents(live.webContents) };
+    }
+    const id = `app-window-${this.nextAppWindow++}`;
+    target.searchParams.set("windowId", id);
+    const window = new this.options.BrowserWindow({
+      width: 1280, height: 850, show: false, title: "CandleScope",
+      webPreferences: { preload: this.options.preloadPath, contextIsolation: true, nodeIntegration: false, sandbox: true },
+    });
+    this.appWindows.set(id, window);
+    this.protectWindow(window);
+    window.once("ready-to-show", () => { if (!window.isDestroyed()) window.show(); });
+    window.on("closed", () => this.appWindows.delete(id));
+    try { await window.loadURL(target.href); } catch (error) { window.close(); throw error; }
+    return { windowId: id };
   }
 
   sendAll(channel, payload) {
@@ -89,6 +155,7 @@ export class ElectronWindowManager {
       },
     });
     this.windows.set(saved.id, window);
+    this.protectWindow(window);
     window.once("ready-to-show", () => {
       if (!window.isDestroyed()) window.show();
     });

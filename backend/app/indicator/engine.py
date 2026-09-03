@@ -23,6 +23,11 @@ Usage::
 """
 from __future__ import annotations
 
+from app.data_engine.series_identity import (
+    KlineSeriesIdentity,
+    resolve_kline_series_identity,
+)
+
 import logging
 import time
 from typing import Any, Callable
@@ -146,6 +151,7 @@ class IndicatorEngine:
         params: dict[str, Any],
         bars: list[BarData],
         exchange: str = "binance",
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> IndicatorResult | None:
         """Compute an indicator over a set of bars.
 
@@ -171,6 +177,7 @@ class IndicatorEngine:
             market_type=market_type,
             exchange=exchange,
             code_hash=indicator_code_hash(indicator_name),
+            series_identity=series_identity,
         )
 
         # Get or create instance
@@ -207,6 +214,7 @@ class IndicatorEngine:
         exchange: str = "binance",
         data_revision: dict[str, Any] | None = None,
         desired_seed_bars: int | None = None,
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> tuple[IndicatorKey, IndicatorResult | None]:
         """Subscribe to an indicator -- create/reuse instance + optional init.
 
@@ -222,6 +230,7 @@ class IndicatorEngine:
             market_type=market_type,
             exchange=exchange,
             code_hash=indicator_code_hash(indicator_name),
+            series_identity=series_identity,
         )
         instance = self._get_or_create(key)
         if instance is None:
@@ -434,6 +443,7 @@ class IndicatorEngine:
         bar: BarData,
         market_type: str = "spot",
         exchange: str = "binance",
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> None:
         """Handle a confirmed bar close event.
 
@@ -446,6 +456,7 @@ class IndicatorEngine:
             {},
             market_type=market_type,
             exchange=exchange,
+            series_identity=series_identity,
         ).series_topic
         topic = key_topic
         self._prune_idle_instances()
@@ -481,6 +492,7 @@ class IndicatorEngine:
         bar: BarData,
         market_type: str = "spot",
         exchange: str = "binance",
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> None:
         """Handle a partial bar update (tick, forming bar).
 
@@ -493,6 +505,7 @@ class IndicatorEngine:
             {},
             market_type=market_type,
             exchange=exchange,
+            series_identity=series_identity,
         ).series_topic
         topic = key_topic
         self._prune_idle_instances()
@@ -547,6 +560,7 @@ class IndicatorEngine:
         market_type: str = "spot",
         exchange: str = "binance",
         dirty_range: dict[str, int] | None = None,
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> dict[str, Any]:
         """Describe the minimum safe work for a historical correction.
 
@@ -563,6 +577,7 @@ class IndicatorEngine:
             {},
             market_type=market_type,
             exchange=exchange,
+            series_identity=series_identity,
         ).series_topic
         self._prune_idle_instances()
         for key in [
@@ -620,6 +635,7 @@ class IndicatorEngine:
         *,
         market_type: str = "spot",
         exchange: str = "binance",
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> tuple[str, ...]:
         """Return intervals with live builtin subscribers for one market.
 
@@ -632,15 +648,21 @@ class IndicatorEngine:
         normalized_symbol = str(symbol).upper().strip()
         normalized_market = str(market_type).lower().strip()
         normalized_exchange = str(exchange).lower().strip()
-        return tuple(sorted({
-            key.interval
-            for keys in self._stream_keys.values()
-            for key in keys
-            if self._refcounts.get(key, 0) > 0
-            and key.symbol == normalized_symbol
-            and key.market_type == normalized_market
-            and key.exchange == normalized_exchange
-        }))
+        return tuple(
+            sorted(
+                {
+                    key.interval
+                    for keys in self._stream_keys.values()
+                    for key in keys
+                    if self._refcounts.get(key, 0) > 0
+                    and key.symbol == normalized_symbol
+                    and key.market_type == normalized_market
+                    and key.exchange == normalized_exchange
+                    and key.identity
+                    == resolve_kline_series_identity(exchange, series_identity)
+                }
+            )
+        )
 
     def resident_series_intervals(
         self,
@@ -648,23 +670,27 @@ class IndicatorEngine:
         *,
         market_type: str = "spot",
         exchange: str = "binance",
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> tuple[str, ...]:
         """Return active plus bounded warm intervals for one market."""
         self._prune_idle_instances()
         normalized_symbol = str(symbol).upper().strip()
         normalized_market = str(market_type).lower().strip()
         normalized_exchange = str(exchange).lower().strip()
-        return tuple(sorted({
-            key.interval
-            for key in self._instances
-            if (
-                self._refcounts.get(key, 0) > 0
-                or key in self._idle_since
+        return tuple(
+            sorted(
+                {
+                    key.interval
+                    for key in self._instances
+                    if (self._refcounts.get(key, 0) > 0 or key in self._idle_since)
+                    and key.symbol == normalized_symbol
+                    and key.market_type == normalized_market
+                    and key.exchange == normalized_exchange
+                    and key.identity
+                    == resolve_kline_series_identity(exchange, series_identity)
+                }
             )
-            and key.symbol == normalized_symbol
-            and key.market_type == normalized_market
-            and key.exchange == normalized_exchange
-        }))
+        )
 
     def on_series_correction_invalidated(
         self,
@@ -675,6 +701,7 @@ class IndicatorEngine:
         exchange: str = "binance",
         dirty_range: dict[str, int],
         data_revision: dict[str, Any] | None = None,
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> None:
         """Notify active subscribers when corrected history is out of span."""
         topic = IndicatorKey(
@@ -684,6 +711,7 @@ class IndicatorEngine:
             {},
             market_type=market_type,
             exchange=exchange,
+            series_identity=series_identity,
         ).series_topic
         self._prune_idle_instances()
         for key in list(self._stream_keys.get(topic, set())):
@@ -711,6 +739,7 @@ class IndicatorEngine:
         exchange: str = "binance",
         dirty_range: dict[str, int] | None = None,
         data_revision: dict[str, Any] | None = None,
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> None:
         """Handle historical bars being inserted (backfill/correction).
 
@@ -723,6 +752,7 @@ class IndicatorEngine:
             {},
             market_type=market_type,
             exchange=exchange,
+            series_identity=series_identity,
         ).series_topic
         topic = key_topic
         self._prune_idle_instances()

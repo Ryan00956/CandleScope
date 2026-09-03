@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   DEFAULT_LOCALE,
   hydrateLocale,
@@ -200,6 +200,9 @@ export function settingsFromStorageChange(
   newValue: string | null,
 ): ChartSettings | null {
   if (key !== SETTINGS_STORAGE_KEY && key !== null) return null;
+  if (newValue) {
+    try { JSON.parse(newValue); } catch { return null; }
+  }
   return parseStoredSettings(newValue);
 }
 
@@ -223,7 +226,12 @@ export interface ChartSettingsRuntime {
 }
 
 export function useChartSettingsRuntime(): ChartSettingsRuntime {
-  const [settings, setSettings] = useState<ChartSettings>(loadSettings);
+  const [settings, updateSettings] = useState<ChartSettings>(loadSettings);
+  const persistRequested = useRef(false);
+  const setSettings = useCallback<Dispatch<SetStateAction<ChartSettings>>>((action) => {
+    persistRequested.current = true;
+    updateSettings(action);
+  }, []);
   const [systemTheme, setSystemTheme] = useState(getSystemTheme);
   const resolvedTheme = settings.theme === "system" ? systemTheme : settings.theme;
 
@@ -249,7 +257,8 @@ export function useChartSettingsRuntime(): ChartSettingsRuntime {
       if (event.storageArea && event.storageArea !== window.localStorage) return;
       const incoming = settingsFromStorageChange(event.key, event.newValue);
       if (!incoming) return;
-      setSettings((current) => (
+      persistRequested.current = false;
+      updateSettings((current) => (
         JSON.stringify(current) === JSON.stringify(incoming) ? current : incoming
       ));
     };
@@ -271,7 +280,10 @@ export function useChartSettingsRuntime(): ChartSettingsRuntime {
     root.style.setProperty("--candle-down", settings.downColor);
     hydrateLocale(settings.locale);
     try {
-      localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+      if (persistRequested.current) {
+        localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+        persistRequested.current = false;
+      }
     } catch {
       // Settings persistence failures must not interrupt chart rendering.
     }

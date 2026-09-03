@@ -1,11 +1,12 @@
 """Conservative automatic GC orchestration for DataManager caches."""
 from __future__ import annotations
 
+from app.core.config import getenv as app_getenv
+
 import asyncio
 import json
 import logging
 import math
-import os
 import threading
 import time
 from dataclasses import dataclass
@@ -27,7 +28,7 @@ _AUDIT_LOCK = threading.Lock()
 
 
 def _env_bool(name: str, default: bool) -> bool:
-    value = os.getenv(name)
+    value = app_getenv(name)
     if value is None:
         return default
     normalized = value.strip().lower()
@@ -46,7 +47,7 @@ def _env_bool(name: str, default: bool) -> bool:
 
 def _env_int(name: str, default: int) -> int:
     try:
-        return int(os.getenv(name, str(default)))
+        return int(app_getenv(name, str(default)))
     except (TypeError, ValueError):
         return default
 
@@ -58,7 +59,7 @@ def _env_float(
     minimum: float,
     maximum: float,
 ) -> float:
-    raw = os.getenv(name)
+    raw = app_getenv(name)
     if raw is None:
         return default
     try:
@@ -112,10 +113,17 @@ class AutoGcPolicy:
     def from_env(cls) -> "AutoGcPolicy":
         return cls(
             enabled=_env_bool("CANDLESCOPE_AUTO_GC_ENABLED", True),
-            mode=os.getenv("CANDLESCOPE_AUTO_GC_MODE", "conservative").strip() or "conservative",
-            cooldown_ms=max(10_000, _env_int("CANDLESCOPE_AUTO_GC_COOLDOWN_MS", 60_000)),
-            max_bytes_per_run=max(1, _env_int("CANDLESCOPE_AUTO_GC_MAX_BYTES", 32 * 1024 * 1024)),
-            max_entries_per_run=max(1, _env_int("CANDLESCOPE_AUTO_GC_MAX_ENTRIES", 200)),
+            mode=app_getenv("CANDLESCOPE_AUTO_GC_MODE", "conservative").strip()
+            or "conservative",
+            cooldown_ms=max(
+                10_000, _env_int("CANDLESCOPE_AUTO_GC_COOLDOWN_MS", 60_000)
+            ),
+            max_bytes_per_run=max(
+                1, _env_int("CANDLESCOPE_AUTO_GC_MAX_BYTES", 32 * 1024 * 1024)
+            ),
+            max_entries_per_run=max(
+                1, _env_int("CANDLESCOPE_AUTO_GC_MAX_ENTRIES", 200)
+            ),
             min_final_evict_score=_env_float(
                 "CANDLESCOPE_AUTO_GC_MIN_SCORE",
                 70.0,

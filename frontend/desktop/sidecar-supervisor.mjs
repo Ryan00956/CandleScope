@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { mkdir, open } from "node:fs/promises";
 import { dirname } from "node:path";
+import { randomUUID } from "node:crypto";
 
 export class SidecarStartupError extends Error {
   constructor(message, diagnostics) {
@@ -11,11 +12,11 @@ export class SidecarStartupError extends Error {
   }
 }
 
-async function waitForHealthy(url, child, timeoutMs, fetchImpl) {
+async function waitForHealthy(url, child, timeoutMs, fetchImpl, instanceId) {
   const startedAt = Date.now();
   let lastError = null;
   while (Date.now() - startedAt < timeoutMs) {
-    if (child.exitCode !== null) {
+    if (child.exitCode !== null || child.signalCode !== null) {
       throw new SidecarStartupError(`Sidecar exited before it became healthy (${child.exitCode})`, {
         exitCode: child.exitCode,
         signalCode: child.signalCode,
@@ -23,7 +24,8 @@ async function waitForHealthy(url, child, timeoutMs, fetchImpl) {
     }
     try {
       const response = await fetchImpl(url, { signal: AbortSignal.timeout(1000) });
-      if (response.ok) return Date.now() - startedAt;
+      if (response.ok && (await response.json()).desktop_instance_id === instanceId
+        && child.exitCode === null && child.signalCode === null) return Date.now() - startedAt;
       lastError = new Error(`health endpoint returned ${response.status}`);
     } catch (error) {
       lastError = error;
@@ -64,8 +66,8 @@ export class SidecarSupervisor {
   }
 
   async start() {
-    if (this.child && this.child.exitCode === null) return this.diagnostics();
     if (this.startPromise) return this.startPromise;
+    if (this.child && this.child.exitCode === null && this.child.signalCode === null) return this.diagnostics();
     this.startPromise = this.startOnce().finally(() => {
       this.startPromise = null;
     });
@@ -76,9 +78,11 @@ export class SidecarSupervisor {
     await mkdir(dirname(this.options.logPath), { recursive: true });
     this.logHandle = await open(this.options.logPath, "a");
     this.startedAt = new Date().toISOString();
+    this.readyMs = null;
+    const instanceId = randomUUID();
     const child = spawn(this.options.command, this.options.args, {
       cwd: this.options.cwd,
-      env: { ...process.env, ...this.options.env },
+      env: { ...process.env, ...this.options.env, CANDLESCOPE_DESKTOP_INSTANCE_ID: instanceId },
       windowsHide: true,
       detached: false,
       stdio: ["ignore", this.logHandle.fd, this.logHandle.fd],
@@ -90,6 +94,7 @@ export class SidecarSupervisor {
         child,
         this.options.healthTimeoutMs,
         this.options.fetchImpl,
+        instanceId,
       );
       return this.diagnostics();
     } catch (error) {

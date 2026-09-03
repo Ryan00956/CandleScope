@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from app.core.config import getenv as app_getenv
+
 import json
-import os
 import sqlite3
 import time
 import uuid
@@ -215,11 +216,11 @@ class BacktestService:
                 "BACKTEST_TRADE_TAPE_ENABLED": self.settings.trade_tape_enabled,
                 "BACKTEST_STUDY_ENABLED": self.settings.study_enabled,
                 "BACKTEST_REPLAY_REVIEW_BRIDGE_ENABLED": self.settings.replay_review_bridge_enabled,
-                "BACKTEST_PYTHON_STRATEGY_ENABLED": os.environ.get(
+                "BACKTEST_PYTHON_STRATEGY_ENABLED": app_getenv(
                     "BACKTEST_PYTHON_STRATEGY_ENABLED", "0"
                 ).strip()
                 == "1",
-                "BACKTEST_PYTHON_TRUSTED_LOCAL_ENABLED": os.environ.get(
+                "BACKTEST_PYTHON_TRUSTED_LOCAL_ENABLED": app_getenv(
                     "BACKTEST_PYTHON_TRUSTED_LOCAL_ENABLED", "0"
                 ).strip()
                 == "1",

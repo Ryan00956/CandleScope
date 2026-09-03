@@ -1,3 +1,4 @@
+import { API_BASE, httpBaseToWsBase } from "../../services/apiConfig.js";
 import {
   parseReplayMarketTracksResponse,
   REPLAY_V2_PROTOCOL,
@@ -240,13 +241,12 @@ export function buildReplayTrainingRunStreamUrl({
   readonly location?: Pick<Location, "protocol" | "host">;
 }): string {
   if (!SAFE_ID.test(runId)) throw new Error("invalid replay training run id");
-  const origin = baseUrl?.replace(/\/$/, "") ?? (() => {
-    if (!location?.host) throw new Error("browser location is unavailable");
-    return `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}`;
-  })();
+  const apiBase = baseUrl === undefined
+    ? httpBaseToWsBase(API_BASE, location)
+    : `${baseUrl.replace(/\/$/, "")}/api/v1`;
   const params = new URLSearchParams({ protocol: REPLAY_V2_PROTOCOL });
   params.set("projection", STREAM_PROJECTION_MODE);
-  return `${origin}/api/v1/stream/replay/runs/${encodeURIComponent(runId)}?${params.toString()}`;
+  return `${apiBase}/stream/replay/runs/${encodeURIComponent(runId)}?${params.toString()}`;
 }
 
 function defaultSocketFactory(url: string): ReplayTrainingRunStreamSocket {

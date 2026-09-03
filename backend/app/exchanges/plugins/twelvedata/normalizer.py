@@ -79,7 +79,7 @@ class TwelveDataNormalizer:
                 "close": _finite_float(row.get("close"), "close"),
                 "volume": volume,
                 "volume_available": volume_available,
-                "is_closed": True,
+                "is_closed": close_time < msg.received_at_ms,
                 "provider_meta": dict(row.get("_twelve_data_meta") or {}),
             }
         except (TypeError, ValueError) as exc:

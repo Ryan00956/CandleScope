@@ -6,6 +6,8 @@ creating it atomically after package verification and isolated installation.
 
 from __future__ import annotations
 
+from app.core.config import runtime_environment
+
 import json
 import math
 import os
@@ -283,7 +285,7 @@ class RuntimeRegistry:
 def default_runtime_registry_path(
     environ: Mapping[str, str] | None = None,
 ) -> Path:
-    env = os.environ if environ is None else environ
+    env = runtime_environment() if environ is None else environ
     if os.name == "nt":
         base = env.get("LOCALAPPDATA")
         if base:

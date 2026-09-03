@@ -1,3 +1,4 @@
+import { isLegacyKlineSeriesIdentity, klineSeriesIdentityKey, resolveKlineSeriesIdentity, type KlineSeriesIdentityInput } from "../market-data/klineSeriesIdentity.js";
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { MutableRefObject } from "react";
 import { t } from "../../i18n/index.js";
@@ -149,6 +150,7 @@ import type {
 export { buildIndicatorRangeLifecycleKey } from "./indicatorRangeLifecycle.js";
 
 interface UseIndicatorRuntimeOptions {
+  seriesIdentity?: KlineSeriesIdentityInput;
   autoAddVolume?: boolean;
   session?: ChartSessionRuntime;
   marketData?: MarketDataRuntime;
@@ -177,6 +179,7 @@ interface UseIndicatorRuntimeOptions {
 }
 
 interface ResolvedIndicatorRuntimeInputs {
+  seriesIdentity: KlineSeriesIdentityInput;
   candleDownColor: string;
   candleUpColor: string;
   chartData: KlineBar[];
@@ -199,6 +202,7 @@ interface ResolvedIndicatorRuntimeInputs {
 }
 
 interface IndicatorPreviewContext {
+  seriesIdentity?: KlineSeriesIdentityInput | undefined;
   exchange: string;
   interval: string;
   marketType: string;
@@ -307,7 +311,11 @@ function resolveRuntimeInputs(
     options.session?.status.webSocketReady ?? true,
     marketDataView?.wsStatus,
   );
+  const exchange = options.exchange ?? sessionView?.exchange ?? "binance";
+  const seriesIdentity = resolveKlineSeriesIdentity(exchange, options.seriesIdentity ?? marketDataView?.seriesIdentity);
+  const legacySeries = isLegacyKlineSeriesIdentity(exchange, seriesIdentity);
   const inputs: ResolvedIndicatorRuntimeInputs = {
+    seriesIdentity,
     candleDownColor: options.candleDownColor || "#ef4444",
     candleUpColor: options.candleUpColor || "#22c55e",
     chartData: options.chartData ?? marketDataView?.bars ?? [],
@@ -323,10 +331,10 @@ function resolveRuntimeInputs(
     interval: options.interval ?? sessionView?.interval ?? "",
     indicatorRangeRequests: options.indicatorRangeRequests ?? marketDataStatus?.indicatorRangeRequests ?? [],
     marketType: options.marketType ?? sessionView?.marketType ?? "spot",
-    realtimeEnabled: options.realtimeEnabled ?? (realtimeMode === "enabled"),
+    realtimeEnabled: legacySeries && (options.realtimeEnabled ?? (realtimeMode === "enabled")),
     requestDemand: options.requestDemand ?? marketDataStatus?.requestDemand ?? null,
     seriesReady: options.seriesReady ?? (marketDataStatus?.activeChartReady ? 1 : 0),
-    sessionKey: options.sessionKey ?? sessionView?.sessionKey ?? "",
+    sessionKey: (options.sessionKey ?? sessionView?.sessionKey ?? "") + (legacySeries ? "" : "|" + klineSeriesIdentityKey(exchange, seriesIdentity)),
     savedVisibleRange: asIndicatorVisibleRange(
       options.savedVisibleRange ?? sessionView?.savedVisibleRange ?? null,
     ),
@@ -584,10 +592,13 @@ export function useIndicatorRuntime(
     realtimeEnabled,
     requestDemand,
     seriesReady,
+    seriesIdentity: resolvedIdentity,
     sessionKey,
     savedVisibleRange,
     symbol,
   } = resolveRuntimeInputs(options);
+  const identityJson = JSON.stringify(resolvedIdentity);
+  const seriesIdentity = useMemo(() => JSON.parse(identityJson) as KlineSeriesIdentityInput, [identityJson]);
   const onIndicatorRemoved = options.onIndicatorRemoved;
 
   const pendingForceComputeRef = useRef(false);
@@ -700,6 +711,7 @@ export function useIndicatorRuntime(
     string | null
   >(null);
   const runtimeContextRef = useLatestRef({
+    seriesIdentity,
     exchange,
     interval,
     marketType,
@@ -807,6 +819,7 @@ export function useIndicatorRuntime(
       candleDownColor,
       candleUpColor,
       exchange,
+      seriesIdentity,
       interval,
       marketType,
       symbol,
@@ -816,6 +829,7 @@ export function useIndicatorRuntime(
     candleDownColor,
     candleUpColor,
     exchange,
+    seriesIdentity,
     interval,
     marketType,
     symbol,
@@ -836,6 +850,7 @@ export function useIndicatorRuntime(
       candleDownColor,
       candleUpColor,
       exchange,
+      seriesIdentity,
       interval,
       marketType,
       symbol,
@@ -857,6 +872,7 @@ export function useIndicatorRuntime(
     marketType,
     requestDemand?.generation,
     requestDemand?.scope,
+    seriesIdentity,
     currentSeriesKey,
     symbol,
   ]);
@@ -883,6 +899,7 @@ export function useIndicatorRuntime(
     chartData,
     context: {
       exchange,
+      seriesIdentity,
       interval,
       marketType,
       sessionKey,
@@ -928,6 +945,7 @@ export function useIndicatorRuntime(
       candleDownColor,
       candleUpColor,
       exchange,
+      seriesIdentity,
       interval,
       marketType,
       symbol,
@@ -940,6 +958,7 @@ export function useIndicatorRuntime(
     exchange,
     indicatorCacheHydrationSignature,
     indicatorCacheRuntimeLeaseId,
+    seriesIdentity,
     interval,
     marketType,
     symbol,
@@ -990,6 +1009,7 @@ export function useIndicatorRuntime(
       candleDownColor: candleDownColorRef.current,
       candleUpColor: candleUpColorRef.current,
       exchange: requestContext.exchange,
+      seriesIdentity: requestContext.seriesIdentity,
       interval: requestContext.interval,
       marketType: requestContext.marketType,
       symbol: requestContext.symbol,
@@ -1483,6 +1503,7 @@ export function useIndicatorRuntime(
       chartData: chartDataRef.current || [],
       chartDataLength: chartDataRef.current?.length || 0,
       exchange: requestContext.exchange,
+      seriesIdentity: requestContext.seriesIdentity,
       interval: requestContext.interval,
       marketType: requestContext.marketType,
       symbol: requestContext.symbol,
@@ -1548,6 +1569,7 @@ export function useIndicatorRuntime(
           clientId: target.indicator.id,
           kind: message.kind,
           exchange: message.exchange,
+          seriesIdentity: message.seriesIdentity,
           marketType: message.marketType,
           symbol: message.symbol,
           interval: message.interval,

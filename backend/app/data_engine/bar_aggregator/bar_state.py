@@ -105,6 +105,10 @@ class StandardOHLCVMerge:
             state.last_input_at_ms = bar_input.open_time_ms
             state.created_at_ms = now_ms
         else:
+            if merge_mode == MergeMode.SNAPSHOT:
+                # A native snapshot supplies the target bucket's true opening
+                # price, even when a shorter PRICE_ONLY stream created it first.
+                state.open = bar_input.open
             # Subsequent input — merge into existing state
             state.high = max(state.high, bar_input.high)
             state.low = min(state.low, bar_input.low)
@@ -536,6 +540,7 @@ class BarStateEngine:
         state = BarState(
             symbol=symbol,
             interval=self._interval,
+            series_identity=bar_input.identity,
             bucket_start_ms=bucket_start,
             bucket_end_ms=bucket_end,
             exchange=exchange,

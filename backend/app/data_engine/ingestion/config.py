@@ -10,13 +10,14 @@ This is the single source of truth for the ingestion subsystem.
 """
 from __future__ import annotations
 
-import os
+from app.core.config import getenv as app_getenv
+
 from dataclasses import dataclass, field
 
 
 def _env_int(key: str, default: int) -> int:
     """Read an integer from environment variable, falling back to *default*."""
-    raw = os.getenv(key)
+    raw = app_getenv(key)
     if raw is None:
         return default
     try:
@@ -26,7 +27,7 @@ def _env_int(key: str, default: int) -> int:
 
 
 def _env_float(key: str, default: float) -> float:
-    raw = os.getenv(key)
+    raw = app_getenv(key)
     if raw is None:
         return default
     try:
@@ -36,18 +37,18 @@ def _env_float(key: str, default: float) -> float:
 
 
 def _env_bool(key: str, default: bool) -> bool:
-    raw = os.getenv(key)
+    raw = app_getenv(key)
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _env_str(key: str, default: str) -> str:
-    return os.getenv(key, default)
+    return app_getenv(key, default)
 
 
 def _env_str_list(key: str, default: list[str]) -> list[str]:
-    raw = os.getenv(key)
+    raw = app_getenv(key)
     if raw is None:
         return list(default)
     return [s.strip() for s in raw.split(",") if s.strip()]
@@ -97,16 +98,26 @@ def _load_persisted_http_proxy() -> str | None:
         if mode == "custom" and custom_proxy:
             return custom_proxy
         if mode == "system":
-            return (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
-                    or os.getenv("ALL_PROXY") or os.getenv("all_proxy")
-                    or _get_os_proxy() or None)
+            return (
+                app_getenv("HTTPS_PROXY")
+                or app_getenv("HTTP_PROXY")
+                or app_getenv("ALL_PROXY")
+                or app_getenv("all_proxy")
+                or _get_os_proxy()
+                or None
+            )
     except Exception:
         pass
     # Fall back to environment / OS proxy
-    return (_env_str("INGESTION_HTTP_PROXY", "")
-            or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
-            or os.getenv("ALL_PROXY") or os.getenv("all_proxy")
-            or _get_os_proxy() or None)
+    return (
+        _env_str("INGESTION_HTTP_PROXY", "")
+        or app_getenv("HTTPS_PROXY")
+        or app_getenv("HTTP_PROXY")
+        or app_getenv("ALL_PROXY")
+        or app_getenv("all_proxy")
+        or _get_os_proxy()
+        or None
+    )
 
 
 @dataclass

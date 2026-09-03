@@ -28,6 +28,8 @@ class FakeWindow extends EventEmitter {
     this.bounds = { x: options.x, y: options.y, width: options.width, height: options.height };
     this.sent = [];
     this.webContents = {
+      on: () => {},
+      setWindowOpenHandler: (handler) => { this.openHandler = handler; },
       send: (channel, payload) => this.sent.push({ channel, payload }),
     };
     FakeWindow.created.push(this);
@@ -44,6 +46,8 @@ class FakeWindow extends EventEmitter {
   isMinimized() { return this.minimized; }
   isMaximized() { return this.maximized; }
   show() { this.visible = true; }
+  focus() { this.focused = true; }
+  restore() { this.minimized = false; }
   hide() { this.visible = false; this.emit("hide"); }
   minimize() { this.minimized = true; this.emit("minimize"); }
   maximize() { this.maximized = true; }
@@ -108,6 +112,29 @@ test("cached four-window topology restores four native windows with scoped URLs"
   await manager.restoreCached(state);
   assert.deepEqual(manager.diagnostics().windowIds, ["main-window", "window-2", "window-3", "window-4"]);
   assert.match(manager.windows.get("window-3").url, /windowId=window-3/);
+});
+
+test("desktop authority rejects unknown windows, subframes and external navigation", async () => {
+  const manager = createManager(new MemoryStore(topology(0, ["main-window"])));
+  await manager.restoreCached(manager.options.store.snapshot());
+  const window = manager.windows.get("main-window");
+  const sender = window.webContents;
+  const frame = {};
+  sender.mainFrame = frame;
+  sender.getURL = () => window.url;
+  assert.equal(manager.assertTrustedSender({ sender, senderFrame: frame }), "main-window");
+  assert.throws(() => manager.assertTrustedSender({ sender, senderFrame: {} }));
+  assert.throws(() => manager.assertTrustedSender({ sender: {}, senderFrame: frame }));
+  sender.getURL = () => "https://attacker.example/";
+  assert.throws(() => manager.assertTrustedSender({ sender, senderFrame: frame }));
+  assert.deepEqual(window.openHandler({ url: "about:blank" }), { action: "deny" });
+  assert.equal(manager.appWindows.size, 0);
+  const created = await manager.openAppPage("/replay.html?run=one");
+  assert.ok(manager.appWindows.has(created.windowId));
+  assert.equal(new URL(manager.appWindows.get(created.windowId).url).searchParams.get("windowId"), created.windowId);
+  assert.deepEqual(await manager.openAppPage("/"), { windowId: "main-window" });
+  assert.equal(manager.appWindows.size, 1);
+  assert.equal(window.focused, true);
 });
 
 test("flag-off restore opens only main-window without deleting cached secondary state", async () => {

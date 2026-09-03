@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from app.core.config import getenv as app_getenv
+
 import importlib
-import os
 from typing import Any
 
 from .plugin import ExchangePlugin
@@ -23,7 +24,11 @@ def load_external_plugins_from_env(
     loader looks for ``create_plugin`` first, then ``plugin``.
     """
 
-    raw = os.getenv(EXTERNAL_EXCHANGE_PLUGINS_ENV, "") if env_value is None else env_value
+    raw = (
+        app_getenv(EXTERNAL_EXCHANGE_PLUGINS_ENV, "")
+        if env_value is None
+        else env_value
+    )
     specs = [item.strip() for item in raw.split(",") if item.strip()]
     if not specs:
         return

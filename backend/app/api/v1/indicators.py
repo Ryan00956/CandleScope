@@ -59,6 +59,7 @@ from app.indicator.custom_store import CustomIndicatorStore
 from app.indicator.script_identity import script_hash, short_script_hash
 from app.indicator.engine import indicator_code_hash
 from app.indicator.types import IndicatorKey
+from app.indicator.series_reference import identity_for_meta
 from app.indicator.range_result_service import (
     IndicatorRangeResultService,
     IndicatorRangeRevisionChangedError,
@@ -199,6 +200,8 @@ class IndicatorRangeRequest(BaseModel):
     """HTTP request for server-side indicator history/range computation."""
 
     clientId: str = Field(..., description="Frontend indicator client id")
+    seriesIdentity: dict[str, str] | None = None
+    series_identity: dict[str, str] | None = None
     kind: str | None = Field(
         None, description="'builtin', 'script', 'custom', or 'pyne'"
     )
@@ -808,6 +811,17 @@ def _build_range_meta(req: IndicatorRangeRequest) -> dict[str, Any]:
     interval = (
         interval_spec.canonical if interval_spec is not None else requested_interval
     )
+    identity = identity_for_meta(
+        {
+            "exchange": exchange,
+            "series_identity": req.series_identity or req.seriesIdentity,
+        }
+    )
+    semantics = (
+        {}
+        if identity.is_legacy_default_for(exchange)
+        else {"series_identity": identity.to_dict()}
+    )
     params = req.params if isinstance(req.params, dict) else {}
     kind = str(req.kind or "").strip().lower()
     script = req.script or ""
@@ -832,6 +846,7 @@ def _build_range_meta(req: IndicatorRangeRequest) -> dict[str, Any]:
             raise ValueError("Pyne script is required.")
         digest = script_hash(script)
         meta = {
+            **semantics,
             "kind": "script",
             "language": language,
             "exchange": exchange,
@@ -864,8 +879,10 @@ def _build_range_meta(req: IndicatorRangeRequest) -> dict[str, Any]:
         market_type=market_type,
         exchange=exchange,
         code_hash=code_hash,
+        series_identity=identity,
     )
     return {
+        **semantics,
         "kind": "builtin",
         "exchange": exchange,
         "symbol": symbol,

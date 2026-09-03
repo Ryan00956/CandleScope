@@ -1,3 +1,4 @@
+import type { KlineSeriesIdentityInput } from "../market-data/klineSeriesIdentity.js";
 import type { KlineBar } from "../market-data/marketDataTypes.js";
 
 export type IndicatorParams = Record<string, unknown>;
@@ -380,6 +381,7 @@ export interface DeferredRightCatchupPlan {
 }
 
 export interface IndicatorRangeRequest {
+  seriesIdentity?: KlineSeriesIdentityInput | undefined;
   clientId: string;
   kind?: IndicatorKind | string;
   language?: string;
@@ -543,6 +545,7 @@ export interface IndicatorWsHandlers {
 }
 
 export interface IndicatorCacheContext {
+  seriesIdentity?: KlineSeriesIdentityInput | undefined;
   exchange: string;
   marketType: string;
   symbol: string;
@@ -601,6 +604,7 @@ export interface IndicatorCacheResultMetadata {
 }
 
 export interface IndicatorSubscriptionContext {
+  seriesIdentity?: KlineSeriesIdentityInput | undefined;
   candleDownColor?: string;
   candleUpColor?: string;
   chartData?: KlineBar[];
@@ -615,6 +619,7 @@ export interface IndicatorSubscriptionContext {
 }
 
 export interface IndicatorSubscribeMessage {
+  seriesIdentity?: KlineSeriesIdentityInput | undefined;
   action: "subscribe";
   clientId: string;
   kind: "builtin" | "script";

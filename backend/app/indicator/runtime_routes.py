@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from app.core.config import runtime_environment
+
 import json
-import os
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -248,7 +249,7 @@ def load_indicator_runtime_routes(
 def load_indicator_runtime_routes_from_environment(
     environ: Mapping[str, str] | None = None,
 ) -> IndicatorRuntimeRoutes:
-    env = os.environ if environ is None else environ
+    env = runtime_environment() if environ is None else environ
     override = env.get(INDICATOR_RUNTIME_ROUTES_ENV)
     if override is not None and not override.strip():
         raise IndicatorRuntimeRoutesError(

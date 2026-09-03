@@ -16,6 +16,11 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from typing import Any
+from app.data_engine.data_manager.models import SeriesKey
+from app.data_engine.series_identity import (
+    KlineSeriesIdentity,
+    resolve_kline_series_identity,
+)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -42,6 +47,7 @@ class IndicatorKey:
     market_type: str = "spot"
     exchange: str = "binance"
     code_hash: str = ""
+    series_identity: KlineSeriesIdentity | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "symbol", self.symbol.upper().strip())
@@ -61,26 +67,32 @@ class IndicatorKey:
         return hashlib.sha256(raw.encode()).hexdigest()[:12]
 
     @property
+    def identity(self) -> KlineSeriesIdentity:
+        return resolve_kline_series_identity(self.exchange, self.series_identity)
+
+    @property
     def uid(self) -> str:
         """Human-readable unique ID including exchange and market type."""
         code_part = self.code_hash or "no-code-hash"
-        return (
+        routed = (
             f"{self.exchange}:{self.market_type}:{self.symbol}:{self.interval}:"
             f"{self.indicator_name}:{code_part}:{self.params_hash}"
         )
+        if not self.identity.is_legacy_default_for(self.exchange):
+            semantic = json.dumps(self.identity.storage_values, separators=(",", ":"))
+            return f"series:{semantic}:{routed}"
+        return routed
 
     @property
     def series_topic(self) -> str:
         """DataManager topic string matching ``SeriesKey.topic`` semantics."""
-        base = f"{self.symbol}@{self.interval}"
-        prefixes: list[str] = []
-        if self.exchange != "binance":
-            prefixes.append(self.exchange)
-        if self.market_type != "spot":
-            prefixes.append(self.market_type)
-        if prefixes:
-            return f"{':'.join(prefixes)}:{base}"
-        return base
+        return SeriesKey(
+            self.symbol,
+            self.interval,
+            exchange=self.exchange,
+            market_type=self.market_type,
+            **self.identity.to_dict(),
+        ).topic
 
     def __str__(self) -> str:
         return self.uid

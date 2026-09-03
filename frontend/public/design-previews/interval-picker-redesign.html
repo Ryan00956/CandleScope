@@ -1,0 +1,1356 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>周期选择器 · 设计预览</title>
+  <style>
+    :root {
+      --bg-primary: #0a0e17;
+      --bg-secondary: #111827;
+      --bg-tertiary: #1a2332;
+      --bg-hover: #1e293b;
+      --border-color: #1e293b;
+      --text-primary: #e2e8f0;
+      --text-secondary: #94a3b8;
+      --text-muted: #64748b;
+      --candle-up: #22c55e;
+      --candle-down: #ef4444;
+      --accent-blue: #3b82f6;
+      --accent-cyan: #06b6d4;
+      --font-sans: "Inter", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      --font-mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+      --radius-md: 8px;
+      --radius-sm: 4px;
+      --preview-rail: #070b12;
+    }
+
+    [data-theme="light"] {
+      --bg-primary: #ffffff;
+      --bg-secondary: #f8fafc;
+      --bg-tertiary: #f1f5f9;
+      --bg-hover: #e2e8f0;
+      --border-color: #e2e8f0;
+      --text-primary: #0f172a;
+      --text-secondary: #475569;
+      --text-muted: #94a3b8;
+      --preview-rail: #eef2f7;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; }
+    body {
+      font-family: var(--font-sans);
+      background: var(--preview-rail);
+      color: var(--text-primary);
+      -webkit-font-smoothing: antialiased;
+    }
+    button, input { font-family: inherit; }
+    button { color: inherit; }
+
+    .preview-shell {
+      height: 100%;
+      display: grid;
+      grid-template-rows: auto 1fr;
+    }
+
+    .preview-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 10px 16px;
+      background: color-mix(in srgb, var(--bg-secondary) 88%, black);
+      border-bottom: 1px solid var(--border-color);
+    }
+    .preview-brand { min-width: 0; }
+    .preview-kicker {
+      font: 700 10px/1 var(--font-mono);
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--accent-cyan);
+    }
+    .preview-brand h1 {
+      margin: 4px 0 0;
+      font-size: 15px;
+      font-weight: 700;
+    }
+    .preview-brand p {
+      margin: 3px 0 0;
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+    .preview-actions { display: flex; gap: 8px; flex-shrink: 0; }
+    .seg {
+      display: inline-flex;
+      padding: 3px;
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      background: var(--bg-tertiary);
+    }
+    .seg button {
+      border: 0;
+      background: transparent;
+      color: var(--text-secondary);
+      height: 26px;
+      padding: 0 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .seg button.active {
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.25);
+    }
+
+    .preview-stage { min-height: 0; overflow: auto; }
+
+    /* ── App chrome ── */
+    .app {
+      height: 100%;
+      min-height: 720px;
+      display: flex;
+      flex-direction: column;
+      background: var(--bg-primary);
+    }
+    .topbar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      height: 44px;
+      padding: 0 12px;
+      background: var(--bg-secondary);
+      border-bottom: 1px solid var(--border-color);
+      flex-shrink: 0;
+    }
+    .symbol {
+      font: 700 14px var(--font-mono);
+      letter-spacing: 0.02em;
+    }
+    .px {
+      font: 700 14px var(--font-mono);
+      color: var(--candle-up);
+    }
+    .chg { font-size: 12px; color: var(--candle-up); }
+    .meta {
+      color: var(--text-muted);
+      font-size: 12px;
+    }
+    .top-spacer { flex: 1; }
+    .ghost {
+      height: 28px;
+      padding: 0 10px;
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-sm);
+      background: transparent;
+      color: var(--text-secondary);
+      font-size: 12px;
+    }
+
+    .toolbar {
+      display: flex;
+      align-items: center;
+      height: 36px;
+      padding: 0 16px;
+      background: var(--bg-secondary);
+      border-bottom: 1px solid var(--border-color);
+      gap: 4px;
+      flex-shrink: 0;
+    }
+    .toolbar-wrap { position: relative; z-index: 20; }
+    .toolbar-group { display: flex; align-items: center; gap: 2px; }
+    .toolbar-divider {
+      width: 1px; height: 20px;
+      background: var(--border-color);
+      margin: 0 8px;
+    }
+    .interval-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 4px 10px;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      background: transparent;
+      border: none;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+    }
+    .interval-btn:hover { color: var(--text-primary); background: var(--bg-hover); }
+    .interval-btn.active {
+      color: var(--accent-blue);
+      background: rgba(59, 130, 246, 0.1);
+    }
+    .custom-interval-btn {
+      border: 1px solid rgba(59, 130, 246, 0.2);
+      background: rgba(59, 130, 246, 0.04);
+    }
+    .interval-custom-dot {
+      width: 5px; height: 5px; border-radius: 50%;
+      background: var(--accent-cyan);
+      box-shadow: 0 0 8px rgba(6, 182, 212, 0.5);
+    }
+    .interval-more-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      height: 26px;
+      padding: 0 10px;
+      border: 1px solid var(--border-color);
+      border-radius: 14px;
+      background: var(--bg-tertiary);
+      color: var(--text-secondary);
+      cursor: pointer;
+      font-size: 12px;
+    }
+    .interval-more-btn.active,
+    .interval-more-btn:hover {
+      color: var(--text-primary);
+      border-color: rgba(59, 130, 246, 0.45);
+      background: rgba(59, 130, 246, 0.12);
+    }
+    .interval-more-label { color: var(--text-muted); }
+    .interval-more-value {
+      color: var(--accent-blue);
+      font-weight: 700;
+      font-family: var(--font-mono);
+    }
+    .interval-more-caret { font-size: 10px; opacity: 0.8; }
+
+    .workspace {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 1fr 280px;
+      min-height: 0;
+    }
+    .chart-col {
+      position: relative;
+      min-width: 0;
+      background: var(--bg-primary);
+    }
+    .chart-svg { width: 100%; height: 100%; display: block; }
+    .chart-hud {
+      position: absolute;
+      top: 12px;
+      left: 16px;
+      color: var(--text-muted);
+      font: 12px var(--font-mono);
+      pointer-events: none;
+    }
+    .chart-hud strong { color: var(--text-primary); }
+    .rail {
+      border-left: 1px solid var(--border-color);
+      background: var(--bg-secondary);
+      padding: 12px;
+      color: var(--text-muted);
+      font-size: 12px;
+    }
+    .rail h3 {
+      margin: 0 0 10px;
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text-secondary);
+    }
+    .rail-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 7px 0;
+      border-bottom: 1px solid var(--border-color);
+    }
+    .rail-row b { color: var(--text-primary); font-weight: 600; }
+    .status {
+      height: 26px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 0 12px;
+      background: var(--bg-secondary);
+      border-top: 1px solid var(--border-color);
+      color: var(--text-muted);
+      font-size: 11px;
+    }
+    .dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: var(--candle-up);
+    }
+
+    /* ── New picker ── */
+    .ip {
+      position: absolute;
+      top: calc(100% + 8px);
+      left: 16px;
+      width: 400px;
+      display: flex;
+      flex-direction: column;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-md);
+      box-shadow: 0 18px 48px rgba(0, 0, 0, 0.42);
+      overflow: hidden;
+      z-index: 30;
+    }
+    .ip-search {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--border-color);
+    }
+    .ip-search svg { color: var(--text-muted); flex-shrink: 0; }
+    .ip-search input {
+      flex: 1;
+      min-width: 0;
+      border: 0;
+      outline: 0;
+      background: transparent;
+      color: var(--text-primary);
+      font-size: 13px;
+    }
+    .ip-search input::placeholder { color: var(--text-muted); }
+    .ip-x {
+      width: 24px; height: 24px;
+      border: 0; border-radius: var(--radius-sm);
+      background: transparent;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 16px;
+    }
+    .ip-x:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+    .ip-tabs {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      padding: 0 8px;
+      border-bottom: 1px solid var(--border-color);
+    }
+    .ip-tab {
+      height: 34px;
+      border: 0;
+      background: transparent;
+      color: var(--text-secondary);
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 650;
+      position: relative;
+    }
+    .ip-tab:hover { color: var(--text-primary); }
+    .ip-tab.active { color: var(--accent-blue); }
+    .ip-tab.active::after {
+      content: "";
+      position: absolute;
+      left: 12px; right: 12px; bottom: -1px;
+      height: 2px;
+      background: var(--accent-blue);
+      border-radius: 2px 2px 0 0;
+    }
+    .ip-tab em {
+      display: inline-block;
+      min-width: 16px;
+      margin-left: 4px;
+      padding: 0 5px;
+      border-radius: 8px;
+      background: rgba(59, 130, 246, 0.16);
+      color: var(--accent-blue);
+      font-style: normal;
+      font-size: 10px;
+      line-height: 16px;
+    }
+
+    .ip-body {
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      max-height: 420px;
+      overflow: auto;
+    }
+    .ip-group {
+      display: grid;
+      grid-template-columns: 40px 1fr;
+      gap: 8px;
+      align-items: start;
+    }
+    .ip-label {
+      padding-top: 6px;
+      font-size: 11px;
+      color: var(--text-muted);
+      font-weight: 600;
+    }
+    .ip-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+    .ip-chip {
+      position: relative;
+      min-width: 40px;
+      height: 28px;
+      padding: 0 8px;
+      border: 0;
+      border-radius: var(--radius-sm);
+      background: var(--bg-tertiary);
+      color: var(--text-secondary);
+      cursor: pointer;
+      font: 600 12px var(--font-mono);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+    }
+    .ip-chip:hover { color: var(--text-primary); background: var(--bg-hover); }
+    .ip-chip.active {
+      color: var(--accent-blue);
+      background: rgba(59, 130, 246, 0.14);
+    }
+    .ip-chip.custom .dot {
+      width: 4px; height: 4px; border-radius: 50%;
+      background: var(--accent-cyan);
+    }
+    .ip-chip.unavailable {
+      opacity: 0.38;
+      cursor: not-allowed;
+    }
+    .ip-star {
+      font-size: 9px;
+      color: #f59e0b;
+      line-height: 1;
+    }
+    .ip-chip-actions {
+      display: none;
+      position: absolute;
+      right: 2px;
+      top: 2px;
+      bottom: 2px;
+      align-items: center;
+      gap: 1px;
+      padding-left: 10px;
+      background: linear-gradient(90deg, transparent, var(--bg-hover) 28%);
+    }
+    .ip-chip.manage:hover { padding-right: 44px; }
+    .ip-chip.manage:hover .ip-chip-actions { display: inline-flex; }
+    .ip-mini {
+      width: 18px; height: 18px;
+      border: 0; border-radius: 3px;
+      background: transparent;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 11px;
+      line-height: 1;
+    }
+    .ip-mini:hover { color: #f59e0b; background: rgba(245, 158, 11, 0.12); }
+    .ip-mini.danger:hover { color: var(--candle-down); background: rgba(239, 68, 68, 0.12); }
+
+    .ip-add {
+      min-width: 28px;
+      height: 28px;
+      border: 1px dashed var(--border-color);
+      border-radius: var(--radius-sm);
+      background: transparent;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 16px;
+      line-height: 1;
+    }
+    .ip-add:hover {
+      color: var(--accent-blue);
+      border-color: rgba(59, 130, 246, 0.45);
+      background: rgba(59, 130, 246, 0.08);
+    }
+
+    .ip-empty {
+      padding: 18px 8px 8px;
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 12px;
+    }
+
+    .ip-manage-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      color: var(--text-muted);
+      font-size: 11px;
+    }
+    .ip-link {
+      border: 0;
+      background: transparent;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 11px;
+    }
+    .ip-link:hover { color: var(--candle-down); }
+
+    .ip-composer {
+      display: none;
+      padding-top: 2px;
+      border-top: 1px solid var(--border-color);
+    }
+    .ip-composer.open { display: block; }
+    .ip-split {
+      display: grid;
+      grid-template-columns: 64px 1fr auto;
+      height: 32px;
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-md);
+      overflow: hidden;
+      background: var(--bg-tertiary);
+    }
+    .ip-split:focus-within {
+      border-color: var(--accent-blue);
+      box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.12);
+    }
+    .ip-split input {
+      width: 100%;
+      border: 0;
+      outline: 0;
+      background: transparent;
+      color: var(--text-primary);
+      padding: 0 10px;
+      font: 600 13px var(--font-mono);
+    }
+    .ip-units {
+      display: flex;
+      border-left: 1px solid var(--border-color);
+      border-right: 1px solid var(--border-color);
+    }
+    .ip-units button {
+      flex: 1;
+      min-width: 28px;
+      border: 0;
+      background: transparent;
+      color: var(--text-secondary);
+      cursor: pointer;
+      font: 700 11px var(--font-mono);
+    }
+    .ip-units button.active {
+      color: var(--accent-blue);
+      background: rgba(59, 130, 246, 0.12);
+    }
+    .ip-go {
+      border: 0;
+      background: var(--accent-blue);
+      color: #fff;
+      padding: 0 12px;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .ip-go:disabled { opacity: 0.45; cursor: not-allowed; }
+    .ip-status {
+      margin-top: 6px;
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+    .ip-status.ok { color: var(--candle-up); }
+    .ip-status.invalid { color: var(--candle-down); }
+    .ip-status.exists, .ip-status.native { color: var(--accent-cyan); }
+
+    .toast {
+      position: absolute;
+      right: 16px;
+      top: 12px;
+      z-index: 40;
+      padding: 8px 12px;
+      border-radius: 8px;
+      background: var(--bg-tertiary);
+      border: 1px solid rgba(59, 130, 246, 0.28);
+      color: var(--text-primary);
+      font-size: 12px;
+      opacity: 0;
+      transform: translateY(-6px);
+      pointer-events: none;
+      transition: 0.18s ease;
+    }
+    .toast.show { opacity: 1; transform: none; }
+
+    /* ── Compare ── */
+    .compare {
+      display: none;
+      padding: 20px 24px 40px;
+      background: var(--bg-primary);
+      min-height: 100%;
+    }
+    .compare.on { display: block; }
+    .app.compare-hidden { display: none; }
+    .compare-lead {
+      margin: 0 0 16px;
+      color: var(--text-muted);
+      font-size: 13px;
+    }
+    .compare-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.7fr) minmax(400px, 0.9fr);
+      gap: 20px;
+      align-items: start;
+    }
+    .compare-card h2 {
+      margin: 0 0 8px;
+      font-size: 13px;
+      font-weight: 700;
+    }
+    .compare-card .w {
+      color: var(--text-muted);
+      font: 12px var(--font-mono);
+      margin-bottom: 10px;
+    }
+    .old-panel {
+      width: min(760px, 100%);
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      border-radius: 16px;
+      overflow: hidden;
+      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.28);
+    }
+    .old-head, .old-search, .old-tabs {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border-color);
+    }
+    .old-head { background: rgba(0, 0, 0, 0.06); }
+    [data-theme="light"] .old-head { background: rgba(15, 23, 42, 0.03); }
+    .old-title { font-size: 14px; font-weight: 800; }
+    .old-sub { margin-top: 2px; font-size: 11px; color: var(--text-muted); }
+    .old-search input, .old-body {
+      color: var(--text-primary);
+    }
+    .old-search input {
+      flex: 1; border: 0; outline: 0; background: transparent; font-size: 14px;
+    }
+    .old-tabs { gap: 6px; justify-content: flex-start; background: rgba(0, 0, 0, 0.04); }
+    .old-tab {
+      border: 1px solid transparent;
+      border-radius: 16px;
+      padding: 5px 12px;
+      background: transparent;
+      color: var(--text-secondary);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .old-tab.active {
+      color: var(--accent-blue);
+      border-color: rgba(59, 130, 246, 0.28);
+      background: rgba(59, 130, 246, 0.12);
+    }
+    .old-body { padding: 12px 16px 16px; }
+    .old-card, .old-list {
+      border: 1px solid var(--border-color);
+      border-radius: 14px;
+      background: rgba(0, 0, 0, 0.05);
+      padding: 12px;
+      margin-bottom: 12px;
+    }
+    [data-theme="light"] .old-card,
+    [data-theme="light"] .old-list { background: #fff; }
+    .old-create-h { display: flex; justify-content: space-between; gap: 12px; }
+    .old-sec { font-size: 12px; font-weight: 800; }
+    .old-desc { margin-top: 2px; font-size: 11px; color: var(--text-muted); }
+    .old-pill {
+      padding: 4px 10px;
+      border-radius: 12px;
+      background: rgba(59, 130, 246, 0.12);
+      color: var(--accent-blue);
+      font: 800 13px var(--font-mono);
+      height: fit-content;
+    }
+    .old-controls {
+      display: grid;
+      grid-template-columns: 92px minmax(180px, 1fr) auto;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .old-num, .old-unit {
+      height: 32px;
+      border: 1px solid var(--border-color);
+      border-radius: 10px;
+      background: var(--bg-tertiary);
+    }
+    .old-num {
+      display: flex;
+      align-items: center;
+      padding: 0 10px;
+      color: var(--text-primary);
+      font: 600 13px var(--font-mono);
+    }
+    .old-units { display: flex; gap: 4px; }
+    .old-unit {
+      flex: 1; min-width: 32px; color: var(--text-secondary);
+      font: 800 12px var(--font-mono); background: transparent;
+    }
+    .old-unit.active {
+      color: var(--accent-blue);
+      border-color: rgba(59, 130, 246, 0.45);
+      background: rgba(59, 130, 246, 0.12);
+    }
+    .old-btn {
+      height: 32px; border: 0; border-radius: 10px;
+      padding: 0 14px; background: var(--accent-blue); color: #fff;
+      font-size: 12px; font-weight: 800;
+    }
+    .old-status { margin-top: 8px; font-size: 11px; color: var(--candle-up); }
+    .old-presets { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; font-size: 11px; color: var(--text-muted); }
+    .old-presets span {
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 3px 9px;
+      font-family: var(--font-mono);
+      color: var(--text-secondary);
+    }
+    .old-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      min-height: 42px;
+      padding: 7px 8px;
+      border-radius: 10px;
+    }
+    .old-row.active {
+      border: 1px solid rgba(59, 130, 246, 0.35);
+      background: rgba(59, 130, 246, 0.1);
+    }
+    .old-main { display: flex; gap: 6px; align-items: center; }
+    .old-val { font: 800 13px var(--font-mono); }
+    .old-badge {
+      padding: 2px 6px; border-radius: 8px;
+      background: rgba(100, 116, 139, 0.14);
+      color: var(--text-muted); font-size: 10px; font-weight: 700;
+    }
+    .old-badge.pin { color: #f59e0b; background: rgba(245, 158, 11, 0.12); }
+    .old-badge.cur { color: var(--accent-blue); background: rgba(59, 130, 246, 0.14); }
+    .old-meta { margin-top: 3px; color: var(--text-muted); font-size: 11px; }
+    .old-hint { font-size: 11px; color: var(--text-muted); margin-bottom: 10px; }
+    .new-anchor { position: relative; height: 0; }
+
+    .notes {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 10px;
+      margin-top: 18px;
+    }
+    .note {
+      padding: 12px;
+      border: 1px solid var(--border-color);
+      border-radius: 10px;
+      background: var(--bg-secondary);
+    }
+    .note b { display: block; font-size: 12px; margin-bottom: 4px; }
+    .note span { font-size: 12px; color: var(--text-muted); line-height: 1.45; }
+
+    @media (max-width: 1100px) {
+      .workspace { grid-template-columns: 1fr; }
+      .rail { display: none; }
+      .compare-grid { grid-template-columns: 1fr; }
+      .notes { grid-template-columns: 1fr 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="preview-shell">
+    <header class="preview-bar">
+      <div class="preview-brand">
+        <div class="preview-kicker">CandleScope · design preview</div>
+        <h1>自定义周期选择器</h1>
+        <p>静态高保真预览，未接入真实 IntervalSelector。点芯片、切 Tab、点 + 可试交互。</p>
+      </div>
+      <div class="preview-actions">
+        <div class="seg" id="viewSeg">
+          <button type="button" data-view="workspace" class="active">工作区预览</button>
+          <button type="button" data-view="compare">新旧对照</button>
+        </div>
+        <div class="seg" id="themeSeg">
+          <button type="button" data-theme="dark" class="active">暗色</button>
+          <button type="button" data-theme="light">亮色</button>
+        </div>
+      </div>
+    </header>
+
+    <div class="preview-stage">
+      <div class="app" id="appView">
+        <div class="topbar">
+          <span class="symbol">BTCUSDT</span>
+          <span class="px">67,842.10</span>
+          <span class="chg">+1.24%</span>
+          <span class="meta">Binance · 永续</span>
+          <span class="top-spacer"></span>
+          <button class="ghost" type="button">指标</button>
+          <button class="ghost" type="button">回放</button>
+          <button class="ghost" type="button">设置</button>
+        </div>
+
+        <div class="toolbar-wrap">
+          <nav class="toolbar" id="toolbar"></nav>
+          <div class="ip" id="picker">
+            <div class="ip-search">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                <circle cx="11" cy="11" r="7"></circle>
+                <path d="M20 20L16.5 16.5"></path>
+              </svg>
+              <input id="search" placeholder="搜索或输入 45m" />
+              <button class="ip-x" type="button" id="closePicker" aria-label="关闭">×</button>
+            </div>
+            <div class="ip-tabs">
+              <button class="ip-tab active" type="button" data-tab="common">常用</button>
+              <button class="ip-tab" type="button" data-tab="custom">自定义<em id="customCount">0</em></button>
+              <button class="ip-tab" type="button" data-tab="all">全部</button>
+            </div>
+            <div class="ip-body" id="pickerBody"></div>
+          </div>
+        </div>
+
+        <div class="workspace">
+          <div class="chart-col">
+            <div class="chart-hud">BTCUSDT · <strong id="hudInterval">45m</strong> · O 67810  H 68120  L 67640  C 67842</div>
+            <svg class="chart-svg" id="chart" viewBox="0 0 1000 560" preserveAspectRatio="none"></svg>
+            <div class="toast" id="toast"></div>
+          </div>
+          <aside class="rail">
+            <h3>设计要点</h3>
+            <div class="rail-row"><span>面板宽度</span><b>400px</b></div>
+            <div class="rail-row"><span>现状宽度</span><b>760px</b></div>
+            <div class="rail-row"><span>选择形态</span><b>芯片网格</b></div>
+            <div class="rail-row"><span>创建</span><b>默认收起</b></div>
+            <div class="rail-row"><span>钉 / 删</span><b>悬停出现</b></div>
+            <div class="rail-row"><span>当前选中</span><b id="railCurrent">45m</b></div>
+            <p style="margin:14px 0 0;line-height:1.55">
+              常用 / 全部用来选；自定义 Tab 才常驻创建器。
+              把鼠标放到自定义芯片上可置顶或删除。
+            </p>
+          </aside>
+        </div>
+
+        <div class="status">
+          <span class="dot"></span>
+          <span>实时</span>
+          <span>WS connected</span>
+          <span>预览数据，非真实行情</span>
+        </div>
+      </div>
+
+      <div class="compare" id="compareView">
+        <p class="compare-lead">左边是现在的管理面板密度，右边是建议方案。宽度按实际像素画，方便直接比「块头」。右边这块仍可交互。</p>
+        <div class="compare-grid">
+          <section class="compare-card">
+            <h2>现状</h2>
+            <div class="w">760 × ~560 · 表格行 + 创建卡常驻</div>
+            <div class="old-panel">
+              <div class="old-head">
+                <div>
+                  <div class="old-title">周期选择</div>
+                  <div class="old-sub">选择、添加、置顶或删除自定义 K 线周期</div>
+                </div>
+                <div class="meta">当前 <b style="color:var(--accent-blue);font-family:var(--font-mono)">45m</b> ×</div>
+              </div>
+              <div class="old-search">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" style="color:var(--text-muted)">
+                  <circle cx="11" cy="11" r="7"></circle>
+                  <path d="M20 20L16.5 16.5"></path>
+                </svg>
+                <input value="" placeholder="搜索周期，或输入 45m 后回车创建" readonly />
+                <span style="color:var(--text-muted);font-size:12px">清除</span>
+              </div>
+              <div class="old-tabs">
+                <span class="old-tab">常用</span>
+                <span class="old-tab active">自定义 4</span>
+                <span class="old-tab">全部</span>
+              </div>
+              <div class="old-body">
+                <div class="old-card">
+                  <div class="old-create-h">
+                    <div>
+                      <div class="old-sec">新增自定义周期</div>
+                      <div class="old-desc">不用记格式，输入数字并选择单位即可。</div>
+                    </div>
+                    <div class="old-pill">45m</div>
+                  </div>
+                  <div class="old-controls">
+                    <div class="old-num">45</div>
+                    <div class="old-units">
+                      <span class="old-unit">s</span>
+                      <span class="old-unit active">m</span>
+                      <span class="old-unit">h</span>
+                      <span class="old-unit">d</span>
+                      <span class="old-unit">w</span>
+                      <span class="old-unit">M</span>
+                    </div>
+                    <button class="old-btn" type="button">添加并切换</button>
+                  </div>
+                  <div class="old-status">将添加 45 分钟自定义周期。</div>
+                  <div class="old-presets">快捷：
+                    <span>7m</span><span>45m</span><span>90m</span><span>2h</span><span>3d</span><span>2w</span>
+                  </div>
+                </div>
+                <div class="old-list">
+                  <div class="old-sec">自定义周期</div>
+                  <div class="old-hint">4 个当前可用周期，4 个已显示；Enter 选择，高亮行可用方向键移动。</div>
+                  <div class="old-row">
+                    <div>
+                      <div class="old-main"><span class="old-val">7m</span><span class="old-badge">自定义</span><span class="old-badge pin">置顶</span></div>
+                      <div class="old-meta">7 分钟 · 分钟级 · 420s · 使用 12</div>
+                    </div>
+                    <div class="meta">★ 删除</div>
+                  </div>
+                  <div class="old-row active">
+                    <div>
+                      <div class="old-main"><span class="old-val">45m</span><span class="old-badge">自定义</span><span class="old-badge pin">置顶</span><span class="old-badge cur">当前</span></div>
+                      <div class="old-meta">45 分钟 · 分钟级 · 2700s · 使用 31</div>
+                    </div>
+                    <div class="meta">★ 删除</div>
+                  </div>
+                  <div class="old-row">
+                    <div>
+                      <div class="old-main"><span class="old-val">90m</span><span class="old-badge">自定义</span></div>
+                      <div class="old-meta">90 分钟 · 分钟级 · 5400s · 使用 4</div>
+                    </div>
+                    <div class="meta">☆ 删除</div>
+                  </div>
+                  <div class="old-row">
+                    <div>
+                      <div class="old-main"><span class="old-val">3d</span><span class="old-badge">自定义</span></div>
+                      <div class="old-meta">3 天 · 日线+ · 259200s · 使用 2</div>
+                    </div>
+                    <div class="meta">☆ 删除</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="compare-card">
+            <h2>建议方案</h2>
+            <div class="w">400 × 内容高度 · 芯片网格 · 创建按需展开</div>
+            <div class="new-anchor" id="compareMount"></div>
+          </section>
+        </div>
+
+        <div class="notes">
+          <div class="note"><b>选择</b><span>芯片一击切换，不再扫带徽章的表格行。</span></div>
+          <div class="note"><b>创建</b><span>常用 / 全部默认不占创建卡；点 + 或切到自定义才展开。</span></div>
+          <div class="note"><b>管理</b><span>置顶和删除只在自定义芯片悬停时出现。</span></div>
+          <div class="note"><b>密度</b><span>面板从 760px 收到 400px，不再盖住大半张图。</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const NATIVES = [
+      { value: "1s", group: "seconds", unavailable: true },
+      { value: "5s", group: "seconds", unavailable: true },
+      { value: "15s", group: "seconds" },
+      { value: "1m", group: "minutes" },
+      { value: "3m", group: "minutes" },
+      { value: "5m", group: "minutes" },
+      { value: "15m", group: "minutes" },
+      { value: "30m", group: "minutes" },
+      { value: "1h", group: "hours" },
+      { value: "2h", group: "hours" },
+      { value: "4h", group: "hours" },
+      { value: "6h", group: "hours" },
+      { value: "8h", group: "hours" },
+      { value: "12h", group: "hours" },
+      { value: "1d", group: "days" },
+      { value: "3d", group: "days" },
+      { value: "1w", group: "days" },
+      { value: "1M", group: "days" },
+    ];
+    const COMMON = new Set(["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w"]);
+    const GROUP_LABEL = { seconds: "秒", minutes: "分钟", hours: "小时", days: "日线", mine: "我的" };
+    const GROUP_ORDER = ["seconds", "minutes", "hours", "days", "mine"];
+    const UNITS = ["s", "m", "h", "d", "w", "M"];
+    const UNIT_NAME = { s: "秒", m: "分钟", h: "小时", d: "天", w: "周", M: "月" };
+
+    const nativeSet = new Set(NATIVES.map((item) => item.value));
+    const nativeByValue = Object.fromEntries(NATIVES.map((item) => [item.value, item]));
+
+    const state = {
+      interval: "45m",
+      tab: "common",
+      search: "",
+      amount: "45",
+      unit: "m",
+      composerOpen: false,
+      pickerOpen: true,
+      customs: [
+        { value: "7m", pinned: true },
+        { value: "45m", pinned: true },
+        { value: "90m", pinned: false },
+        { value: "2w", pinned: false },
+      ],
+    };
+
+    function groupOf(value) {
+      if (nativeByValue[value]) return nativeByValue[value].group;
+      if (value.endsWith("s") && !value.endsWith("m")) return "seconds";
+      if (value.endsWith("m")) return "minutes";
+      if (value.endsWith("h")) return "hours";
+      return "days";
+    }
+
+    function formValue() {
+      const n = parseInt(state.amount, 10);
+      if (!Number.isFinite(n) || n <= 0) return "";
+      return n + state.unit;
+    }
+
+    function formStatus() {
+      const value = formValue();
+      if (!value) return { kind: "invalid", text: "请输入大于 0 的数字", ok: false };
+      if (nativeSet.has(value)) return { kind: "native", text: "这是交易所原生周期，可直接选择。", ok: false };
+      if (state.customs.some((item) => item.value === value)) return { kind: "exists", text: "该自定义周期已添加，可直接选择。", ok: false };
+      return { kind: "new", text: "将添加 " + parseInt(state.amount, 10) + " " + UNIT_NAME[state.unit] + " 自定义周期。", ok: true };
+    }
+
+    function matches(value) {
+      const q = state.search.trim().toLowerCase();
+      if (!q) return true;
+      return value.toLowerCase().includes(q);
+    }
+
+    function visibleItems() {
+      let items = [];
+      if (state.tab === "custom") {
+        items = state.customs.map((item) => ({ ...item, custom: true }));
+      } else if (state.tab === "all") {
+        items = [
+          ...NATIVES.map((item) => ({ ...item, custom: false })),
+          ...state.customs.map((item) => ({ ...item, custom: true })),
+        ];
+      } else {
+        items = [
+          ...NATIVES.filter((item) => COMMON.has(item.value)).map((item) => ({ ...item, custom: false })),
+          ...state.customs.map((item) => ({ ...item, custom: true })),
+        ];
+      }
+      const seen = new Set();
+      return items.filter((item) => {
+        if (!matches(item.value) || seen.has(item.value)) return false;
+        seen.add(item.value);
+        return true;
+      });
+    }
+
+    function grouped(items) {
+      if (state.tab === "custom") {
+        return GROUP_ORDER
+          .filter((key) => key !== "mine")
+          .map((key) => ({ key, label: GROUP_LABEL[key], items: items.filter((item) => groupOf(item.value) === key) }))
+          .filter((group) => group.items.length);
+      }
+      const natives = items.filter((item) => !item.custom);
+      const customs = items.filter((item) => item.custom);
+      const groups = GROUP_ORDER
+        .filter((key) => key !== "mine")
+        .map((key) => ({ key, label: GROUP_LABEL[key], items: natives.filter((item) => groupOf(item.value) === key) }))
+        .filter((group) => group.items.length);
+      groups.push({ key: "mine", label: "我的", items: customs });
+      return groups;
+    }
+
+    function toast(text) {
+      const el = document.getElementById("toast");
+      el.textContent = text;
+      el.classList.add("show");
+      clearTimeout(toast._t);
+      toast._t = setTimeout(() => el.classList.remove("show"), 1400);
+    }
+
+    function selectInterval(value, silent) {
+      const native = nativeByValue[value];
+      if (native && native.unavailable) {
+        toast(value + " 当前市场不可用");
+        return;
+      }
+      state.interval = value;
+      render();
+      if (!silent) toast("已切换到 " + value);
+    }
+
+    function createOrSelect(value) {
+      if (!value) return;
+      if (nativeSet.has(value) || state.customs.some((item) => item.value === value)) {
+        selectInterval(value);
+        return;
+      }
+      state.customs.push({ value, pinned: false });
+      state.interval = value;
+      state.search = "";
+      toast(value + " 已添加并切换");
+      render();
+    }
+
+    function renderToolbar() {
+      const groups = [
+        NATIVES.filter((item) => item.group === "minutes"),
+        NATIVES.filter((item) => item.group === "hours"),
+        NATIVES.filter((item) => item.group === "days"),
+      ];
+      const pinned = state.customs.filter((item) => item.pinned).slice(0, 4);
+      const parts = [];
+      groups.forEach((group, index) => {
+        if (index) parts.push('<div class="toolbar-divider"></div>');
+        parts.push('<div class="toolbar-group">' + group.map(chipButton).join("") + "</div>");
+      });
+      if (pinned.length) {
+        parts.push('<div class="toolbar-divider"></div>');
+        parts.push('<div class="toolbar-group">' + pinned.map((item) => chipButton({ ...item, custom: true })).join("") + "</div>");
+      }
+      parts.push('<div class="toolbar-divider"></div>');
+      parts.push(
+        '<button type="button" class="interval-more-btn' + (state.pickerOpen ? " active" : "") + '" id="moreBtn">' +
+        '<span class="interval-more-label">周期</span>' +
+        '<span class="interval-more-value">' + state.interval + "</span>" +
+        '<span class="interval-more-caret">▾</span></button>'
+      );
+      document.getElementById("toolbar").innerHTML = parts.join("");
+    }
+
+    function chipButton(item) {
+      const custom = item.custom ? " custom-interval-btn" : "";
+      const active = item.value === state.interval ? " active" : "";
+      const dot = item.custom ? '<span class="interval-custom-dot"></span>' : "";
+      return '<button type="button" class="interval-btn' + custom + active + '" data-select="' + item.value + '">' +
+        dot + item.value + "</button>";
+    }
+
+    function renderPicker() {
+      const picker = document.getElementById("picker");
+      picker.style.display = state.pickerOpen ? "flex" : "none";
+      document.getElementById("search").value = state.search;
+      document.querySelectorAll(".ip-tab").forEach((tab) => {
+        tab.classList.toggle("active", tab.dataset.tab === state.tab);
+      });
+      document.getElementById("customCount").textContent = String(state.customs.length);
+
+      const items = visibleItems();
+      const groups = grouped(items);
+      const showComposer = state.composerOpen || state.tab === "custom" || Boolean(state.search && formValue() && !items.some((item) => item.value === formValue()));
+      const status = formStatus();
+      const manage = state.tab === "custom";
+
+      let html = "";
+      if (manage) {
+        html += '<div class="ip-manage-head"><span>悬停芯片可置顶或删除</span>' +
+          (state.customs.length ? '<button class="ip-link" type="button" id="clearAll">清空</button>' : "") +
+          "</div>";
+      }
+      if (!groups.length) {
+        html += '<div class="ip-empty">没有匹配的周期。可以用下方创建。</div>';
+      } else {
+        groups.forEach((group) => {
+          html += '<div class="ip-group"><div class="ip-label">' + group.label + "</div><div class=\"ip-chips\">";
+          group.items.forEach((item) => {
+            const cls = [
+              "ip-chip",
+              item.value === state.interval ? "active" : "",
+              item.custom ? "custom" : "",
+              item.unavailable ? "unavailable" : "",
+              manage && item.custom ? "manage" : "",
+            ].filter(Boolean).join(" ");
+            const title = item.unavailable ? "当前市场不可用" : item.custom ? "自定义周期 " + item.value : item.value;
+            html += '<button type="button" class="' + cls + '" data-select="' + item.value + '" title="' + title + '">';
+            if (item.custom) html += '<span class="dot"></span>';
+            html += item.value;
+            if (item.pinned) html += '<span class="ip-star">★</span>';
+            if (manage && item.custom) {
+              html += '<span class="ip-chip-actions">' +
+                '<button class="ip-mini" type="button" data-pin="' + item.value + '" title="置顶">☆</button>' +
+                '<button class="ip-mini danger" type="button" data-del="' + item.value + '" title="删除">×</button>' +
+                "</span>";
+            }
+            html += "</button>";
+          });
+          if (group.key === "mine" || (state.tab === "custom" && group === groups[groups.length - 1])) {
+            html += '<button class="ip-add" type="button" data-add="1" title="新增自定义周期">+</button>';
+          }
+          html += "</div></div>";
+        });
+      }
+
+      html += '<div class="ip-composer' + (showComposer ? " open" : "") + '">' +
+        '<div class="ip-split">' +
+        '<input id="amount" type="number" min="1" value="' + state.amount + '" />' +
+        '<div class="ip-units">' + UNITS.map((unit) =>
+          '<button type="button" class="' + (state.unit === unit ? "active" : "") + '" data-unit="' + unit + '">' + unit + "</button>"
+        ).join("") + "</div>" +
+        '<button class="ip-go" type="button" id="createBtn"' + (status.kind === "invalid" ? " disabled" : "") + ">" +
+        (status.ok ? "添加并切换" : "选择") + "</button></div>" +
+        '<div class="ip-status ' + (status.ok ? "ok" : status.kind) + '">' + status.text + "</div></div>";
+
+      document.getElementById("pickerBody").innerHTML = html;
+      document.getElementById("hudInterval").textContent = state.interval;
+      document.getElementById("railCurrent").textContent = state.interval;
+    }
+
+    function render() {
+      renderToolbar();
+      renderPicker();
+    }
+
+    function onClick(event) {
+      const pin = event.target.closest("[data-pin]");
+      if (pin) {
+        event.preventDefault();
+        event.stopPropagation();
+        const record = state.customs.find((item) => item.value === pin.dataset.pin);
+        if (record) record.pinned = !record.pinned;
+        render();
+        return;
+      }
+      const del = event.target.closest("[data-del]");
+      if (del) {
+        event.preventDefault();
+        event.stopPropagation();
+        state.customs = state.customs.filter((item) => item.value !== del.dataset.del);
+        if (state.interval === del.dataset.del) state.interval = "1h";
+        toast(del.dataset.del + " 已删除");
+        render();
+        return;
+      }
+      const select = event.target.closest("[data-select]");
+      if (select) {
+        selectInterval(select.dataset.select);
+        return;
+      }
+      if (event.target.closest("[data-add]")) {
+        state.composerOpen = true;
+        state.tab = "custom";
+        render();
+        document.getElementById("amount")?.focus();
+        return;
+      }
+      const unit = event.target.closest("[data-unit]");
+      if (unit) {
+        state.unit = unit.dataset.unit;
+        render();
+        return;
+      }
+      if (event.target.id === "createBtn") {
+        const status = formStatus();
+        if (status.kind === "invalid") return;
+        createOrSelect(formValue());
+        return;
+      }
+      if (event.target.id === "clearAll") {
+        if (confirm("清空所有自定义周期？")) {
+          const currentIsCustom = state.customs.some((item) => item.value === state.interval);
+          state.customs = [];
+          if (currentIsCustom) state.interval = "1h";
+          toast("已清空自定义周期");
+          render();
+        }
+        return;
+      }
+      if (event.target.closest("#moreBtn")) {
+        state.pickerOpen = !state.pickerOpen;
+        render();
+        return;
+      }
+      if (event.target.id === "closePicker") {
+        state.pickerOpen = false;
+        render();
+      }
+    }
+
+    document.body.addEventListener("click", onClick);
+    document.body.addEventListener("input", (event) => {
+      if (event.target.id === "search") {
+        state.search = event.target.value;
+        const normalized = event.target.value.trim();
+        const match = normalized.match(/^(\d+)([smhdwM])$/);
+        if (match) {
+          state.amount = match[1];
+          state.unit = match[2];
+        }
+        render();
+        const search = document.getElementById("search");
+        search.focus();
+        search.setSelectionRange(search.value.length, search.value.length);
+        return;
+      }
+      if (event.target.id === "amount") {
+        state.amount = event.target.value;
+        render();
+        const amount = document.getElementById("amount");
+        amount.focus();
+      }
+    });
+    document.body.addEventListener("keydown", (event) => {
+      if (event.target.id === "search" && event.key === "Enter") {
+        const value = event.target.value.trim();
+        if (value) createOrSelect(value);
+      }
+      if (event.target.id === "amount" && event.key === "Enter") {
+        createOrSelect(formValue());
+      }
+      if (event.key === "Escape") {
+        state.pickerOpen = false;
+        render();
+      }
+    });
+
+    document.getElementById("viewSeg").addEventListener("click", (event) => {
+      const btn = event.target.closest("button");
+      if (!btn) return;
+      document.querySelectorAll("#viewSeg button").forEach((el) => el.classList.toggle("active", el === btn));
+      const compare = btn.dataset.view === "compare";
+      document.getElementById("appView").classList.toggle("compare-hidden", compare);
+      document.getElementById("compareView").classList.toggle("on", compare);
+      const picker = document.getElementById("picker");
+      if (compare) {
+        state.pickerOpen = true;
+        document.getElementById("compareMount").appendChild(picker);
+        picker.style.position = "relative";
+        picker.style.left = "0";
+        picker.style.top = "0";
+      } else {
+        document.querySelector(".toolbar-wrap").appendChild(picker);
+        picker.style.position = "absolute";
+        picker.style.left = "16px";
+        picker.style.top = "calc(100% + 8px)";
+      }
+      render();
+    });
+
+    document.getElementById("themeSeg").addEventListener("click", (event) => {
+      const btn = event.target.closest("button");
+      if (!btn) return;
+      document.querySelectorAll("#themeSeg button").forEach((el) => el.classList.toggle("active", el === btn));
+      document.documentElement.dataset.theme = btn.dataset.theme;
+      drawChart();
+    });
+
+    function drawChart() {
+      const svg = document.getElementById("chart");
+      const dark = document.documentElement.dataset.theme !== "light";
+      const up = "#22c55e";
+      const down = "#ef4444";
+      const grid = dark ? "rgba(148,163,184,0.08)" : "rgba(15,23,42,0.08)";
+      let d = "";
+      for (let i = 1; i <= 8; i++) d += '<line x1="0" x2="1000" y1="' + (i * 70) + '" y2="' + (i * 70) + '" stroke="' + grid + '" />';
+      for (let i = 1; i <= 16; i++) d += '<line y1="0" y2="560" x1="' + (i * 62.5) + '" x2="' + (i * 62.5) + '" stroke="' + grid + '" />';
+      let price = 320;
+      for (let i = 0; i < 48; i++) {
+        const open = price;
+        const close = price + (Math.sin(i / 3) * 18 + ((i * 17) % 13) - 6);
+        const high = Math.min(open, close) - 8 - (i % 5);
+        const low = Math.max(open, close) + 10 + (i % 4);
+        const x = 18 + i * 20;
+        const color = close <= open ? up : down;
+        d += '<line x1="' + x + '" x2="' + x + '" y1="' + high + '" y2="' + low + '" stroke="' + color + '" stroke-width="1" />';
+        d += '<rect x="' + (x - 5) + '" y="' + Math.min(open, close) + '" width="10" height="' + Math.max(6, Math.abs(close - open)) + '" fill="' + color + '" />';
+        price = close;
+      }
+      svg.innerHTML = d;
+    }
+
+    drawChart();
+    render();
+    if (location.hash === "#compare") {
+      document.querySelector('#viewSeg [data-view="compare"]').click();
+    }
+  </script>
+</body>
+</html>

@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { getLocale, t, type LocaleId } from "../i18n/index.js";
 import { useLocale } from "../i18n/useLocale.js";
 import {
@@ -6,12 +6,11 @@ import {
   canonicalizeIntervalValue,
   formatIntervalDescription,
   formatSecondsCompact,
-  getIntervalGroupLabel,
   groupIntervalsByDuration,
-  INTERVAL_UNIT_MESSAGE_KEYS,
   INTERVAL_UNITS,
   intervalSemanticSignature,
   intervalsSemanticallyEquivalent,
+  parseIntervalParts,
   parseIntervalSeconds,
 } from "../utils/intervals";
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
@@ -42,17 +41,24 @@ interface IntervalItem extends AvailableInterval {
   record?: CustomIntervalRecord;
 }
 
+interface PickerGroup {
+  key: string;
+  label: string;
+  items: IntervalItem[];
+  showAdd: boolean;
+}
+
 interface InlineMessage {
   type: "success" | "error";
   text: string;
 }
 
-const QUICK_PRESETS = ["7m", "45m", "90m", "2h", "3d", "2w"];
 const TAB_OPTIONS: Array<{ key: IntervalTab; labelKey: "interval.tab.common" | "interval.tab.custom" | "interval.tab.all" }> = [
   { key: "common", labelKey: "interval.tab.common" },
   { key: "custom", labelKey: "interval.tab.custom" },
   { key: "all", labelKey: "interval.tab.all" },
 ];
+const COMMON_NATIVE_VALUES = ["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w"];
 const MAX_TOOLBAR_CUSTOMS = 4;
 
 function clsx(...items: Array<string | false | null | undefined>): string {
@@ -99,6 +105,16 @@ function buildItemFromRecord(record: CustomIntervalRecord): IntervalItem {
     isCustom: true,
     record,
   };
+}
+
+function dedupeItems(items: IntervalItem[]): IntervalItem[] {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    const signature = intervalSemanticSignature(item.value);
+    if (!signature || seen.has(signature)) return false;
+    seen.add(signature);
+    return true;
+  });
 }
 
 function matchesSearch(item: IntervalItem, query: string): boolean {
@@ -154,6 +170,28 @@ function createStatusForValue(
   return { ok: true, kind: "new", text: t("interval.willAdd", { desc: formatIntervalDescription(normalized) }, locale) };
 }
 
+function chipTitle(
+  item: IntervalItem,
+  record: CustomIntervalRecord | undefined,
+  available: boolean,
+  unavailableText: string,
+  locale: LocaleId,
+): string {
+  const seconds = item.seconds || parseIntervalSeconds(item.value) || 0;
+  const parts = [
+    item.isCustom
+      ? t("interval.customNamed", { desc: formatIntervalDescription(item.value) }, locale)
+      : formatIntervalDescription(item.value),
+    formatSecondsCompact(seconds),
+  ];
+  if (record?.pinned) parts.push(t("interval.badge.pinned", {}, locale));
+  if (record && record.usageCount > 0) {
+    parts.push(t("interval.used", { count: record.usageCount }, locale));
+  }
+  if (!available) parts.push(unavailableText);
+  return parts.filter(Boolean).join(" · ");
+}
+
 export interface IntervalSelectorProps {
   interval: IntervalString;
   capabilityReady: boolean;
@@ -172,6 +210,7 @@ export interface IntervalSelectorProps {
   readOnlyReason?: string | null;
   intervalAvailability?: (interval: IntervalString) => boolean;
   unavailableIntervalMessage?: (interval: IntervalString) => string;
+  defaultOpen?: boolean;
 }
 
 function IntervalSelector({
@@ -192,18 +231,24 @@ function IntervalSelector({
   readOnlyReason = null,
   intervalAvailability,
   unavailableIntervalMessage: unavailableIntervalMessageOverride,
+  defaultOpen = false,
 }: IntervalSelectorProps) {
   const locale = useLocale();
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(defaultOpen);
   const [activeTab, setActiveTab] = useState<IntervalTab>("common");
   const [search, setSearch] = useState("");
   const [amount, setAmount] = useState("45");
   const [unit, setUnit] = useState<IntervalUnit>("m");
+  const [composerOpen, setComposerOpen] = useState(false);
   const [inlineMessage, setInlineMessage] = useState<InlineMessage | null>(null);
   const [highlightIndex, setHighlightIndex] = useState(0);
 
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const toolbarRef = useRef<HTMLElement | null>(null);
+  const moreBtnRef = useRef<HTMLButtonElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const amountInputRef = useRef<HTMLInputElement | null>(null);
 
   const nativeValueSet = useMemo(
     () => new Set(nativeIntervals.map((item) => intervalSemanticSignature(item.value))),
@@ -320,41 +365,90 @@ function IntervalSelector({
       return sortedCustomRecords.map(buildItemFromRecord).filter((item) => matchesSearch(item, search));
     }
     if (activeTab === "all") {
-      return allItems.filter((item) => matchesSearch(item, search));
+      return dedupeItems([
+        ...allItems,
+        ...sortedCustomRecords.map(buildItemFromRecord),
+      ]).filter((item) => matchesSearch(item, search));
     }
-    const common = [
-      ...toolbarCustomRecords.map(buildItemFromRecord),
+    return dedupeItems([
       ...nativeIntervals
-        .filter((item) => ["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w"].includes(item.value))
+        .filter((item) => COMMON_NATIVE_VALUES.includes(item.value))
         .map((item) => ({ ...item, isCustom: false })),
-    ];
-    const seen = new Set();
-    return common
-      .filter((item) => {
-        const signature = intervalSemanticSignature(item.value);
-        if (seen.has(signature)) return false;
-        seen.add(signature);
-        return true;
-      })
-      .filter((item) => matchesSearch(item, search))
-      .sort((a, b) => a.seconds - b.seconds);
-  }, [activeTab, allItems, nativeIntervals, search, sortedCustomRecords, toolbarCustomRecords]);
+      ...sortedCustomRecords.map(buildItemFromRecord),
+    ]).filter((item) => matchesSearch(item, search));
+  }, [activeTab, allItems, nativeIntervals, search, sortedCustomRecords]);
 
-  const visibleGroups = useMemo(
-    () => groupIntervalsByDuration(visibleItems),
-    [visibleItems],
-  );
+  const pickerGroups = useMemo((): PickerGroup[] => {
+    if (activeTab === "custom") {
+      const groups = groupIntervalsByDuration(visibleItems).map((group, index, list) => ({
+        key: group.label,
+        label: group.label,
+        items: group.items,
+        showAdd: index === list.length - 1,
+      }));
+      if (groups.length === 0) {
+        return [{ key: "mine", label: t("interval.group.mine", {}, locale), items: [], showAdd: true }];
+      }
+      return groups;
+    }
+    const natives = visibleItems.filter((item) => !item.isCustom);
+    const customs = visibleItems.filter((item) => item.isCustom);
+    const groups = groupIntervalsByDuration(natives).map((group) => ({
+      key: group.label,
+      label: group.label,
+      items: group.items,
+      showAdd: false,
+    }));
+    if (customs.length > 0 || !search) {
+      groups.push({
+        key: "mine",
+        label: t("interval.group.mine", {}, locale),
+        items: customs,
+        showAdd: true,
+      });
+    }
+    return groups;
+  }, [activeTab, locale, search, visibleItems]);
+
   const visibleItemsInRenderOrder = useMemo(
-    () => visibleGroups.flatMap((group) => group.items),
-    [visibleGroups],
+    () => pickerGroups.flatMap((group) => group.items),
+    [pickerGroups],
   );
   const clampedHighlightIndex = visibleItemsInRenderOrder.length > 0
     ? Math.min(highlightIndex, visibleItemsInRenderOrder.length - 1)
     : 0;
-  const visibleAvailableCount = useMemo(
-    () => visibleItemsInRenderOrder.filter((item) => isIntervalAvailable(item.value)).length,
-    [isIntervalAvailable, visibleItemsInRenderOrder],
-  );
+  const showComposer = composerOpen
+    || activeTab === "custom"
+    || (Boolean(normalizedSearch) && searchCreateStatus.ok);
+
+  useLayoutEffect(() => {
+    if (!open) return undefined;
+    const update = () => {
+      const wrap = rootRef.current;
+      const button = moreBtnRef.current;
+      const panel = panelRef.current;
+      if (!wrap || !button || !panel) return;
+      const wrapRect = wrap.getBoundingClientRect();
+      const buttonRect = button.getBoundingClientRect();
+      const panelWidth = panel.offsetWidth || Math.min(400, window.innerWidth - 32);
+      const pad = 8;
+      const minLeft = pad - wrapRect.left;
+      const maxLeft = window.innerWidth - pad - panelWidth - wrapRect.left;
+      let left = buttonRect.left - wrapRect.left;
+      left = maxLeft >= minLeft
+        ? Math.min(Math.max(left, minLeft), maxLeft)
+        : Math.max(0, left);
+      panel.style.left = `${Math.round(left)}px`;
+    };
+    update();
+    window.addEventListener("resize", update);
+    const toolbar = toolbarRef.current;
+    toolbar?.addEventListener("scroll", update, { passive: true });
+    return () => {
+      window.removeEventListener("resize", update);
+      toolbar?.removeEventListener("scroll", update);
+    };
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -367,10 +461,17 @@ function IntervalSelector({
     const handlePointerDown = (event: MouseEvent) => {
       if (event.target instanceof Node && rootRef.current?.contains(event.target)) return;
       setOpen(false);
+      setComposerOpen(false);
     };
     document.addEventListener("mousedown", handlePointerDown);
     return () => document.removeEventListener("mousedown", handlePointerDown);
   }, [open]);
+
+  const closePanel = useCallback(() => {
+    setOpen(false);
+    setComposerOpen(false);
+    setSearch("");
+  }, []);
 
   const selectInterval = useCallback((value: IntervalString) => {
     const normalized = canonicalizeIntervalValue(value) || value;
@@ -380,10 +481,9 @@ function IntervalSelector({
       return;
     }
     onSelectInterval(normalized);
-    setOpen(false);
-    setSearch("");
+    closePanel();
     setInlineMessage(null);
-  }, [isIntervalAvailable, onSelectInterval, unavailableMessage]);
+  }, [closePanel, isIntervalAvailable, onSelectInterval, unavailableMessage]);
 
   const createOrSelectInterval = useCallback((value: IntervalString) => {
     const normalized = canonicalizeIntervalValue(value);
@@ -413,11 +513,11 @@ function IntervalSelector({
       return;
     }
     setInlineMessage({ type: "success", text: t("interval.addedAndSwitched", { value: normalized }, locale) });
-    setOpen(false);
-    setSearch("");
+    closePanel();
   }, [
     capabilityLoading,
     capabilityReady,
+    closePanel,
     customValueSet,
     intervalAvailability,
     locale,
@@ -431,29 +531,44 @@ function IntervalSelector({
   const handleSearchKeyDown = useCallback((event: ReactKeyboardEvent<HTMLInputElement>) => {
     if (event.key === "Escape") {
       event.preventDefault();
-      setOpen(false);
+      closePanel();
       return;
     }
-    if (event.key === "ArrowDown") {
+    const lastIndex = Math.max(visibleItemsInRenderOrder.length - 1, 0);
+    if (event.key === "ArrowDown" || event.key === "ArrowRight") {
       event.preventDefault();
-      setHighlightIndex((prev) => Math.min(prev + 1, Math.max(visibleItemsInRenderOrder.length - 1, 0)));
+      setHighlightIndex((prev) => Math.min(prev + 1, lastIndex));
       return;
     }
-    if (event.key === "ArrowUp") {
+    if (event.key === "ArrowUp" || event.key === "ArrowLeft") {
       event.preventDefault();
       setHighlightIndex((prev) => Math.max(prev - 1, 0));
       return;
     }
     if (event.key === "Enter") {
       event.preventDefault();
-      const highlighted = visibleItemsInRenderOrder[clampedHighlightIndex];
-      if (highlighted) {
-        selectInterval(highlighted.value);
+      if (normalizedSearch) {
+        const match = visibleItemsInRenderOrder.find((item) => (
+          intervalsSemanticallyEquivalent(item.value, normalizedSearch)
+        ));
+        if (match) {
+          selectInterval(match.value);
+          return;
+        }
+        createOrSelectInterval(normalizedSearch);
         return;
       }
-      if (normalizedSearch) createOrSelectInterval(normalizedSearch);
+      const highlighted = visibleItemsInRenderOrder[clampedHighlightIndex];
+      if (highlighted) selectInterval(highlighted.value);
     }
-  }, [clampedHighlightIndex, createOrSelectInterval, normalizedSearch, selectInterval, visibleItemsInRenderOrder]);
+  }, [
+    clampedHighlightIndex,
+    closePanel,
+    createOrSelectInterval,
+    normalizedSearch,
+    selectInterval,
+    visibleItemsInRenderOrder,
+  ]);
 
   const handleRemove = useCallback((value: IntervalString) => {
     onRemoveCustomInterval(value);
@@ -461,9 +576,15 @@ function IntervalSelector({
 
   const handleClear = useCallback(() => {
     if (customIntervalRecords.length === 0) return;
-    if (!window.confirm(t("interval.confirmClear"))) return;
+    if (!window.confirm(t("interval.confirmClear", {}, locale))) return;
     onClearCustomIntervals();
-  }, [customIntervalRecords.length, onClearCustomIntervals]);
+  }, [customIntervalRecords.length, locale, onClearCustomIntervals]);
+
+  const openComposer = useCallback(() => {
+    setComposerOpen(true);
+    setActiveTab("custom");
+    setTimeout(() => amountInputRef.current?.focus(), 30);
+  }, []);
 
   const renderIntervalButton = (item: IntervalItem, extraClass = ""): ReactNode => {
     const available = isIntervalAvailable(item.value);
@@ -475,7 +596,7 @@ function IntervalSelector({
         onClick={() => selectInterval(item.value)}
         title={readOnlyReason ?? (!available
           ? unavailableMessage(item.value)
-          : item.isCustom ? t("interval.customNamed", { desc: formatIntervalDescription(item.value) }) : item.value)}
+          : item.isCustom ? t("interval.customNamed", { desc: formatIntervalDescription(item.value) }, locale) : item.value)}
         type="button"
         disabled={!available || readOnlyReason !== null}
         aria-disabled={!available || readOnlyReason !== null}
@@ -486,57 +607,56 @@ function IntervalSelector({
     );
   };
 
-  const renderIntervalRow = (item: IntervalItem, index: number): ReactNode => {
-    const seconds = item.seconds || parseIntervalSeconds(item.value) || 0;
+  const renderPickerChip = (item: IntervalItem, index: number, manage: boolean): ReactNode => {
     const record = item.record || customIntervalRecords.find((custom) => (
       intervalsSemanticallyEquivalent(custom.value, item.value)
     ));
     const highlighted = index === clampedHighlightIndex;
     const available = isIntervalAvailable(item.value);
+    const active = intervalsSemanticallyEquivalent(interval, item.value);
     return (
       <div
         key={item.value}
-        className={clsx("interval-panel-row", intervalsSemanticallyEquivalent(interval, item.value) && "active", highlighted && "highlighted", !available && "unavailable")}
+        className={clsx("interval-chip-wrap", manage && item.isCustom && "manage")}
       >
         <button
           type="button"
-          className="interval-panel-select"
+          data-interval-chip={item.value}
+          className={clsx(
+            "interval-chip",
+            active && "active",
+            item.isCustom && "custom",
+            !available && "unavailable",
+            highlighted && "highlighted",
+          )}
           onClick={() => selectInterval(item.value)}
           disabled={!available}
           aria-disabled={!available}
-          title={!available ? unavailableMessage(item.value) : undefined}
+          title={chipTitle(item, record, available, unavailableMessage(item.value), locale)}
         >
-          <span className="interval-panel-main">
-            <span className="interval-panel-value">{item.value}</span>
-            {item.isCustom && <span className="interval-panel-badge">{t("interval.badge.custom")}</span>}
-            {record?.pinned && <span className="interval-panel-badge pinned">{t("interval.badge.pinned")}</span>}
-            {intervalsSemanticallyEquivalent(interval, item.value) && <span className="interval-panel-badge active">{t("interval.badge.current")}</span>}
-            {!available && <span className="interval-panel-badge unavailable">{t("interval.badge.unavailable")}</span>}
-          </span>
-          <span className="interval-panel-meta">
-            <span>{formatIntervalDescription(item.value)}</span>
-            <span>{getIntervalGroupLabel(seconds)}</span>
-            <span>{formatSecondsCompact(seconds)}</span>
-            {record && record.usageCount > 0 && <span>{t("interval.used", { count: record.usageCount })}</span>}
-          </span>
+          {item.isCustom && <span className="interval-custom-dot" />}
+          {item.label || item.value}
+          {record?.pinned && <span className="interval-chip-star" aria-hidden="true">★</span>}
         </button>
-        {item.isCustom && (
-          <div className="interval-row-actions">
+        {manage && item.isCustom && (
+          <div className="interval-chip-actions">
             <button
               type="button"
-              className={clsx("interval-row-action", record?.pinned && "active")}
+              className={clsx("interval-chip-action", record?.pinned && "active")}
               onClick={() => onTogglePinCustomInterval(item.value)}
-              title={record?.pinned ? t("interval.unpin") : t("interval.pin")}
+              title={record?.pinned ? t("interval.unpin", {}, locale) : t("interval.pin", {}, locale)}
+              aria-label={record?.pinned ? t("interval.unpin", {}, locale) : t("interval.pin", {}, locale)}
             >
               {record?.pinned ? "★" : "☆"}
             </button>
             <button
               type="button"
-              className="interval-row-action danger"
+              className="interval-chip-action danger"
               onClick={() => handleRemove(item.value)}
-              title={t("interval.deleteNamed", { value: item.value })}
+              title={t("interval.deleteNamed", { value: item.value }, locale)}
+              aria-label={t("interval.deleteNamed", { value: item.value }, locale)}
             >
-              {t("interval.delete")}
+              ×
             </button>
           </div>
         )}
@@ -551,7 +671,7 @@ function IntervalSelector({
       data-readonly={readOnlyReason === null ? "false" : "true"}
       title={readOnlyReason ?? undefined}
     >
-      <nav className="toolbar" id="toolbar" aria-label={t("interval.toolbar")}>
+      <nav ref={toolbarRef} className="toolbar" id="toolbar" aria-label={t("interval.toolbar", {}, locale)}>
         {nativeGroups.map((group, gi) => (
           <div key={group.label} className="toolbar-group-wrap">
             {gi > 0 && <div className="toolbar-divider" />}
@@ -572,46 +692,61 @@ function IntervalSelector({
 
         <div className="toolbar-divider" />
         <button
+          ref={moreBtnRef}
           type="button"
           className={clsx("interval-more-btn", open && "active")}
-          onClick={() => setOpen((prev) => !prev)}
+          onClick={() => {
+            if (open) {
+              closePanel();
+              return;
+            }
+            setOpen(true);
+          }}
           disabled={readOnlyReason !== null}
           aria-expanded={open}
           aria-haspopup="dialog"
-          title={readOnlyReason ?? t("interval.openPicker")}
+          title={readOnlyReason ?? t("interval.openPicker", {}, locale)}
         >
-          <span className="interval-more-label">{t("interval.label")}</span>
+          <span className="interval-more-label">{t("interval.label", {}, locale)}</span>
           <span className="interval-more-value">{interval}</span>
           <span className="interval-more-caret">▾</span>
         </button>
       </nav>
 
       {open && (
-        <div className="interval-panel" role="dialog" aria-label={t("interval.picker")}>
-          <div className="interval-panel-header">
-            <div>
-              <div className="interval-panel-title">{t("interval.title")}</div>
-              <div className="interval-panel-subtitle">{t("interval.subtitle")}</div>
-            </div>
-            <div className="interval-panel-current">
-              {t("interval.current")} <strong>{interval}</strong>
-              <button type="button" className="interval-panel-close" onClick={() => setOpen(false)} aria-label={t("interval.closePanel")}>×</button>
-            </div>
-          </div>
-
+        <div ref={panelRef} className="interval-panel" role="dialog" aria-label={t("interval.picker", {}, locale)}>
           <div className="interval-panel-search-row">
-            <span className="interval-search-icon">⌕</span>
+            <span className="interval-search-icon" aria-hidden="true">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <circle cx="11" cy="11" r="7" />
+                <path d="M20 20L16.5 16.5" />
+              </svg>
+            </span>
             <input
               ref={searchInputRef}
               value={search}
-              onChange={(event) => { setSearch(event.target.value); setHighlightIndex(0); }}
+              onChange={(event) => {
+                const next = event.target.value;
+                setSearch(next);
+                setHighlightIndex(0);
+                const parts = parseIntervalParts(next);
+                if (parts) {
+                  setAmount(String(parts.amount));
+                  setUnit(parts.unit);
+                }
+              }}
               onKeyDown={handleSearchKeyDown}
               className="interval-panel-search"
-              placeholder={t("interval.searchPlaceholder")}
+              placeholder={t("interval.searchPlaceholder", {}, locale)}
             />
-            {search && (
-              <button type="button" className="interval-search-clear" onClick={() => setSearch("")}>{t("interval.clear")}</button>
-            )}
+            <button
+              type="button"
+              className="interval-panel-close"
+              onClick={closePanel}
+              aria-label={t("interval.closePanel", {}, locale)}
+            >
+              ×
+            </button>
           </div>
 
           <div className="interval-panel-tabs">
@@ -619,99 +754,17 @@ function IntervalSelector({
               <button
                 key={tab.key}
                 type="button"
+                data-interval-tab={tab.key}
                 className={clsx("interval-panel-tab", activeTab === tab.key && "active")}
                 onClick={() => { setActiveTab(tab.key); setHighlightIndex(0); }}
               >
-                {t(tab.labelKey)}
+                {t(tab.labelKey, {}, locale)}
                 {tab.key === "custom" && <span>{effectiveCustomRecords.length}</span>}
               </button>
             ))}
           </div>
 
           <div className="interval-panel-body">
-            <section className="interval-create-card">
-              <div className="interval-create-header">
-                <div>
-                  <div className="interval-section-title">{t("interval.createTitle")}</div>
-                  <div className="interval-section-desc">{t("interval.createDesc")}</div>
-                </div>
-                <div className="interval-preview-pill">{formValue || "--"}</div>
-              </div>
-
-              <div className="interval-create-controls">
-                <input
-                  type="number"
-                  min="1"
-                  step="1"
-                  value={amount}
-                  onChange={(event) => setAmount(event.target.value)}
-                  className="interval-number-input"
-                  aria-label={t("interval.numberAria")}
-                />
-                <div className="interval-unit-tabs" aria-label={t("interval.unitAria")}>
-                  {INTERVAL_UNITS.map((item) => (
-                    <button
-                      key={item.value}
-                      type="button"
-                      className={clsx("interval-unit-tab", unit === item.value && "active")}
-                      onClick={() => setUnit(item.value)}
-                      title={t(item.labelKey)}
-                    >
-                      {item.shortLabel}
-                    </button>
-                  ))}
-                </div>
-                <button
-                  type="button"
-                  className="interval-create-btn"
-                  onClick={() => createOrSelectInterval(formValue)}
-                  disabled={!formStatus.ok && formStatus.kind === "invalid"}
-                >
-                  {formStatus.kind === "native" || formStatus.kind === "exists" ? t("interval.select") : t("interval.addAndSwitch")}
-                </button>
-              </div>
-
-              <div className={clsx("interval-create-status", formStatus.ok ? "ok" : formStatus.kind)}>
-                {formStatus.text}
-              </div>
-
-              <div className="interval-presets">
-                <span>{t("interval.quick")}</span>
-                {QUICK_PRESETS.map((preset) => {
-                  const status = createStatusForValue(
-                    preset,
-                    nativeValueSet,
-                    customValueSet,
-                    nativeValues,
-                    capabilityReady,
-                    capabilityLoading,
-                    intervalAvailability,
-                    unavailableIntervalMessageOverride,
-                    locale,
-                  );
-                  const disabled = status.kind === "invalid";
-                  return (
-                    <button
-                      key={preset}
-                      type="button"
-                      onClick={() => createOrSelectInterval(preset)}
-                      disabled={disabled}
-                      title={disabled ? status.text : undefined}
-                    >
-                      {preset}
-                    </button>
-                  );
-                })}
-              </div>
-            </section>
-
-            {search && normalizedSearch && searchCreateStatus.ok && (
-              <button type="button" className="interval-create-suggestion" onClick={() => createOrSelectInterval(normalizedSearch)}>
-                {t("interval.createAndSwitch")} <strong>{normalizedSearch}</strong>
-                <span>{formatIntervalDescription(normalizedSearch)}</span>
-              </button>
-            )}
-
             {(inlineMessage || intervalNotice) && (
               <div className={clsx("interval-panel-message", (inlineMessage || intervalNotice)?.type)}>
                 <span>{(inlineMessage || intervalNotice)?.text}</span>
@@ -721,41 +774,99 @@ function IntervalSelector({
               </div>
             )}
 
-            <section className="interval-list-section">
-              <div className="interval-list-header">
-                <div>
-                  <div className="interval-section-title">
-                    {activeTab === "custom" ? t("interval.customTitle") : activeTab === "all" ? t("interval.allTitle") : t("interval.commonTitle")}
-                  </div>
-                  <div className="interval-section-desc">
-                    {t("interval.listHint", { available: visibleAvailableCount, shown: visibleItems.length })}
-                  </div>
-                </div>
-                {activeTab === "custom" && effectiveCustomRecords.length > 0 && (
-                  <button type="button" className="interval-clear-all" onClick={handleClear}>{t("interval.clearAll")}</button>
+            {activeTab === "custom" && (
+              <div className="interval-manage-head">
+                <span>{t("interval.manageHint", {}, locale)}</span>
+                {effectiveCustomRecords.length > 0 && (
+                  <button type="button" className="interval-clear-all" onClick={handleClear}>
+                    {t("interval.clearAll", {}, locale)}
+                  </button>
                 )}
               </div>
+            )}
 
-              {visibleGroups.length === 0 ? (
-                <div className="interval-empty-state">{t("interval.empty")}</div>
-              ) : (
-                <div className="interval-groups">
-                  {visibleGroups.map((group) => {
-                    let baseIndex = 0;
-                    for (const previous of visibleGroups) {
-                      if (previous === group) break;
-                      baseIndex += previous.items.length;
-                    }
-                    return (
-                      <div key={group.label} className="interval-panel-group">
-                        <div className="interval-group-label">{getIntervalGroupLabel(group.items[0]?.seconds ?? 0)}</div>
-                        {group.items.map((item, index) => renderIntervalRow(item, baseIndex + index))}
+            {pickerGroups.every((group) => group.items.length === 0) ? (
+              <div className="interval-empty-state">{t("interval.empty", {}, locale)}</div>
+            ) : (
+              <div className="interval-groups">
+                {pickerGroups.map((group) => {
+                  let baseIndex = 0;
+                  for (const previous of pickerGroups) {
+                    if (previous === group) break;
+                    baseIndex += previous.items.length;
+                  }
+                  if (group.items.length === 0 && !group.showAdd) return null;
+                  return (
+                    <div key={group.key} className="interval-picker-group">
+                      <div className="interval-group-label">{group.label}</div>
+                      <div className="interval-chips">
+                        {group.items.map((item, index) => renderPickerChip(item, baseIndex + index, activeTab === "custom"))}
+                        {group.showAdd && (
+                          <button
+                            type="button"
+                            className="interval-chip-add"
+                            onClick={openComposer}
+                            title={t("interval.addCustom", {}, locale)}
+                            aria-label={t("interval.addCustom", {}, locale)}
+                          >
+                            +
+                          </button>
+                        )}
                       </div>
-                    );
-                  })}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {showComposer && (
+              <section className="interval-composer" data-interval-composer="true">
+                <div className="interval-split">
+                  <input
+                    ref={amountInputRef}
+                    type="number"
+                    min="1"
+                    step="1"
+                    value={amount}
+                    onChange={(event) => setAmount(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        createOrSelectInterval(formValue);
+                      }
+                    }}
+                    className="interval-number-input"
+                    aria-label={t("interval.numberAria", {}, locale)}
+                  />
+                  <div className="interval-unit-tabs" aria-label={t("interval.unitAria", {}, locale)}>
+                    {INTERVAL_UNITS.map((item) => (
+                      <button
+                        key={item.value}
+                        type="button"
+                        className={clsx("interval-unit-tab", unit === item.value && "active")}
+                        onClick={() => setUnit(item.value)}
+                        title={t(item.labelKey, {}, locale)}
+                      >
+                        {item.shortLabel}
+                      </button>
+                    ))}
+                  </div>
+                  <button
+                    type="button"
+                    className="interval-create-btn"
+                    onClick={() => createOrSelectInterval(formValue)}
+                    disabled={!formStatus.ok && formStatus.kind === "invalid"}
+                  >
+                    {formStatus.kind === "native" || formStatus.kind === "exists"
+                      ? t("interval.select", {}, locale)
+                      : t("interval.addAndSwitch", {}, locale)}
+                  </button>
                 </div>
-              )}
-            </section>
+                <div className={clsx("interval-create-status", formStatus.ok ? "ok" : formStatus.kind)}>
+                  {formStatus.text}
+                </div>
+              </section>
+            )}
           </div>
         </div>
       )}

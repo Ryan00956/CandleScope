@@ -25,6 +25,76 @@ test("catalog validation includes every language and permits Han text outside En
   }, "zh-CN"), ["missing fr key: saved"]);
 });
 
+test("zh-TW catalog gate names locale and key for missing, extra, empty, placeholder, plural, and remnant copy", () => {
+  const chinese = { saved: "已保存 {count}", "saved.one": "已保存 {count}" };
+  assert.deepEqual(catalogProblems({
+    "zh-CN": chinese,
+    "zh-TW": { extra: "多餘" },
+  }, "zh-CN"), [
+    "missing zh-TW key: saved",
+    "missing zh-TW key: saved.one",
+    "unknown zh-TW key: extra",
+  ]);
+  assert.deepEqual(catalogProblems({
+    "zh-CN": chinese,
+    "zh-TW": { saved: "  ", "saved.one": "已儲存 {total}" },
+  }, "zh-CN"), [
+    "empty zh-TW message: saved",
+    "placeholder mismatch: zh-TW:saved (count != )",
+    "placeholder mismatch: zh-TW:saved.one (count != total)",
+  ]);
+  assert.deepEqual(catalogProblems({
+    "zh-CN": { ok: "已保存" },
+    "zh-TW": { ok: "已保存" },
+  }, "zh-CN"), [
+    "zh-TW simplified remnant: zh-TW:ok (保存)",
+  ]);
+  assert.deepEqual(catalogProblems({
+    "zh-CN": { ok: "加载中" },
+    "zh-TW": { ok: "加载中" },
+  }, "zh-CN"), [
+    "zh-TW simplified remnant: zh-TW:ok (加载)",
+  ]);
+  assert.deepEqual(catalogProblems({
+    "zh-CN": { ok: "软件" },
+    "zh-TW": { ok: "軟件" },
+  }, "zh-CN"), [
+    "zh-TW simplified remnant: zh-TW:ok (軟件)",
+  ]);
+  assert.deepEqual(catalogProblems({
+    "zh-CN": { ok: "已保存 {count}" },
+    "zh-TW": { ok: "已儲存 {count}" },
+  }, "zh-CN"), []);
+  assert.deepEqual(catalogProblems({
+    "zh-CN": { preview: "预览注册表导入" },
+    "zh-TW": { preview: "預覽登入檔匯入" },
+  }, "zh-CN"), [
+    "zh-TW simplified remnant: zh-TW:preview (登入檔)",
+  ]);
+  assert.deepEqual(catalogProblems({
+    "zh-CN": { preview: "预览注册表导入" },
+    "zh-TW": { preview: "預覽登錄檔匯入" },
+  }, "zh-CN"), []);
+});
+
+test("zh-TW plural categories follow Intl.PluralRules and do not invent English one/other", () => {
+  const chinese = { bars: "{count} 根", "bars.one": "{count} 根" };
+  assert.deepEqual(
+    new Intl.PluralRules("zh-TW").resolvedOptions().pluralCategories,
+    ["other"],
+  );
+  assert.deepEqual(catalogProblems({
+    "zh-CN": chinese,
+    "zh-TW": { bars: "{count} 根", "bars.one": "{count} 根" },
+  }, "zh-CN"), []);
+  const russian = {
+    bars: "{count} бара", "bars.one": "{count} бар", "bars.few": "{count} бара",
+  };
+  assert.deepEqual(catalogProblems({ "zh-CN": chinese, ru: russian }, "zh-CN"), [
+    "missing ru plural form: bars.many",
+  ]);
+});
+
 test("catalog validation requires language-specific plural forms and checks their placeholders", () => {
   const chinese = { bars: "{count} 根", "bars.one": "{count} 根" };
   const russian = {

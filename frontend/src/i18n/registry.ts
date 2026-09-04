@@ -1,5 +1,6 @@
 import { en } from "./catalogs/en.js";
 import { zhCN } from "./catalogs/zh-CN.js";
+import { zhTW } from "./catalogs/zh-TW.js";
 import type { MessageCatalog } from "./messageCatalog.js";
 
 export interface LocaleDefinition {
@@ -23,6 +24,14 @@ export const LOCALE_REGISTRY = {
     dateTimeLocale: "en-GB",
     numberLocale: "en-US",
     messages: en,
+  },
+  "zh-TW": {
+    nativeLabel: "繁體中文",
+    aliases: ["zh-Hant-TW"],
+    dateTimeLocale: "zh-TW",
+    numberLocale: "zh-TW",
+    direction: "ltr",
+    messages: zhTW,
   },
 } as const satisfies Readonly<Record<string, LocaleDefinition>>;
 

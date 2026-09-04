@@ -152,9 +152,12 @@ test("LOCAL_OFFLINE hides runnable current chart with a reason", () => {
 
 test("ordinary UI copy never includes internal identity terms", () => {
   assert.deepEqual(ordinaryTermsContainInternalIdentity(), []);
-  assert.equal(ordinarySourceLabel("CURRENT_CHART"), "当前图表");
-  assert.equal(ordinarySourceLabel("IMPORTED_DATASET"), "本地资料库");
-  assert.equal(ordinarySourceLabel("COMPLETED_RUN"), "完成结果");
+  assert.equal(ordinarySourceLabel("CURRENT_CHART", "zh-CN"), "当前图表");
+  assert.equal(ordinarySourceLabel("IMPORTED_DATASET", "zh-CN"), "本地资料库");
+  assert.equal(ordinarySourceLabel("COMPLETED_RUN", "zh-CN"), "完成结果");
+  assert.equal(ordinarySourceLabel("CURRENT_CHART", "zh-TW"), "當前圖表");
+  assert.equal(ordinarySourceLabel("IMPORTED_DATASET", "zh-TW"), "本地資料庫");
+  assert.equal(ordinarySourceLabel("COMPLETED_RUN", "zh-TW"), "完成結果");
   const joined = [
     ordinarySourceLabel("CURRENT_CHART", "en"),
     ordinarySourceLabel("IMPORTED_DATASET", "en"),

@@ -38,10 +38,11 @@ test("Pyne sandbox follows locale lifecycle updates and falls back to its own En
   assert.equal(document.documentElement.lang, "en");
   assert.equal(title.textContent, "Pyne Workbench");
   let sequence = 1;
-  for (const [requested, expected, label] of [
-    ["zh-CN", "zh-CN", "Pyne 工作台"],
-    ["EN-us", "en", "Pyne Workbench"],
-    ["fr-CA", "en", "Pyne Workbench"],
+  for (const [requested, expected, label, connected] of [
+    ["zh-CN", "zh-CN", "Pyne 工作台", "已连接 · 命令从插件面板运行"],
+    ["zh-TW", "zh-TW", "Pyne 工作台", "已連線 · 命令從外掛面板執行"],
+    ["EN-us", "en", "Pyne Workbench", "Connected · run commands from the plugin panel"],
+    ["fr-CA", "en", "Pyne Workbench", "Connected · run commands from the plugin panel"],
   ]) {
     channel.onmessage({ data: {
       protocol: "candlescope.ui-bridge/1", type: "host.lifecycle",
@@ -49,5 +50,6 @@ test("Pyne sandbox follows locale lifecycle updates and falls back to its own En
     } });
     assert.equal(document.documentElement.lang, expected);
     assert.equal(title.textContent, label);
+    assert.equal(status.textContent, connected);
   }
 });

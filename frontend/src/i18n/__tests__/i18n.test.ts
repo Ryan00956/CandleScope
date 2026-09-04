@@ -3,10 +3,12 @@ import test from "node:test";
 
 import { en } from "../catalogs/en.js";
 import { zhCN } from "../catalogs/zh-CN.js";
+import { zhTW } from "../catalogs/zh-TW.js";
 import {
   DEFAULT_LOCALE,
   LOCALES,
   LOCALE_OPTIONS,
+  bindDocumentLocale,
   getDateTimeLocale,
   getLocale,
   getNumberLocale,
@@ -16,6 +18,7 @@ import {
   normalizeLocale,
   resolveLocale,
   setLocale,
+  subscribeLocale,
   t,
   tPlural,
   translateExchangeName,
@@ -216,7 +219,167 @@ test("hydrateLocale updates the store and is idempotent for the same value", () 
     assert.equal(getLocale(), "en");
     assert.equal(hydrateLocale("en-US"), "en");
     assert.equal(hydrateLocale("zh-CN"), "zh-CN");
+    assert.equal(hydrateLocale("zh-TW"), "zh-TW");
+    assert.equal(hydrateLocale("zh-Hant-TW"), "zh-TW");
   } finally {
     setLocale(previous);
+  }
+});
+
+test("zh-TW is a first-class registered locale with picker, aliases, and format profiles", () => {
+  assert.equal(isLocaleId("zh-TW"), true);
+  assert.equal(localeDefinition("zh-TW").nativeLabel, "繁體中文");
+  assert.deepEqual(localeDefinition("zh-TW").aliases, ["zh-Hant-TW"]);
+  assert.equal(localeDefinition("zh-TW").dateTimeLocale, "zh-TW");
+  assert.equal(localeDefinition("zh-TW").numberLocale, "zh-TW");
+  assert.equal(localeDefinition("zh-TW").direction, "ltr");
+  assert.ok(LOCALE_OPTIONS.some((option) => option.id === "zh-TW" && option.nativeLabel === "繁體中文"));
+  assert.equal(LOCALES.includes("zh-TW"), true);
+  assert.equal(Object.keys(localeDefinition("zh-TW").messages).length, messageKeys().length);
+});
+
+test("normalizeLocale accepts zh-TW tags and does not map zh-HK, zh-MO, or bare zh-Hant", () => {
+  assert.equal(normalizeLocale("zh-TW"), "zh-TW");
+  assert.equal(normalizeLocale("zh-tw"), "zh-TW");
+  assert.equal(normalizeLocale("zh-Hant-TW"), "zh-TW");
+  assert.equal(normalizeLocale("zh-TW-u-nu-latn"), "zh-TW");
+  assert.equal(normalizeLocale("zh-HK"), DEFAULT_LOCALE);
+  assert.equal(normalizeLocale("zh-MO"), DEFAULT_LOCALE);
+  assert.equal(normalizeLocale("zh-Hant"), DEFAULT_LOCALE);
+  assert.equal(normalizeLocale("zh"), "zh-CN");
+  assert.equal(normalizeLocale("zh-Hans"), "zh-CN");
+  assert.equal(normalizeLocale("not a locale!!!"), DEFAULT_LOCALE);
+  assert.equal(normalizeLocale("../zh-TW"), DEFAULT_LOCALE);
+});
+
+test("switching into and out of zh-TW notifies once and is a no-op for the same locale", () => {
+  const previous = getLocale();
+  let notifications = 0;
+  const unsubscribe = subscribeLocale(() => {
+    notifications += 1;
+  });
+  try {
+    setLocale("zh-CN");
+    notifications = 0;
+    assert.equal(setLocale("zh-TW"), "zh-TW");
+    assert.equal(setLocale("zh-TW"), "zh-TW");
+    assert.equal(setLocale("zh-tw"), "zh-TW");
+    assert.equal(notifications, 1);
+    assert.equal(setLocale("en"), "en");
+    assert.equal(setLocale("zh-TW"), "zh-TW");
+    assert.equal(setLocale("zh-CN"), "zh-CN");
+    assert.equal(notifications, 4);
+  } finally {
+    unsubscribe();
+    setLocale(previous);
+  }
+});
+
+test("zh-TW copy comes from the Traditional catalog and keeps interpolation tokens", () => {
+  withLocale("zh-TW", () => {
+    assert.equal(t("shell.replay"), zhTW["shell.replay"]);
+    assert.equal(t("shell.replay"), "K 線回放");
+    assert.notEqual(t("shell.replay"), zhCN["shell.replay"]);
+    assert.equal(t("plugin.title"), "外掛中心");
+    assert.equal(t("plugin.previewImport"), zhTW["plugin.previewImport"]);
+    assert.equal(t("plugin.previewImport"), "預覽登錄檔匯入");
+    assert.doesNotMatch(t("plugin.previewImport"), /登入檔/);
+    assert.equal(t("plugin.host.v1ImportConfirm"), zhTW["plugin.host.v1ImportConfirm"]);
+    assert.match(t("plugin.host.v1ImportConfirm"), /登錄檔/);
+    assert.doesNotMatch(t("plugin.host.v1ImportConfirm"), /登入檔/);
+    assert.equal(t("plugin.host.v1RollbackConfirm"), zhTW["plugin.host.v1RollbackConfirm"]);
+    assert.doesNotMatch(t("plugin.host.v1RollbackConfirm"), /登入檔/);
+    assert.equal(t("plugin.notice.v1Imported"), zhTW["plugin.notice.v1Imported"]);
+    assert.doesNotMatch(t("plugin.notice.v1Imported"), /登入檔/);
+    assert.equal(t("status.loading"), "載入中…");
+    assert.equal(t("workspace.name.default"), "預設工作區");
+    assert.equal(t("status.connectedTo", { exchange: "Binance" }), "已連線 Binance");
+    assert.equal(t("status.barCount", { count: 3 }), "3 根 K 線");
+    assert.match(t("status.connectedTo"), /\{exchange\}/);
+    assert.equal(tPlural("status.barCount", 1), "1 根 K 線");
+    assert.equal(tPlural("status.barCount", 2), "2 根 K 線");
+    assert.equal(translateWsStatus("fallback"), zhTW["status.ws.fallback"]);
+    assert.equal(translateMarketType("spot"), "現貨");
+    assert.doesNotMatch(t("shell.documentTitle"), /开源看盘软件/);
+    assert.doesNotMatch(t("settings.workbench.name"), /数据工作台/);
+  });
+});
+
+test("missing catalog keys stay fail-closed as the key itself", () => {
+  assert.equal(formatCatalogMessage(zhTW, "not.a.real.key"), "not.a.real.key");
+  assert.equal(formatCatalogMessage(zhTW, "status.connectedTo", { exchange: "OKX" }), "已連線 OKX");
+});
+
+test("zh-TW Intl profiles format dates, numbers, percents, and plurals", () => {
+  withLocale("zh-TW", () => {
+    assert.equal(getDateTimeLocale(), "zh-TW");
+    assert.equal(getNumberLocale(), "zh-TW");
+    const stamp = new Date("2026-09-04T04:00:00Z");
+    assert.equal(
+      new Intl.DateTimeFormat(getDateTimeLocale(), { dateStyle: "medium", timeZone: "UTC" }).format(stamp),
+      "2026年9月4日",
+    );
+    assert.equal(new Intl.NumberFormat(getNumberLocale()).format(1234567), "1,234,567");
+    assert.equal(
+      new Intl.NumberFormat(getNumberLocale(), { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(1234.5),
+      "1,234.50",
+    );
+    assert.equal(
+      new Intl.NumberFormat(getNumberLocale(), { style: "percent", maximumFractionDigits: 1 }).format(0.123),
+      "12.3%",
+    );
+    assert.equal(new Intl.PluralRules("zh-TW").select(0), "other");
+    assert.equal(new Intl.PluralRules("zh-TW").select(1), "other");
+    assert.equal(new Intl.PluralRules("zh-TW").select(2), "other");
+  });
+});
+
+test("bindDocumentLocale writes zh-TW lang, ltr direction, title, meta, and CSS copy", () => {
+  const previous = getLocale();
+  const hadDocument = Object.prototype.hasOwnProperty.call(globalThis, "document");
+  const previousDocument = hadDocument ? (globalThis as { document: unknown }).document : undefined;
+  const styleProps: Record<string, string> = {};
+  const meta = {
+    content: "",
+    setAttribute(name: string, value: string) {
+      if (name === "content") this.content = value;
+    },
+  };
+  const mockDocument = {
+    title: "",
+    documentElement: {
+      lang: "",
+      dir: "",
+      style: {
+        setProperty(name: string, value: string) {
+          styleProps[name] = value;
+        },
+      },
+    },
+    querySelector: () => meta,
+  };
+  (globalThis as unknown as { document: typeof mockDocument }).document = mockDocument;
+  try {
+    setLocale("zh-TW");
+    const unbind = bindDocumentLocale({
+      titleKey: "shell.documentTitle",
+      descriptionKey: "shell.documentDescription",
+    });
+    assert.equal(mockDocument.documentElement.lang, "zh-TW");
+    assert.equal(mockDocument.documentElement.dir, "ltr");
+    assert.equal(mockDocument.title, zhTW["shell.documentTitle"]);
+    assert.notEqual(mockDocument.title, zhCN["shell.documentTitle"]);
+    assert.equal(meta.content, zhTW["shell.documentDescription"]);
+    assert.equal(JSON.parse(styleProps["--i18n-workspace-loading"]!), zhTW["css.workspaceLoading"]);
+    setLocale("zh-CN");
+    assert.equal(mockDocument.title, zhCN["shell.documentTitle"]);
+    unbind();
+  } finally {
+    setLocale(previous);
+    if (hadDocument) {
+      (globalThis as unknown as { document: unknown }).document = previousDocument;
+    } else {
+      Reflect.deleteProperty(globalThis, "document");
+    }
   }
 });

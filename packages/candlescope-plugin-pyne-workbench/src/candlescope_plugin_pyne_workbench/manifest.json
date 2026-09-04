@@ -54,6 +54,16 @@
               "lookbackBars": {"title": "回看 K 线数"}
             }
           }
+        },
+        "zh-TW": {
+          "title": "在當前圖表執行 Pyne",
+          "schema": {
+            "properties": {
+              "source": {"title": "Pyne 原始碼"},
+              "paramsJson": {"title": "參數 JSON"},
+              "lookbackBars": {"title": "回看 K 線數"}
+            }
+          }
         }
       },
         "requiresUserAction": true,
@@ -86,6 +96,18 @@
               "paramsJson": {"title": "参数 JSON"},
               "lookbackBars": {"title": "回看 K 线数"},
               "retentionBars": {"title": "保留 K 线数"}
+            }
+          }
+        },
+        "zh-TW": {
+          "title": "啟動增量 Pyne 工作階段",
+          "schema": {
+            "properties": {
+              "sessionId": {"title": "工作階段 ID"},
+              "source": {"title": "Pyne 原始碼"},
+              "paramsJson": {"title": "參數 JSON"},
+              "lookbackBars": {"title": "回看 K 線數"},
+              "retentionBars": {"title": "保留 K 線數"}
             }
           }
         }
@@ -127,6 +149,21 @@
               "preview": {"title": "仅预览"}
             }
           }
+        },
+        "zh-TW": {
+          "title": "向 Pyne 工作階段推送 K 線",
+          "schema": {
+            "properties": {
+              "sessionId": {"title": "工作階段 ID"},
+              "time": {"title": "時間"},
+              "open": {"title": "開盤價"},
+              "high": {"title": "最高價"},
+              "low": {"title": "最低價"},
+              "close": {"title": "收盤價"},
+              "volume": {"title": "成交量"},
+              "preview": {"title": "僅預覽"}
+            }
+          }
         }
       },
         "requiresUserAction": true,
@@ -162,6 +199,14 @@
               "sessionId": {"title": "会话 ID"}
             }
           }
+        },
+        "zh-TW": {
+          "title": "建立 Pyne 工作階段快照",
+          "schema": {
+            "properties": {
+              "sessionId": {"title": "工作階段 ID"}
+            }
+          }
         }
       },
         "requiresUserAction": true,
@@ -190,6 +235,14 @@
               "sessionId": {"title": "会话 ID"}
             }
           }
+        },
+        "zh-TW": {
+          "title": "關閉 Pyne 工作階段",
+          "schema": {
+            "properties": {
+              "sessionId": {"title": "工作階段 ID"}
+            }
+          }
         }
       },
         "requiresUserAction": true,
@@ -213,6 +266,9 @@
       "localizations": {
         "zh-CN": {
           "title": "Pyne 回测策略提供器"
+        },
+        "zh-TW": {
+          "title": "Pyne 回測策略提供器"
         }
       },
         "inputModes": ["BAR_CLOSE"],
@@ -232,6 +288,9 @@
       "localizations": {
         "zh-CN": {
           "title": "Pyne 工作台"
+        },
+        "zh-TW": {
+          "title": "Pyne 工作台"
         }
       },
         "slot": "sidePanel",
@@ -248,6 +307,9 @@
       "localizations": {
         "zh-CN": {
           "title": "Pyne 输出"
+        },
+        "zh-TW": {
+          "title": "Pyne 輸出"
         }
       },
         "target": "main-chart",

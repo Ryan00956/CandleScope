@@ -4,6 +4,29 @@ import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { DEFAULT_LOCALE, LOCALES, localeDefinition } from "../src/i18n/registry.js";
 
+const ZH_TW_SIMPLIFIED_HAN = new Set(
+  fs.readFileSync(new URL("./zh-tw-simplified-han.txt", import.meta.url), "utf8").trim(),
+);
+const ZH_TW_ALLOWED_VARIANT_HAN = new Set("准台吃峰干游");
+const ZH_TW_REMNANT_PHRASE = /軟件|網絡|默認|信息|加載|視頻|數據|插件|软件|网络|默认|加载|视频|数据|保存(?!期限)|許可權|賬戶|實時|自定義|登入檔/;
+
+function isZhTwLocale(locale: string): boolean {
+  try {
+    return new Intl.Locale(locale).baseName.toLowerCase() === "zh-tw";
+  } catch {
+    return locale.toLowerCase() === "zh-tw";
+  }
+}
+
+function zhTwRemnant(message: string): string | null {
+  const phrase = ZH_TW_REMNANT_PHRASE.exec(message);
+  if (phrase) return phrase[0]!;
+  for (const ch of message) {
+    if (ZH_TW_SIMPLIFIED_HAN.has(ch) && !ZH_TW_ALLOWED_VARIANT_HAN.has(ch)) return ch;
+  }
+  return null;
+}
+
 const SOURCE_EXTENSIONS = new Set([".ts", ".tsx"]);
 const SKIPPED_SEGMENTS = new Set(["__tests__", "i18n"]);
 const SKIPPED_SUFFIXES = [".test.ts", ".test.tsx"];
@@ -61,6 +84,10 @@ export function catalogProblems(
       if (!message.trim()) problems.push(`empty ${locale} message: ${key}`);
       if (locale.split("-")[0]!.toLowerCase() === "en" && /\p{Script=Han}/u.test(message)) {
         problems.push(`English message contains Han text: ${key}`);
+      }
+      if (isZhTwLocale(locale)) {
+        const remnant = zhTwRemnant(message);
+        if (remnant) problems.push(`zh-TW simplified remnant: ${locale}:${key} (${remnant})`);
       }
       const expected = placeholders(reference[referenceKey]!);
       const actual = placeholders(message);

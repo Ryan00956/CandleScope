@@ -90,9 +90,19 @@ def test_sandbox_ui_owns_zh_cn_and_english_copy() -> None:
 
     assert 'data-i18n="statusWaiting"' in html
     assert '"zh-CN": {' in javascript
+    assert '"zh-TW": {' in javascript
     assert "en: {" in javascript
+    assert "等待 CandleScope 連線" in javascript
     assert "applyLocale(payload.locale)" in javascript
     assert 'setStatus("statusRejected")' in javascript
+
+
+def test_manifest_owns_zh_tw_contribution_copy() -> None:
+    manifest = pyne_workbench_manifest()
+    run = next(item for item in manifest.contributions if item.id == "run")
+    assert run.localizations["zh-TW"]["title"] == "在當前圖表執行 Pyne"
+    view = next(item for item in manifest.contributions if item.id == "workbench-view")
+    assert view.localizations["zh-TW"]["title"] == "Pyne 工作台"
 
 
 def test_batch_command_reads_chart_bars_and_publishes_render_v2() -> None:

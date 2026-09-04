@@ -1,3 +1,4 @@
+import { LOCALES, t, type LocaleId } from "../../i18n/index.js";
 import {
   FROZEN_RESEARCH_CONTEXT_SCHEMA,
   FORBIDDEN_ORDINARY_UI_TERMS,
@@ -343,10 +344,16 @@ export async function parseFrozenResearchContext(value: unknown): Promise<Frozen
   return assembleFrozenResearchContext(value, capability as unknown as ResearchCapabilitySummaryV1);
 }
 
-export function ordinarySourceLabel(kind: ResearchSourceKind, locale: "en" | "zh" = "zh"): string {
-  if (kind === "CURRENT_CHART") return ORDINARY_RESEARCH_TERMS.currentChart[locale];
-  if (kind === "IMPORTED_DATASET") return ORDINARY_RESEARCH_TERMS.importedLibrary[locale];
-  return ORDINARY_RESEARCH_TERMS.completedResult[locale];
+export function ordinarySourceLabel(
+  kind: ResearchSourceKind,
+  locale?: LocaleId,
+): string {
+  const key = kind === "CURRENT_CHART"
+    ? "research.source.currentChart"
+    : kind === "IMPORTED_DATASET"
+      ? "research.source.importedLibrary"
+      : "research.source.completedResult";
+  return t(key, {}, locale);
 }
 
 export function ordinaryTermsContainInternalIdentity(): string[] {
@@ -356,6 +363,14 @@ export function ordinaryTermsContainInternalIdentity(): string[] {
     for (const text of Object.values(pair)) {
       const lower = text.toLowerCase();
       if (forbidden.some((term) => lower.includes(term))) hits.push(`${key}:${text}`);
+    }
+  }
+  for (const locale of LOCALES) {
+    for (const kind of RESEARCH_SOURCE_KINDS) {
+      const text = ordinarySourceLabel(kind, locale);
+      if (forbidden.some((term) => text.toLowerCase().includes(term))) {
+        hits.push(`${locale}:${kind}:${text}`);
+      }
     }
   }
   return hits;

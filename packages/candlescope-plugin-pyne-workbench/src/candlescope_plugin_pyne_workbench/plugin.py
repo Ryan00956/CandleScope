@@ -43,6 +43,67 @@ from .render_adapter import AdaptedRender, adapt_pyne_output
 WORKBENCH_PROTOCOL_V1 = "candlescope.pyne-workbench/1"
 _LAYER_ID = "pyne-output"
 
+_CONTRACT_LOCALIZATIONS = {
+    "fr": {
+        "Pyne workbench contribution is not invokable": (
+            "La contribution de l’atelier Pyne n’est pas invocable"
+        ),
+        "Pyne session is not active": "La session Pyne n’est pas active",
+        "preview must be a boolean": "preview doit être un booléen",
+        "workbench completion token is stale": "Le jeton d’achèvement de l’atelier a expiré",
+        "workbench phase is invalid": "La phase de l’atelier est invalide",
+        "lookbackBars must be from 2 to 5000": (
+            "lookbackBars doit être compris entre 2 et 5 000"
+        ),
+        "paramsJson must be bounded JSON text": (
+            "paramsJson doit être un texte JSON borné"
+        ),
+        "paramsJson is invalid JSON": "paramsJson n’est pas un JSON valide",
+        "paramsJson must contain an object": "paramsJson doit contenir un objet",
+        "bar fields are invalid": "Les champs de barre sont invalides",
+        "Host returned no market bars": "L’hôte n’a renvoyé aucune barre de marché",
+        "Host bars are not all final": "Les barres de l’hôte ne sont pas toutes finales",
+        "Host returned invalid bars": "L’hôte a renvoyé des barres invalides",
+        "capabilityUnavailable": "Capacité {permission} indisponible",
+        "boundedString": "{key} doit être une chaîne bornée",
+    },
+}
+
+
+def _localized_contract_error(
+    error: PlatformContractError, locale: str | None
+) -> PlatformContractError:
+    candidate = (locale or "").strip().lower()
+    messages = None
+    while candidate:
+        messages = next(
+            (
+                value
+                for key, value in _CONTRACT_LOCALIZATIONS.items()
+                if key.lower() == candidate
+            ),
+            None,
+        )
+        if messages is not None:
+            break
+        candidate = candidate.rpartition("-")[0]
+    if messages is None:
+        return error
+    message = messages.get(error.message)
+    if message is None and error.message.endswith(" capability is unavailable"):
+        permission = error.message.removesuffix(" capability is unavailable")
+        template = messages.get("capabilityUnavailable")
+        if template is not None:
+            message = template.replace("{permission}", permission)
+    if message is None and error.message.endswith(" must be a bounded string"):
+        key = error.message.removesuffix(" must be a bounded string")
+        template = messages.get("boundedString")
+        if template is not None:
+            message = template.replace("{key}", key)
+    if message is None:
+        return error
+    return PlatformContractError(error.code, message, error.path)
+
 
 def pyne_workbench_manifest() -> PluginManifest:
     resource = files(__package__).joinpath("manifest.json")
@@ -115,6 +176,12 @@ class PyneWorkbenchPlugin(BasePlatformPlugin):
         }
 
     def invoke(self, request: InvokeRequest) -> InvocationOutcome:
+        try:
+            return self._invoke(request)
+        except PlatformContractError as error:
+            raise _localized_contract_error(error, request.request_context.locale) from error
+
+    def _invoke(self, request: InvokeRequest) -> InvocationOutcome:
         operation = request.contribution_id
         if operation == "close-session":
             session_id = _required_string(request.input, "sessionId", maximum=128)
@@ -207,6 +274,18 @@ class PyneWorkbenchPlugin(BasePlatformPlugin):
         return self._publish(token, state)
 
     def complete_host_call(
+        self,
+        token: str,
+        response: RpcSuccess | RpcFailure,
+    ) -> InvocationOutcome:
+        state = self._pending.get(token)
+        locale = state.context.locale if state is not None else None
+        try:
+            return self._complete_host_call(token, response)
+        except PlatformContractError as error:
+            raise _localized_contract_error(error, locale) from error
+
+    def _complete_host_call(
         self,
         token: str,
         response: RpcSuccess | RpcFailure,

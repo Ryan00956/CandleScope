@@ -16,6 +16,7 @@ import {
   normalizeLocale,
   resolveLocale,
   setLocale,
+  subscribeLocale,
   t,
   tPlural,
   translateExchangeName,
@@ -43,7 +44,10 @@ test("locale normalization keeps the product default and accepts English aliases
   assert.equal(normalizeLocale("en"), "en");
   assert.equal(normalizeLocale("en-US"), "en");
   assert.equal(normalizeLocale("en-GB"), "en");
-  assert.equal(normalizeLocale("fr"), DEFAULT_LOCALE);
+  assert.equal(normalizeLocale("fr"), "fr");
+  assert.equal(normalizeLocale("fr-FR"), "fr");
+  assert.equal(normalizeLocale("fr-CA"), "fr");
+  assert.equal(normalizeLocale("FR-ca-u-nu-latn"), "fr");
 });
 
 test("every registered locale exposes all host keys and a language-picker option", () => {
@@ -54,6 +58,9 @@ test("every registered locale exposes all host keys and a language-picker option
     for (const key of messageKeys()) assert.equal(typeof localeDefinition(locale).messages[key], "string");
   }
   assert.equal(isLocaleId("en-US"), false);
+  assert.equal(isLocaleId("fr"), true);
+  assert.equal(isLocaleId("fr-FR"), false);
+  assert.ok(LOCALE_OPTIONS.some((option) => option.id === "fr" && option.nativeLabel === "Français"));
   assert.deepEqual(messageKeys().slice().sort(), Object.keys(zhCN).sort());
 });
 
@@ -82,6 +89,20 @@ test("format profiles preserve existing English dates and numbers and follow run
   withLocale("zh-CN", () => {
     assert.equal(getDateTimeLocale(), "zh-CN");
     assert.equal(getNumberLocale(), "zh-CN");
+  });
+  withLocale("fr", () => {
+    assert.equal(getDateTimeLocale(), "fr-FR");
+    assert.equal(getNumberLocale(), "fr-FR");
+    assert.equal(
+      (1234.5).toLocaleString(getNumberLocale()),
+      (1234.5).toLocaleString("fr-FR"),
+    );
+    assert.doesNotMatch((1234.5).toLocaleString(getNumberLocale()), /1,234\.5/);
+    const stamp = new Date(Date.UTC(2024, 0, 15, 12, 0, 0));
+    assert.equal(
+      stamp.toLocaleDateString(getDateTimeLocale(), { timeZone: "UTC" }),
+      stamp.toLocaleDateString("fr-FR", { timeZone: "UTC" }),
+    );
   });
 });
 
@@ -123,6 +144,15 @@ test("t interpolates and switches with the locale store", () => {
       "4 hours continuous",
     );
   });
+  withLocale("fr", () => {
+    assert.equal(t("shell.replay"), "Relecture");
+    assert.notEqual(t("shell.replay"), en["shell.replay"]);
+    assert.equal(t("status.connectedTo", { exchange: "Binance" }), "Connecté à Binance");
+    assert.equal(t("settings.saveAndClose"), "Enregistrer et fermer");
+    assert.equal(t("rail.watchlist"), "Liste de suivi");
+    assert.equal(t("orderBook.title"), "Carnet d’\u2060ordres");
+    assert.match(t("settings.language.title"), /Langue/);
+  });
 });
 
 test("plural forms keep Chinese invariant and distinguish English one/other", () => {
@@ -135,6 +165,11 @@ test("plural forms keep Chinese invariant and distinguish English one/other", ()
     assert.equal(tPlural("status.barCount", 2), "2 bars");
     assert.equal(tPlural("status.exchangeLimitationCount", 1), "1 exchange limitation");
     assert.equal(tPlural("status.exchangeLimitationCount", 3), "3 exchange limitations");
+  });
+  withLocale("fr", () => {
+    assert.equal(tPlural("status.barCount", 1), "1 barre");
+    assert.equal(tPlural("status.barCount", 2), "2 barres");
+    assert.equal(tPlural("status.barCount", 1_000_000), "1000000 de barres");
   });
 });
 
@@ -207,16 +242,60 @@ test("runtime leftover keys stay Chinese by default and switch with the store", 
     assert.doesNotMatch(t("replay.hub.fundingMode.historicalExact"), /归档结算/);
     assert.doesNotMatch(t("replay.hub.bookMode.assistedRequired"), /连续历史/);
   });
+  withLocale("fr", () => {
+    assert.equal(t("countdown.days", { days: 1, clock: "01:01:01" }), "1j 01:01:01");
+    assert.match(t("replay.init.hedgeHybrid"), /HEDGE_HYBRID/);
+    assert.match(t("replay.init.hedgeHybrid"), /OFF/);
+    assert.doesNotMatch(t("replay.init.hedgeHybrid"), /资金费/);
+    assert.equal(t("settings.workbench.name"), "Atelier de données");
+    assert.equal(t("scale.auto"), "Échelle auto");
+    assert.match(t("python.hostOwns"), /exécution/);
+    assert.match(t("local.err.isoNeedTz"), /fuseau horaire/);
+    assert.equal(t("market.cap.futuresOnly"), "Pris en charge uniquement sur les marchés futures");
+    assert.equal(t("pane.funding.next"), "Prochain règlement");
+    assert.match(t("orderBook.rt.seqGap"), /séquence/);
+    assert.equal(t("plugin.title"), "Centre de plugins");
+    assert.doesNotMatch(t("plugin.previewImport"), /预览/);
+    assert.doesNotMatch(t("css.workspaceLoading"), /Loading chart workspace/);
+  });
 });
 
 test("hydrateLocale updates the store and is idempotent for the same value", () => {
   const previous = getLocale();
+  const documentElement = { lang: "", dir: "" };
+  const previousDocument = globalThis.document;
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: { documentElement },
+  });
+  let notifications = 0;
+  const unsubscribe = subscribeLocale(() => {
+    notifications += 1;
+  });
   try {
     assert.equal(hydrateLocale("en"), "en");
     assert.equal(getLocale(), "en");
     assert.equal(hydrateLocale("en-US"), "en");
     assert.equal(hydrateLocale("zh-CN"), "zh-CN");
+    assert.equal(hydrateLocale("fr"), "fr");
+    assert.equal(documentElement.lang, "fr");
+    assert.equal(documentElement.dir, "ltr");
+    notifications = 0;
+    assert.equal(setLocale("fr-FR"), "fr");
+    assert.equal(notifications, 0);
+    assert.equal(setLocale("en"), "en");
+    assert.equal(notifications, 1);
+    assert.equal(documentElement.lang, "en");
   } finally {
+    unsubscribe();
     setLocale(previous);
+    if (previousDocument === undefined) {
+      Reflect.deleteProperty(globalThis, "document");
+    } else {
+      Object.defineProperty(globalThis, "document", {
+        configurable: true,
+        value: previousDocument,
+      });
+    }
   }
 });

@@ -3,6 +3,7 @@ from __future__ import annotations
 from importlib.resources import files
 
 import jsonschema
+import pytest
 
 from candlescope_plugin_sdk.platform_v2 import (
     ActivationRequest,
@@ -13,7 +14,9 @@ from candlescope_plugin_sdk.platform_v2 import (
     RpcSuccess,
     manifest_schema,
 )
+from candlescope_plugin_sdk.platform_v2.errors import PlatformContractError
 from candlescope_plugin_pyne_workbench import PyneWorkbenchPlugin, pyne_workbench_manifest
+from candlescope_plugin_pyne_workbench.plugin import _localized_contract_error
 
 
 CHART = {
@@ -91,8 +94,48 @@ def test_sandbox_ui_owns_zh_cn_and_english_copy() -> None:
     assert 'data-i18n="statusWaiting"' in html
     assert '"zh-CN": {' in javascript
     assert "en: {" in javascript
+    assert "fr: {" in javascript
+    assert "Atelier Pyne" in javascript
     assert "applyLocale(payload.locale)" in javascript
     assert 'setStatus("statusRejected")' in javascript
+
+
+def test_manifest_owns_french_contribution_copy() -> None:
+    manifest = pyne_workbench_manifest()
+    titles = {
+        item.id: item.localizations["fr"]["title"]
+        for item in manifest.contributions
+        if "fr" in item.localizations
+    }
+    assert titles["run"] == "Exécuter Pyne sur le graphique actuel"
+    assert titles["workbench-view"] == "Atelier Pyne"
+    assert titles["pyne-strategy"] == "Fournisseur de stratégie backtest Pyne"
+    run = next(item for item in manifest.contributions if item.id == "run")
+    assert run.localizations["fr"]["schema"]["properties"]["lookbackBars"]["title"] == (
+        "Barres de rétrospection"
+    )
+
+
+def test_workbench_errors_follow_french_regional_locale() -> None:
+    error = PlatformContractError("INVALID_CONTRACT", "Pyne session is not active")
+    assert _localized_contract_error(error, "ja") is error
+    translated = _localized_contract_error(error, "fr-CA")
+    assert translated.message == "La session Pyne n’est pas active"
+    capability = PlatformContractError(
+        "INVALID_CONTRACT", "chart.layer.publish capability is unavailable"
+    )
+    assert _localized_contract_error(capability, "fr").message == (
+        "Capacité chart.layer.publish indisponible"
+    )
+    plugin = _plugin()
+    with pytest.raises(PlatformContractError, match="n’est pas invocable"):
+        plugin.invoke(
+            InvokeRequest(
+                "not-a-contribution",
+                {},
+                RequestContext("not-a-contribution", True, 1, "trace-fr", locale="fr-CA"),
+            )
+        )
 
 
 def test_batch_command_reads_chart_bars_and_publishes_render_v2() -> None:

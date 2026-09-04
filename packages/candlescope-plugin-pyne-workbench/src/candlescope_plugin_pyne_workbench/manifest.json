@@ -54,6 +54,16 @@
               "lookbackBars": {"title": "回看 K 线数"}
             }
           }
+        },
+        "fr": {
+          "title": "Exécuter Pyne sur le graphique actuel",
+          "schema": {
+            "properties": {
+              "source": {"title": "Source Pyne"},
+              "paramsJson": {"title": "JSON des paramètres"},
+              "lookbackBars": {"title": "Barres de rétrospection"}
+            }
+          }
         }
       },
         "requiresUserAction": true,
@@ -86,6 +96,18 @@
               "paramsJson": {"title": "参数 JSON"},
               "lookbackBars": {"title": "回看 K 线数"},
               "retentionBars": {"title": "保留 K 线数"}
+            }
+          }
+        },
+        "fr": {
+          "title": "Démarrer une session Pyne incrémentale",
+          "schema": {
+            "properties": {
+              "sessionId": {"title": "ID de session"},
+              "source": {"title": "Source Pyne"},
+              "paramsJson": {"title": "JSON des paramètres"},
+              "lookbackBars": {"title": "Barres de rétrospection"},
+              "retentionBars": {"title": "Barres conservées"}
             }
           }
         }
@@ -127,6 +149,21 @@
               "preview": {"title": "仅预览"}
             }
           }
+        },
+        "fr": {
+          "title": "Pousser une barre vers la session Pyne",
+          "schema": {
+            "properties": {
+              "sessionId": {"title": "ID de session"},
+              "time": {"title": "Heure"},
+              "open": {"title": "Ouverture"},
+              "high": {"title": "Plus haut"},
+              "low": {"title": "Plus bas"},
+              "close": {"title": "Clôture"},
+              "volume": {"title": "Volume"},
+              "preview": {"title": "Aperçu uniquement"}
+            }
+          }
         }
       },
         "requiresUserAction": true,
@@ -162,6 +199,14 @@
               "sessionId": {"title": "会话 ID"}
             }
           }
+        },
+        "fr": {
+          "title": "Créer un instantané de session Pyne",
+          "schema": {
+            "properties": {
+              "sessionId": {"title": "ID de session"}
+            }
+          }
         }
       },
         "requiresUserAction": true,
@@ -190,6 +235,14 @@
               "sessionId": {"title": "会话 ID"}
             }
           }
+        },
+        "fr": {
+          "title": "Fermer la session Pyne",
+          "schema": {
+            "properties": {
+              "sessionId": {"title": "ID de session"}
+            }
+          }
         }
       },
         "requiresUserAction": true,
@@ -213,6 +266,9 @@
       "localizations": {
         "zh-CN": {
           "title": "Pyne 回测策略提供器"
+        },
+        "fr": {
+          "title": "Fournisseur de stratégie backtest Pyne"
         }
       },
         "inputModes": ["BAR_CLOSE"],
@@ -232,6 +288,9 @@
       "localizations": {
         "zh-CN": {
           "title": "Pyne 工作台"
+        },
+        "fr": {
+          "title": "Atelier Pyne"
         }
       },
         "slot": "sidePanel",
@@ -248,6 +307,9 @@
       "localizations": {
         "zh-CN": {
           "title": "Pyne 输出"
+        },
+        "fr": {
+          "title": "Sortie Pyne"
         }
       },
         "target": "main-chart",

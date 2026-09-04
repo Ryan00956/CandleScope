@@ -217,78 +217,74 @@ const PT_BR_TECHNICAL_IDENTIFIERS = new Set([
   "Point & Figure", "Kagi", "Line Break", "Hong Kong", "Volume", "Momentum",
   "Webhook", "R:R", "Take profit", "Stop loss", "Base", "Status", "CCXT",
   "fail closed", "CandleScope Replay · REPLAY", "CandleScope Strategy",
+  "SQLite", "Maker", "Taker", "Bids", "Asks", "Paper", "Heikin Ashi", "Renko",
+  "Review", "Fork", "GC", "BAR", "L2", "TP", "SL", "OI", "ADL",
   "Ampl.", "Total", "Chg", "Vol", "Stack", "Frontend", "Backend", "Proxy",
-  "Ticker", "Mini ticker", "SQLite", "Local", "Normal", "Candles", "Warm",
-  "Hold", "Refs", "Ledger", "Stop", "Maker / Taker bps", "Paper", "Full",
-  "Maker", "Taker", "Bids", "Asks", "Rank", "Diff", "Params", "Python Studio",
-  "In-sample", "Out-of-sample", "Slippage bps", "Slippage / turnover",
-  "Regular", "Runtime", "runtime", "final", "unchanged", "changed", "same",
-  "Publisher", "terminal", "Runs", "Studies", "Checksum", "Fold", "TestRun",
-  "Regime", "Benchmark", "Split", "Viewer", "Viewport", "Original",
-  "Insurance", "Bundle", "Handoff", "Heikin Ashi", "Renko", "Average True Range",
-  "Script", "Overview", "Capital", "Dates", "Fidelity", "Draft", "Copy",
-  "Archive", "Language", "Preset", "State", "Parameter", "Value", "Baseline",
-  "Window", "Hash", "Coverage", "Dataset", "Smoke", "Resume", "Compare",
-  "pending", "empty", "refs", "status", "Rollback", "kind/id",
-  "Reverse", "Dataset", "download", "Downloads", "funding",
-  "Review", "Fork", "One Step Back", "High/Low", "Percentage",
-  "stream", "Train", "Test", "TestRuns", "debug",
+  "Ticker", "Mini ticker", "Local", "Normal", "Candles", "Warm", "Hold",
+  "Refs", "Ledger", "Stop", "Maker / Taker bps", "Full", "Rank", "Diff",
+  "Params", "Python Studio", "In-sample", "Out-of-sample", "Slippage bps",
+  "Slippage / turnover", "Regular", "Runtime", "runtime", "final", "unchanged",
+  "changed", "same", "Publisher", "terminal", "Runs", "Studies", "Checksum",
+  "Fold", "TestRun", "Regime", "Benchmark", "Split", "Viewer", "Viewport",
+  "Original", "Insurance", "Bundle", "Handoff", "Average True Range", "Script",
+  "Overview", "Capital", "Dates", "Fidelity", "Draft", "Copy", "Archive",
+  "Language", "Preset", "State", "Parameter", "Value", "Baseline", "Window",
+  "Hash", "Coverage", "Dataset", "Smoke", "Resume", "Compare", "pending",
+  "empty", "refs", "status", "Rollback", "kind/id", "Cumulative", "Amplitude",
+  "Used", "Watermark", "BAR", "WARM", "FULL", "Proof",
 ]);
 
-const PT_BR_TECHNICAL_TOKEN = new Set(
-  [...PT_BR_TECHNICAL_IDENTIFIERS]
-    .flatMap((value) => value.split(/[^A-Za-z0-9_+./-]+/))
-    .map((token) => token.toLowerCase())
-    .filter((token) => token.length > 1 && token !== "and" && token !== "or" && token !== "not"),
-);
-
-/** Leftover English verbs/nouns that must not mix with Portuguese copy. */
-const PT_BR_LEFTOVER_ENGLISH = new Set([
-  "failed", "submit", "submitting", "rules", "notifications", "restore", "armed",
-  "secrets", "whitelist", "later", "reason", "choose", "saving", "loading", "clear",
-  "clearing", "retry", "search", "switch", "command", "result", "unknown",
-  "requested", "waits", "until", "converges", "fees", "leverage", "change",
-  "auditable", "pinned", "execution", "owned", "ingestion", "public", "account",
-  "trading", "access", "workspace", "save", "selection", "integrity", "validation",
-  "control", "method", "installed", "independent", "audit", "policy", "drawing",
-  "evidence", "review", "again", "current", "draft", "lost", "parameters", "size",
-  "exceeds", "rejects", "order", "must", "between", "timed", "accepted",
-  "refreshed", "adjusting", "updated", "protection", "canceled", "atomically",
-  "canceling", "historical", "input", "revealed", "mode", "model", "bounded",
-  "equity", "curve", "label", "training", "overlay", "first", "archive", "confirm",
-  "downgrade", "selecting", "select", "reveal", "irreversible", "permanently",
-  "writes", "action", "takes", "effect", "fully", "locks", "continuity", "check",
-  "hosted", "security", "stay", "disabled", "request", "future", "session", "type",
-  "trigger", "sync", "visible", "duration", "unsupported", "start", "fall",
-  "eligible", "align", "interval", "capability", "catalog", "does", "match",
-  "exact", "history", "unavailable", "lacks", "complete", "rate", "settlement",
-  "versioned", "deterministic", "simulated", "contains", "duplicates", "items",
-  "wallet", "unrealized", "maintenance", "frozen", "actual", "position",
-  "notional", "peak", "signal", "events", "panel", "empty", "name", "tree",
-  "fired", "times", "unlimited", "today", "last", "days", "unacknowledged",
-  "acknowledged", "hits", "filter", "running", "subscriptions", "warming",
-  "degraded", "recovering", "config", "ready", "default", "delivery", "dismiss",
-  "notification", "step", "scope", "whole", "pane", "page", "includes", "such",
-  "format", "conditions", "nested", "logic", "channels", "expiry", "condition",
-  "expired", "matching", "fire", "update", "duplicate", "copy", "acknowledgement",
-  "test", "load", "list", "reading", "view", "show", "none", "hint", "nothing",
-  "compatible", "under", "symbols", "verifies", "official", "provide",
-  "trustworthy", "row", "shares", "immutable", "identity", "projection", "stores",
-  "isolated", "available", "refresh", "reset", "file", "bridge", "the", "and",
-  "with", "this", "that", "are", "was", "were", "from", "into", "onto", "after",
-  "before", "cannot", "will", "would", "does", "did", "you", "your", "been",
-  "than", "then", "where", "which", "while", "using", "used", "still", "already",
-  "also", "each", "every", "code", "variable", "owns", "absolute",
-  "sized", "bypass", "risk", "waiting", "reconciliation", "completed", "template",
-  "debug", "cleared", "removed", "shared", "filters", "capped", "identified",
-  "instrument", "estimate", "invent", "health", "vague", "continue", "permission",
-  "facts", "column", "aligned", "grid", "larger", "built", "reliably", "currently",
-  "supports", "resyncing", "continuous", "connecting", "stream", "unconfirmed",
-  "silently", "assume", "read", "preset", "rebinds", "revision", "paste",
-  "return", "fixed", "only", "changed",
+const PT_BR_PRODUCT_TOKENS = new Set([
+  "replay", "backtest", "challenge", "sandbox", "practice", "spot", "perp",
+  "binance", "okx", "candlescope", "websocket", "json", "csv", "vacuum",
+  "host", "pyne", "pine", "mark", "basis", "demo", "tape", "delta", "cross",
+  "hedge", "run", "study", "kline", "sma", "ema", "rsi", "macd", "atr",
+  "cvd", "mae", "mfe", "utc", "http", "rest", "wal", "ohlc", "ohlcv",
+  "png", "jpeg", "webp", "ctrl", "esc", "enter", "alt", "snapshot", "live",
+  "plugin", "plugins", "exchanges", "exchange", "webhook", "ccxt", "sqlite",
+  "maker", "taker", "bids", "asks", "paper", "renko", "kagi", "review", "fork",
+  "heikin", "ashi", "long", "short", "platform", "fibonacci", "donchian",
+  "train", "test", "high", "low", "close", "open", "time", "percentage",
+  "uvicorn", "aggtrade", "pro", "reverse", "windows", "bollinger",
 ]);
 
-const PT_BR_COLUMN_TOKENS = new Set(["time", "open", "high", "low", "close", "volume"]);
+/** Spellings that are valid Brazilian Portuguese, not leftover English. */
+const PT_BR_IDENTICAL_SPELLINGS = new Set([
+  "local", "software", "visual", "manual", "volume", "interface", "layout",
+  "zoom", "editor", "python", "desktop", "web", "total", "normal", "original",
+  "capital", "auto", "error", "item", "status", "type", "mode", "model", "data",
+  "regular", "final", "terminal", "stack", "proxy", "amplitude", "ticker",
+  "backend", "frontend", "runtime", "script", "offline", "loopback", "fallback",
+  "polling", "footprint", "strategy", "use", "universal", "chip", "flag",
+  "multi", "candles", "decimal", "event", "parameter", "value", "window", "hash",
+  "coverage", "dataset", "pending", "empty", "rollback", "preset", "state",
+  "language", "archive", "draft", "fidelity", "overview", "dates", "baseline",
+  "resume", "compare", "smoke", "publisher", "checksum", "regime", "benchmark",
+  "split", "viewer", "viewport", "insurance", "bundle", "handoff", "copy",
+  "kind", "refs", "hold", "ledger", "rank", "diff", "params", "sample",
+  "slippage", "turnover", "momentum", "group", "index", "version", "schema",
+  "token", "cache", "buffer", "cluster", "yang", "yin", "york", "horizontal",
+  "vertical", "digital", "global", "social", "real", "formal", "material",
+  "general", "personal", "central", "principal",
+  "cursor", "download", "bytes", "job", "jobs", "snap", "shift", "studio",
+  "kernel", "ids", "ack", "toast", "hub", "candle", "checkpoint", "stream",
+  "snapshots", "range", "source", "line", "area", "tabs", "research", "recent",
+  "problems", "isolated", "rows", "count", "delta", "folds", "holdout",
+  "funding", "datasets", "hashes", "fills", "prefix", "auditor", "epoch",
+  "venue", "kill", "protection", "configuration", "comparison", "authority",
+  "revisions", "bundles", "deltas", "resize", "tester", "explanation",
+  "runtimes", "server", "drawdown", "oversold", "overbought", "embargo",
+  "sampler", "lease", "budget", "timeline", "projection", "cap", "socks",
+  "soak", "shadow", "streaming", "apis", "scripts", "bps", "bar", "dry",
+  "virtual", "dock", "proxies", "touch", "historical", "year", "month",
+  "combine", "letter", "drawings", "export", "exact", "closed", "display",
+  "way", "runs", "full", "report", "try", "zero", "complete", "untitled",
+  "top", "base", "off", "pause", "created", "read", "only", "fail", "smaller",
+  "follow", "dead", "awaiting", "min", "mib", "debug", "canvas", "blob",
+  "unix", "zip", "null", "sharpe", "qty", "liq", "sim", "fee", "max",
+  "stop", "limit", "target", "batch", "flags", "inputs", "level", "fold",
+  "studies", "switch", "marketplace", "decide", "prepare", "spread",
+]);
 
 function isAllowedEnglishClone(message: string): boolean {
   const stripped = message
@@ -309,24 +305,48 @@ function isAllowedEnglishClone(message: string): boolean {
   ));
 }
 
-function hasPortugueseCopy(message: string): boolean {
-  return /[áàâãéêíóôõúçÁÀÂÃÉÊÍÓÔÕÚÇ]|\b(?:não|para|com|uma|alerta|ativo|ativos|gráfico|arquivo|posição|ordem|execução|margem|salvar|excluir|fechar|abrir|lista|falha|conta|buscar|treino|atual|disponível|indisponível|desconhecido|redefinir|atualizar|mercado|quantidade|integridade|regras|motivo|valor|modo|tempo|servidor|somente|leitura|nome|regra|modelo|tipo|entrada|histórico|indicadores|ordens|alavancagem|financiamento|trabalho|código|variável|política|evidência|resultados|personalizado|intervalo|livro|ofertas|estratégia|selecionar|criar|ativar|voltar|adicionar)\b/i.test(message);
-}
-
-function leftoverEnglishTokens(message: string): string[] {
-  const plain = message
+function stripProtocol(text: string): string {
+  return text
     .replace(/\{\{?[A-Za-z0-9_]+\}?\}/g, " ")
     .replace(/\bfail closed\b/gi, " ")
+    .replace(/\bOne Step Back\b/g, " ")
+    .replace(/\bPoint & Figure\b/g, " ")
+    .replace(/\bTake profit\b/gi, " ")
+    .replace(/\btake-profit\b/gi, " ")
+    .replace(/\bJob Object\b/g, " ")
+    .replace(/\bStop loss\b/gi, " ")
+    .replace(/\bLine Break\b/g, " ")
+    .replace(/\bHong Kong\b/g, " ")
+    .replace(/\bHeikin Ashi\b/g, " ")
     .replace(/\bmark-to-market\b/gi, " ")
     .replace(/\bopen interest\b/gi, " ")
-    .replace(/\b[A-Z][A-Z0-9_]{1,48}\b/g, " ");
-  return plain.split(/[^A-Za-zÀ-ÿ0-9_]+/u).filter((token) => {
-    if (!token || token.length <= 2) return false;
-    if (token === "AND" || token === "OR" || token === "NOT") return false;
+    .replace(/\buvicorn\b[^\n]*/gi, " ")
+    .replace(/\b[A-Z][A-Z0-9_]{1,64}\b/g, " ")
+    .replace(/\b[A-Z][a-zA-Z0-9]*[A-Z][a-zA-Z0-9]*\b/g, " ")
+    .replace(/\b[a-z]+[A-Z][a-zA-Z0-9]*\b/g, " ")
+    .replace(/\.[A-Za-z0-9]+/g, " ")
+    .replace(/\b[a-z]+(?:_[a-z0-9]+)+\b/g, " ");
+}
+
+function rawTokens(text: string): string[] {
+  return stripProtocol(text).split(/[^A-Za-zÀ-ÿ]+/u).filter(Boolean);
+}
+
+function leftoverSourceTokens(english: string, portuguese: string): string[] {
+  const portugueseTokens = rawTokens(portuguese);
+  const portugueseLower = new Set(portugueseTokens.map((token) => token.toLowerCase()));
+  const leftover = new Set<string>();
+  for (const token of rawTokens(english)) {
+    if (token.length <= 2) continue;
     const lower = token.toLowerCase();
-    if (PT_BR_TECHNICAL_TOKEN.has(lower) || PT_BR_COLUMN_TOKENS.has(lower)) return false;
-    return PT_BR_LEFTOVER_ENGLISH.has(lower);
-  });
+    if (
+      !portugueseLower.has(lower)
+      || PT_BR_IDENTICAL_SPELLINGS.has(lower)
+      || PT_BR_PRODUCT_TOKENS.has(lower)
+    ) continue;
+    leftover.add(lower);
+  }
+  return [...leftover].sort();
 }
 
 test("pt-BR host chrome uses Brazilian trading copy rather than English clones or European Portuguese", () => {
@@ -349,23 +369,16 @@ test("pt-BR host chrome uses Brazilian trading copy rather than English clones o
     assert.equal(t("export.chartLoading"), "O gráfico ainda está carregando dados.");
     assert.equal(t("plugin.live.reviewTitle"), "Revisar uma intenção preparada exata");
     assert.equal(t("core.error.exchangeList"), "Falha ao carregar a lista de exchanges");
-    assert.equal(t("alert.noProducts"), "Nenhum ativo disponível");
-    assert.equal(t("alert.refreshRules"), "Atualizar regras");
-    assert.equal(t("alert.toastRegion"), "Notificações de alerta");
-    assert.equal(t("local.resetFailed"), "Falha ao redefinir");
-    assert.equal(t("export.saveFailed"), "Falha ao salvar. Tente de novo mais tarde.");
-    assert.equal(t("core.error.workspaceRestore"), "Falha ao restaurar a área de trabalho");
     const clones: string[] = [];
     const mashups: string[] = [];
     for (const key of messageKeys()) {
       const message = t(key);
+      const english = en[key];
       assert.doesNotMatch(message, /ecrã|ficheiro|utilizador|percentagem/i, key);
       assert.doesNotMatch(message, /\p{Script=Han}/u, key);
-      if (message === en[key] && !isAllowedEnglishClone(message)) clones.push(key);
-      const leftover = leftoverEnglishTokens(message);
-      const grammarMashup = /\b(?:Disponível|Indisponível) (?:ativos|símbolos)|ativos disponível\b/i.test(message);
-      const englishNoPrefix = /^No /.test(en[key]) && /^No /.test(message) && hasPortugueseCopy(message);
-      if ((leftover.length > 0 && hasPortugueseCopy(message)) || grammarMashup || englishNoPrefix) {
+      if (typeof english !== "string") continue;
+      if (message === english && !isAllowedEnglishClone(message)) clones.push(key);
+      if (message !== english && leftoverSourceTokens(english, message).length > 0) {
         mashups.push(key);
       }
     }

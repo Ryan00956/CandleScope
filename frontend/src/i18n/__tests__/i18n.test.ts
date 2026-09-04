@@ -234,6 +234,8 @@ const PT_BR_TECHNICAL_IDENTIFIERS = new Set([
   "Used", "Watermark", "BAR", "WARM", "FULL", "Proof",
 ]);
 
+/** Closed leftover allowlist: product/protocol tokens and true PT cognates only.
+ * If a key flags, rewrite the catalog string; never add the token. */
 const PT_BR_PRODUCT_TOKENS = new Set([
   "replay", "backtest", "challenge", "sandbox", "practice", "spot", "perp",
   "binance", "okx", "candlescope", "websocket", "json", "csv", "vacuum",
@@ -244,48 +246,21 @@ const PT_BR_PRODUCT_TOKENS = new Set([
   "plugin", "plugins", "exchanges", "exchange", "webhook", "ccxt", "sqlite",
   "maker", "taker", "bids", "asks", "paper", "renko", "kagi", "review", "fork",
   "heikin", "ashi", "long", "short", "platform", "fibonacci", "donchian",
-  "train", "test", "high", "low", "close", "open", "time", "percentage",
+  "train", "test", "high", "low", "close", "open", "percentage",
   "uvicorn", "aggtrade", "pro", "reverse", "windows", "bollinger",
-  "socks5", "ta4j",
-]);
-
-/** Spellings that are valid Brazilian Portuguese, not leftover English. */
-const PT_BR_IDENTICAL_SPELLINGS = new Set([
-  "local", "software", "visual", "manual", "volume", "interface", "layout",
-  "zoom", "editor", "python", "desktop", "web", "total", "normal", "original",
-  "capital", "auto", "error", "item", "status", "type", "mode", "model",
-  "regular", "final", "terminal", "stack", "proxy", "amplitude", "ticker",
-  "backend", "frontend", "runtime", "script", "offline", "loopback", "fallback",
-  "polling", "footprint", "strategy", "use", "universal", "chip", "flag",
-  "multi", "candles", "decimal", "event", "parameter", "value", "window", "hash",
-  "coverage", "dataset", "pending", "empty", "rollback", "preset", "state",
-  "language", "archive", "draft", "fidelity", "overview", "dates", "baseline",
-  "resume", "compare", "smoke", "publisher", "checksum", "regime", "benchmark",
-  "split", "viewer", "viewport", "insurance", "bundle", "handoff", "copy",
-  "kind", "refs", "hold", "ledger", "rank", "diff", "params", "sample",
-  "slippage", "turnover", "momentum", "group", "index", "version", "schema",
-  "token", "cache", "buffer", "cluster", "yang", "yin", "york", "horizontal",
-  "vertical", "digital", "global", "social", "real", "formal", "material",
-  "general", "personal", "central", "principal",
-  "cursor", "download", "bytes", "job", "jobs", "snap", "shift", "studio",
-  "kernel", "ids", "ack", "toast", "hub", "candle", "checkpoint", "stream",
-  "snapshots", "range", "source", "line", "area", "tabs", "research", "recent",
-  "problems", "isolated", "rows", "count", "delta", "folds", "holdout",
-  "funding", "datasets", "hashes", "fills", "prefix", "auditor", "epoch",
-  "venue", "kill", "protection", "configuration", "comparison", "authority",
-  "revisions", "bundles", "deltas", "resize", "tester", "explanation",
-  "runtimes", "server", "drawdown", "oversold", "overbought", "embargo",
-  "sampler", "lease", "budget", "timeline", "projection", "cap", "socks",
-  "soak", "shadow", "streaming", "apis", "scripts", "bps", "dry",
-  "virtual", "dock", "proxies", "touch", "historical", "year", "month",
-  "combine", "letter", "drawings", "export", "exact", "closed", "display",
-  "way", "runs", "full", "report", "try", "zero", "complete", "untitled",
-  "top", "base", "off", "pause", "created", "read", "only", "fail", "smaller",
-  "follow", "dead", "awaiting", "min", "mib", "debug", "canvas", "blob",
-  "unix", "zip", "null", "sharpe", "qty", "liq", "sim", "fee", "max",
-  "stop", "limit", "target", "batch", "flags", "inputs", "fold",
-  "studies", "switch", "marketplace", "decide", "prepare", "spread",
-  "ms", "px", "id", "vs",
+  "socks5", "ta4j", "frontend", "backend", "python", "candle", "candles",
+  "runtime", "strategy", "local", "volume", "status", "software", "visual",
+  "manual", "interface", "layout", "zoom", "editor", "desktop", "web", "total",
+  "normal", "original", "capital", "auto", "error", "item", "type", "mode",
+  "model", "regular", "final", "terminal", "stack", "proxy", "ticker", "script",
+  "offline", "loopback", "fallback", "polling", "decimal", "event", "parameter",
+  "value", "window", "hash", "coverage", "dataset", "pending", "empty",
+  "rollback", "preset", "language", "archive", "draft", "fidelity", "overview",
+  "checksum", "regime", "benchmark", "split", "viewer", "viewport", "insurance",
+  "bundle", "copy", "kind", "ledger", "rank", "cache", "token", "schema",
+  "version", "index", "group", "momentum", "sample", "cursor", "download",
+  "bytes", "job", "jobs", "studio", "kernel", "stream", "checkpoint",
+  "amplitude", "use", "decide", "prepare", "ms", "px", "id", "vs",
 ]);
 
 function isAllowedEnglishClone(message: string): boolean {
@@ -347,11 +322,7 @@ function leftoverSourceTokens(english: string, portuguese: string): string[] {
     if (lower.length < 2) continue;
     if (lower.length === 2 && PT_TWO_LETTER.has(lower)) continue;
     if (/^\d+[smhdwmy]$/i.test(lower) || /^v\d+$/i.test(lower)) continue;
-    if (
-      !portugueseLower.has(lower)
-      || PT_BR_IDENTICAL_SPELLINGS.has(lower)
-      || PT_BR_PRODUCT_TOKENS.has(lower)
-    ) continue;
+    if (!portugueseLower.has(lower) || PT_BR_PRODUCT_TOKENS.has(lower)) continue;
     leftover.add(lower);
   }
   return [...leftover].sort();

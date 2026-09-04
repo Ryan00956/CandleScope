@@ -566,6 +566,278 @@
         "maxBytes": 16384,
         "maxTextChars": 64
       }
+    },
+    {
+      "id": "scan",
+      "kind": "command/1",
+      "title": "Scan scoped markets",
+      "entrypoint": "main",
+      "configuration": {
+        "localizations": {
+          "zh-CN": {
+            "title": "扫描已授权市场"
+          },
+          "ja": {
+            "title": "許可済み市場をスキャン"
+          }
+        },
+        "requiresUserAction": true,
+        "placements": [
+          "commandPalette",
+          "topToolbar"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "id": "settings",
+      "kind": "settings/1",
+      "title": "Market scanner settings",
+      "entrypoint": "main",
+      "configuration": {
+        "localizations": {
+          "zh-CN": {
+            "title": "市场扫描器设置",
+            "schema": {
+              "properties": {
+                "quoteAsset": {
+                  "title": "计价资产"
+                },
+                "symbolsLimit": {
+                  "title": "扫描标的数量"
+                },
+                "interval": {
+                  "title": "周期",
+                  "enumLabels": [
+                    "1 分钟",
+                    "5 分钟",
+                    "1 小时"
+                  ]
+                },
+                "lookbackBars": {
+                  "title": "回看 K 线数"
+                },
+                "minimumMovePct": {
+                  "title": "最小涨跌幅百分比"
+                }
+              }
+            }
+          },
+          "ja": {
+            "title": "マーケットスキャナー設定",
+            "schema": {
+              "properties": {
+                "quoteAsset": {
+                  "title": "決済通貨"
+                },
+                "symbolsLimit": {
+                  "title": "スキャン銘柄数"
+                },
+                "interval": {
+                  "title": "時間足",
+                  "enumLabels": [
+                    "1分",
+                    "5分",
+                    "1時間"
+                  ]
+                },
+                "lookbackBars": {
+                  "title": "遡及本数"
+                },
+                "minimumMovePct": {
+                  "title": "最小騰落率（%）"
+                }
+              }
+            }
+          }
+        },
+        "schema": {
+          "type": "object",
+          "properties": {
+            "quoteAsset": {
+              "type": "string",
+              "enum": [
+                "USDT"
+              ]
+            },
+            "symbolsLimit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 5
+            },
+            "interval": {
+              "type": "string",
+              "enum": [
+                "1m",
+                "5m",
+                "1h"
+              ]
+            },
+            "lookbackBars": {
+              "type": "integer",
+              "minimum": 2,
+              "maximum": 50
+            },
+            "minimumMovePct": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100
+            }
+          },
+          "required": [
+            "quoteAsset",
+            "symbolsLimit",
+            "interval",
+            "lookbackBars",
+            "minimumMovePct"
+          ],
+          "additionalProperties": false
+        },
+        "defaults": {
+          "quoteAsset": "USDT",
+          "symbolsLimit": 3,
+          "interval": "1h",
+          "lookbackBars": 20,
+          "minimumMovePct": 0
+        }
+      }
+    },
+    {
+      "id": "results",
+      "kind": "view/1",
+      "title": "Market scanner results",
+      "entrypoint": "main",
+      "configuration": {
+        "localizations": {
+          "zh-CN": {
+            "title": "市场扫描结果",
+            "fields": {
+              "symbol": "标的",
+              "changePct": "涨跌幅",
+              "close": "收盘价",
+              "time": "收盘时间"
+            },
+            "emptyState": "运行扫描器后将在此显示结果"
+          },
+          "ja": {
+            "title": "マーケットスキャナー結果",
+            "fields": {
+              "symbol": "銘柄",
+              "changePct": "騰落率",
+              "close": "終値",
+              "time": "終値時刻"
+            },
+            "emptyState": "スキャナーを実行すると結果が表示されます"
+          }
+        },
+        "slot": "sidePanel",
+        "renderer": "table",
+        "source": {
+          "kind": "storage.document",
+          "name": "latest-scan",
+          "path": [
+            "matches"
+          ]
+        },
+        "fields": [
+          {
+            "field": "symbol",
+            "label": "Symbol",
+            "format": "text"
+          },
+          {
+            "field": "changePct",
+            "label": "Move",
+            "format": "percent"
+          },
+          {
+            "field": "close",
+            "label": "Close",
+            "format": "price"
+          },
+          {
+            "field": "time",
+            "label": "Closed at",
+            "format": "timestamp"
+          }
+        ],
+        "maxItems": 50,
+        "emptyState": "Run the scanner to populate results",
+        "primaryCommand": "scan"
+      }
+    },
+    {
+      "id": "summary",
+      "kind": "view/1",
+      "title": "Market scanner summary",
+      "entrypoint": "main",
+      "configuration": {
+        "localizations": {
+          "zh-CN": {
+            "title": "市场扫描摘要",
+            "fields": {
+              "scannedSymbols": "已扫描",
+              "interval": "周期"
+            },
+            "emptyState": "扫描器空闲"
+          },
+          "ja": {
+            "title": "マーケットスキャナー概要",
+            "fields": {
+              "scannedSymbols": "スキャン済み",
+              "interval": "時間足"
+            },
+            "emptyState": "スキャナー待機中"
+          }
+        },
+        "slot": "statusArea",
+        "renderer": "status",
+        "source": {
+          "kind": "storage.document",
+          "name": "latest-scan",
+          "path": []
+        },
+        "fields": [
+          {
+            "field": "scannedSymbols",
+            "label": "Scanned",
+            "format": "number"
+          },
+          {
+            "field": "interval",
+            "label": "Interval",
+            "format": "text"
+          }
+        ],
+        "maxItems": 1,
+        "emptyState": "Scanner idle"
+      }
+    },
+    {
+      "id": "signals",
+      "kind": "chart-layer/1",
+      "title": "Market scanner signals",
+      "entrypoint": "main",
+      "configuration": {
+        "localizations": {
+          "zh-CN": {
+            "title": "市场扫描信号"
+          },
+          "ja": {
+            "title": "マーケットスキャナーシグナル"
+          }
+        },
+        "target": "main-chart",
+        "zOrder": "above-series",
+        "maxItems": 16,
+        "maxBytes": 16384,
+        "maxTextChars": 64
+      }
     }
   ],
   "permissions": {

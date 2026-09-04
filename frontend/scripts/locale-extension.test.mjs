@@ -15,13 +15,13 @@ test("registering a third catalog enables normalization, switching, formatting a
     const marker = "export const LOCALE_REGISTRY = {";
     assert.ok(registry.includes(marker));
     fs.writeFileSync(registryPath, registry.replace(marker, `${marker}
-      ja: {
-        nativeLabel: "日本語 (fixture)",
+      ko: {
+        nativeLabel: "한국어 (fixture)",
         messages: {
           ...en,
-          "shell.replay": "テスト再生",
-          "status.barCount": "{count} 本",
-          "workbench.manualHistory.title": "テスト履歴",
+          "shell.replay": "테스트 재생",
+          "status.barCount": "{count} 개",
+          "workbench.manualHistory.title": "테스트 기록",
         },
       },
     `));
@@ -34,19 +34,19 @@ test("registering a third catalog enables normalization, switching, formatting a
       globalThis.document = { documentElement: {} };
       let notifications = 0;
       const unsubscribe = subscribeLocale(() => { notifications++; });
-      assert.equal(isLocaleId("ja"), true);
-      assert.equal(normalizeLocale("ja-JP"), "ja");
-      assert.ok(LOCALE_OPTIONS.some(option => option.id === "ja"));
-      setLocale("ja-JP");
-      assert.equal(getLocale(), "ja");
-      assert.equal(document.documentElement.lang, "ja");
+      assert.equal(isLocaleId("ko"), true);
+      assert.equal(normalizeLocale("ko-KR"), "ko");
+      assert.ok(LOCALE_OPTIONS.some(option => option.id === "ko"));
+      setLocale("ko-KR");
+      assert.equal(getLocale(), "ko");
+      assert.equal(document.documentElement.lang, "ko");
       assert.equal(document.documentElement.dir, "ltr");
-      assert.equal(getDateTimeLocale(), "ja");
-      assert.equal(getNumberLocale(), "ja");
-      assert.equal(t("shell.replay"), "テスト再生");
-      assert.equal(t("workbench.manualHistory.title"), "テスト履歴");
-      assert.equal(tPlural("status.barCount", 1), "1 本");
-      setLocale("ja");
+      assert.equal(getDateTimeLocale(), "ko");
+      assert.equal(getNumberLocale(), "ko");
+      assert.equal(t("shell.replay"), "테스트 재생");
+      assert.equal(t("workbench.manualHistory.title"), "테스트 기록");
+      assert.equal(tPlural("status.barCount", 1), "1 개");
+      setLocale("ko");
       assert.equal(notifications, 1);
       setLocale("en");
       assert.equal(t("shell.replay"), "Replay");

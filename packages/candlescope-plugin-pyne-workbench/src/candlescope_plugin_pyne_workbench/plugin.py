@@ -67,6 +67,23 @@ _CONTRACT_LOCALIZATIONS = {
         "capabilityUnavailable": "Capacité {permission} indisponible",
         "boundedString": "{key} doit être une chaîne bornée",
     },
+    "ja": {
+        "Pyne workbench contribution is not invokable": "Pyne ワークベンチのコントリビューションは実行できません",
+        "Pyne session is not active": "Pyne セッションは有効ではありません",
+        "preview must be a boolean": "preview は真偽値である必要があります",
+        "workbench completion token is stale": "ワークベンチの完了トークンは無効です",
+        "workbench phase is invalid": "ワークベンチの段階が不正です",
+        "lookbackBars must be from 2 to 5000": "lookbackBars は 2 から 5000 である必要があります",
+        "paramsJson must be bounded JSON text": "paramsJson は長さ制限のある JSON テキストである必要があります",
+        "paramsJson is invalid JSON": "paramsJson は不正な JSON です",
+        "paramsJson must contain an object": "paramsJson はオブジェクトである必要があります",
+        "bar fields are invalid": "ローソク足フィールドが不正です",
+        "Host returned no market bars": "ホストが市場のローソク足を返しませんでした",
+        "Host bars are not all final": "ホストのローソク足がすべて確定していません",
+        "Host returned invalid bars": "ホストが不正なローソク足を返しました",
+        "capabilityUnavailable": "{permission} 能力は利用できません",
+        "boundedString": "{key} は長さ制限のある文字列である必要があります",
+    },
 }
 
 

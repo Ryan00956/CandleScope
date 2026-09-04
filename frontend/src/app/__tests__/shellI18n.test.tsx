@@ -52,6 +52,11 @@ test("settings category labels follow the active locale", () => {
     assert.equal(t(SETTINGS_CATEGORIES[0].labelKey), "Apparence");
     assert.equal(t("settings.saveAndClose"), "Enregistrer et fermer");
   });
+  withLocale("ja", () => {
+    assert.equal(t(SETTINGS_CATEGORIES[0].labelKey), "外観");
+    assert.equal(t("settings.saveAndClose"), "保存して閉じる");
+    assert.equal(t("settings.language.title"), "表示言語");
+  });
 });
 
 test("status bar chrome switches between Chinese and English", () => {
@@ -88,6 +93,12 @@ test("status bar chrome switches between Chinese and English", () => {
   assert.match(fr, /Direct \(WebSocket\)/);
   assert.doesNotMatch(fr, /Connected to/);
   assert.doesNotMatch(fr, /已连接/);
+  const ja = withLocale("ja", () => renderToStaticMarkup(<StatusBar status={status} />));
+  assert.match(ja, /Binance に接続済み/);
+  assert.match(ja, /2 本/);
+  assert.match(ja, /リアルタイム（WebSocket）/);
+  assert.match(ja, /Binance 現物/);
+  assert.doesNotMatch(ja, /已连接|Connected to/);
 });
 
 test("right-rail chrome follows the active locale", () => {
@@ -141,10 +152,26 @@ test("right-rail chrome follows the active locale", () => {
       layout={{ width: 360 }}
     />,
   ));
+  const ja = withLocale("ja", () => renderToStaticMarkup(
+    <MarketRightRailFrame
+      source="live"
+      views={viewsFor("ja")}
+      openViewIds={[]}
+      panelCollapsed
+      onToggleView={() => undefined}
+      onTogglePanelCollapsed={() => undefined}
+      renderView={() => null}
+      layout={{ width: 360 }}
+    />,
+  ));
   assert.match(fr, /aria-label="Barre latérale du marché"/);
   assert.match(fr, /Afficher la barre latérale/);
   assert.match(fr, /Liste de suivi/);
   assert.doesNotMatch(fr, /Market sidebar/);
+  assert.match(ja, /aria-label="市場サイドバー"/);
+  assert.match(ja, /サイドバーを表示/);
+  assert.match(ja, /ウォッチリスト/);
+  assert.doesNotMatch(ja, /市场侧栏|Market sidebar/);
 });
 
 test("appearance panel exposes a language picker that lists both locales", () => {
@@ -157,6 +184,7 @@ test("appearance panel exposes a language picker that lists both locales", () =>
   assert.match(html, /English/);
   assert.match(html, /Español/);
   assert.match(html, /Français/);
+  assert.match(html, /日本語/);
 
   const en = withLocale("en", () => renderToStaticMarkup(
     <ChartAppearancePanel

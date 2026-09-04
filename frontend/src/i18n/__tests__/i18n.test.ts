@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { en } from "../catalogs/en.js";
+import { ja } from "../catalogs/ja.js";
 import { zhCN } from "../catalogs/zh-CN.js";
 import {
   DEFAULT_LOCALE,
@@ -48,6 +49,9 @@ test("locale normalization keeps the product default and accepts English aliases
   assert.equal(normalizeLocale("fr-FR"), "fr");
   assert.equal(normalizeLocale("fr-CA"), "fr");
   assert.equal(normalizeLocale("FR-ca-u-nu-latn"), "fr");
+  assert.equal(normalizeLocale("ja"), "ja");
+  assert.equal(normalizeLocale("ja-JP"), "ja");
+  assert.equal(normalizeLocale("JA-jp"), "ja");
 });
 
 test("every registered locale exposes all host keys and a language-picker option", () => {
@@ -61,7 +65,13 @@ test("every registered locale exposes all host keys and a language-picker option
   assert.equal(isLocaleId("fr"), true);
   assert.equal(isLocaleId("fr-FR"), false);
   assert.ok(LOCALE_OPTIONS.some((option) => option.id === "fr" && option.nativeLabel === "Français"));
+  assert.equal(isLocaleId("ja-JP"), false);
   assert.deepEqual(messageKeys().slice().sort(), Object.keys(zhCN).sort());
+  const japanese = LOCALE_OPTIONS.find((option) => option.id === "ja");
+  assert.equal(japanese?.nativeLabel, "日本語");
+  assert.equal(localeDefinition("ja").dateTimeLocale, "ja-JP");
+  assert.equal(localeDefinition("ja").numberLocale, "ja-JP");
+  assert.equal(localeDefinition("ja").direction, "ltr");
 });
 
 test("locale resolution accepts new languages without changing its matching logic", () => {
@@ -103,6 +113,10 @@ test("format profiles preserve existing English dates and numbers and follow run
       stamp.toLocaleDateString(getDateTimeLocale(), { timeZone: "UTC" }),
       stamp.toLocaleDateString("fr-FR", { timeZone: "UTC" }),
     );
+  });
+  withLocale("ja", () => {
+    assert.equal(getDateTimeLocale(), "ja-JP");
+    assert.equal(getNumberLocale(), "ja-JP");
   });
 });
 
@@ -153,6 +167,14 @@ test("t interpolates and switches with the locale store", () => {
     assert.equal(t("orderBook.title"), "Carnet d’\u2060ordres");
     assert.match(t("settings.language.title"), /Langue/);
   });
+  withLocale("ja", () => {
+    assert.equal(t("shell.replay"), "リプレイ");
+    assert.equal(t("status.connectedTo", { exchange: "Binance" }), "Binance に接続済み");
+    assert.equal(
+      t("settings.exchange.verification.events", { count: 3546 }),
+      "3546 件のイベント、不一致なし",
+    );
+  });
 });
 
 test("plural forms keep Chinese invariant and distinguish English one/other", () => {
@@ -170,6 +192,12 @@ test("plural forms keep Chinese invariant and distinguish English one/other", ()
     assert.equal(tPlural("status.barCount", 1), "1 barre");
     assert.equal(tPlural("status.barCount", 2), "2 barres");
     assert.equal(tPlural("status.barCount", 1_000_000), "1000000 de barres");
+  });
+  withLocale("ja", () => {
+    assert.equal(tPlural("status.barCount", 1), "1 本");
+    assert.equal(tPlural("status.barCount", 2), "2 本");
+    assert.equal(new Intl.PluralRules("ja").select(1), "other");
+    assert.equal(new Intl.PluralRules("ja").select(2), "other");
   });
 });
 
@@ -200,6 +228,18 @@ test("market and exchange labels follow the active locale", () => {
     assert.equal(t("watchlist.title"), "Watchlist");
     assert.equal(t("orderBook.title"), "Order book");
     assert.equal(t("workspace.title"), "Chart workspace");
+  });
+  withLocale("ja", () => {
+    assert.equal(translateWsStatus("fallback"), "ポーリングにフォールバック");
+    assert.equal(translateMarketType("spot"), "現物");
+    assert.equal(translateMarketType("futures"), "先物");
+    assert.equal(translateMarketType("swap"), "無期限");
+    assert.equal(translateExchangeName("binance"), "Binance");
+    assert.equal(t("orderBook.title"), "板情報");
+    assert.equal(t("watchlist.title"), "ウォッチリスト");
+    assert.equal(t("pane.funding.next"), "次回決済");
+    assert.equal(t("settings.workbench.name"), "データワークベンチ");
+    assert.equal(t("plugin.title"), "プラグインセンター");
   });
 });
 
@@ -313,7 +353,6 @@ test("Spanish regional tags normalize to es and remain a registered locale", () 
   assert.equal(normalizeLocale("ES-es"), "es");
   assert.equal(normalizeLocale("es-419"), "es");
   assert.equal(normalizeLocale("pt-BR"), DEFAULT_LOCALE);
-  assert.equal(normalizeLocale("fr"), DEFAULT_LOCALE);
   assert.ok(LOCALE_OPTIONS.some((option) => option.id === "es" && option.nativeLabel === "Español"));
   assert.equal(localeDefinition("es").dateTimeLocale, "es-ES");
   assert.equal(localeDefinition("es").numberLocale, "es-ES");
@@ -389,6 +428,70 @@ test("Spanish hydrateLocale writes document lang and ltr direction", () => {
     hydrateLocale("es-MX");
     assert.equal(documentElement.lang, "es");
     assert.equal(documentElement.dir, "ltr");
+    assert.equal(hydrateLocale("ja-JP"), "ja");
+    assert.equal(getLocale(), "ja");
+    assert.equal(hydrateLocale("ja"), "ja");
+  } finally {
+    setLocale(previous);
+  }
+});
+
+function placeholders(value: string): string {
+  return [...value.matchAll(/\{([A-Za-z0-9_]+)\}/g)].map((match) => match[1]).sort().join(",");
+}
+
+function sharedHanCore(message: string): string {
+  return message
+    .replace(/\{[A-Za-z0-9_]+\}/g, "")
+    .replace(/[A-Za-z0-9._+/-]+/g, "")
+    .replace(/[\s{}.…・：:：、。()（）[\]【】「」『』<>《》/\\'"‘’“”·•※*~^|!?？！,，;；@#$%&_=<>+\-—–−≈〜～]/g, "")
+    .replace(/\p{Extended_Pictographic}/gu, "");
+}
+
+function isIdentifierLike(message: string): boolean {
+  const core = sharedHanCore(message.trim());
+  return core.length === 0 || (core.length <= 8 && /^[\p{Script=Han}\p{Number}]+$/u.test(core));
+}
+
+test("Japanese catalog translates every host key without English or Chinese fillers", () => {
+  const keys = Object.keys(zhCN) as Array<keyof typeof zhCN>;
+  assert.equal(Object.keys(ja).length, keys.length);
+  let translated = 0;
+  for (const key of keys) {
+    const message = ja[key];
+    assert.equal(typeof message, "string");
+    assert.ok(message.trim().length > 0, key);
+    assert.equal(placeholders(message), placeholders(zhCN[key]), key);
+    if (message === zhCN[key] || message === en[key]) {
+      assert.ok(isIdentifierLike(message), `non-identifier ja copy matches another locale: ${key} = ${JSON.stringify(message)}`);
+    } else {
+      translated += 1;
+    }
+  }
+  assert.ok(translated > keys.length * 0.9);
+});
+
+test("Japanese dates, numbers, and document lang follow the shipped ja locale", () => {
+  const previous = getLocale();
+  const previousDocument = globalThis.document;
+  const documentElement: { lang?: string; dir?: string } = {};
+  globalThis.document = { documentElement } as unknown as Document;
+  try {
+    setLocale("ja-JP");
+    assert.equal(getLocale(), "ja");
+    assert.equal(documentElement.lang, "ja");
+    assert.equal(documentElement.dir, "ltr");
+    const date = new Date(2024, 0, 15, 13, 4, 5);
+    assert.match(date.toLocaleDateString(getDateTimeLocale()), /2024/);
+    assert.match(date.toLocaleDateString(getDateTimeLocale()), /1/);
+    assert.equal((1234.5).toLocaleString(getNumberLocale()), "1,234.5");
+    setLocale("en");
+    assert.equal(documentElement.lang, "en");
+    setLocale("ja");
+    assert.equal(t("css.workspaceLoading"), "チャートワークスペースを読み込み中…");
+    assert.equal(t("scale.auto"), "自動スケール");
+    assert.match(t("replay.init.hedgeHybrid"), /HEDGE_HYBRID/);
+    assert.doesNotMatch(t("replay.init.hedgeHybrid"), /资金费|資金費/);
   } finally {
     if (previousDocument === undefined) {
       delete (globalThis as { document?: unknown }).document;
@@ -396,5 +499,10 @@ test("Spanish hydrateLocale writes document lang and ltr direction", () => {
       (globalThis as { document: typeof previousDocument }).document = previousDocument;
     }
     setLocale(previous);
+    if (previousDocument === undefined) {
+      Reflect.deleteProperty(globalThis, "document");
+    } else {
+      globalThis.document = previousDocument;
+    }
   }
 });

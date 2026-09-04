@@ -5,6 +5,8 @@ from importlib.resources import files
 import jsonschema
 import pytest
 
+import pytest
+
 from candlescope_plugin_sdk.platform_v2 import (
     ActivationRequest,
     CapabilityGrant,
@@ -102,7 +104,7 @@ def test_manifest_is_independent_v2_plugin_with_bounded_capabilities() -> None:
     ]
 
 
-def test_sandbox_ui_owns_zh_cn_and_english_copy() -> None:
+def test_sandbox_ui_owns_zh_cn_english_and_japanese_copy() -> None:
     web = files("candlescope_plugin_pyne_workbench").joinpath("web")
     html = web.joinpath("index.html").read_text(encoding="utf-8")
     javascript = web.joinpath("app.js").read_text(encoding="utf-8")
@@ -115,6 +117,8 @@ def test_sandbox_ui_owns_zh_cn_and_english_copy() -> None:
     assert "Esperando a CandleScope" in javascript
     assert "fr: {" in javascript
     assert "Atelier Pyne" in javascript
+    assert "ja: {" in javascript
+    assert "Pyne ワークベンチ" in javascript
     assert "applyLocale(payload.locale)" in javascript
     assert 'setStatus("statusRejected")' in javascript
 
@@ -163,7 +167,6 @@ def test_manifest_owns_french_contribution_copy() -> None:
 
 def test_workbench_errors_follow_french_regional_locale() -> None:
     error = PlatformContractError("INVALID_CONTRACT", "Pyne session is not active")
-    assert _localized_contract_error(error, "ja") is error
     translated = _localized_contract_error(error, "fr-CA")
     assert translated.message == "La session Pyne n’est pas active"
     capability = PlatformContractError(
@@ -179,6 +182,34 @@ def test_workbench_errors_follow_french_regional_locale() -> None:
                 "not-a-contribution",
                 {},
                 RequestContext("not-a-contribution", True, 1, "trace-fr", locale="fr-CA"),
+            )
+        )
+
+
+def test_manifest_owns_japanese_command_and_schema_copy() -> None:
+    manifest = pyne_workbench_manifest()
+    run = next(item for item in manifest.contributions if item.id == "run")
+    assert run.localizations["ja"]["title"] == "現在のチャートで Pyne を実行"
+    assert run.localizations["ja"]["schema"]["properties"]["lookbackBars"]["title"] == "遡及本数"
+    view = next(item for item in manifest.contributions if item.id == "workbench-view")
+    assert view.localizations["ja"]["title"] == "Pyne ワークベンチ"
+
+
+def test_plugin_owned_errors_follow_japanese_locale() -> None:
+    error = PlatformContractError(
+        "INVALID_CONTRACT",
+        "Pyne workbench contribution is not invokable",
+        "invoke.unknown",
+    )
+    translated = _localized_contract_error(error, "ja-JP")
+    assert translated.message == "Pyne ワークベンチのコントリビューションは実行できません"
+    plugin = _plugin()
+    with pytest.raises(PlatformContractError, match="実行できません"):
+        plugin.invoke(
+            InvokeRequest(
+                "unknown",
+                {},
+                RequestContext("unknown", True, 1, "trace-ja", "ja"),
             )
         )
 

@@ -8,6 +8,31 @@ const source = fs.readFileSync(new URL(
   import.meta.url,
 ), "utf8");
 
+test("first-party plugins ship Japanese manifest copy for owned surfaces", () => {
+  const scanner = JSON.parse(fs.readFileSync(new URL(
+    "../../packages/candlescope-plugin-market-scanner/src/candlescope_plugin_market_scanner/manifest.json",
+    import.meta.url,
+  ), "utf8"));
+  const workbench = JSON.parse(fs.readFileSync(new URL(
+    "../../packages/candlescope-plugin-pyne-workbench/src/candlescope_plugin_pyne_workbench/manifest.json",
+    import.meta.url,
+  ), "utf8"));
+  const scannerById = Object.fromEntries(scanner.contributions.map((item) => [item.id, item]));
+  const workbenchById = Object.fromEntries(workbench.contributions.map((item) => [item.id, item]));
+  assert.equal(scannerById.scan.configuration.localizations.ja.title, "許可済み市場をスキャン");
+  assert.deepEqual(
+    scannerById.settings.configuration.localizations.ja.schema.properties.interval.enumLabels,
+    ["1分", "5分", "1時間"],
+  );
+  assert.equal(scannerById.results.configuration.localizations.ja.fields.symbol, "銘柄");
+  assert.equal(
+    scannerById.results.configuration.localizations.ja.emptyState,
+    "スキャナーを実行すると結果が表示されます",
+  );
+  assert.equal(workbenchById.run.configuration.localizations.ja.title, "現在のチャートで Pyne を実行");
+  assert.equal(workbenchById["workbench-view"].configuration.localizations.ja.title, "Pyne ワークベンチ");
+});
+
 test("Pyne sandbox follows locale lifecycle updates and falls back to its own English catalog", () => {
   const title = { dataset: { i18n: "title" }, textContent: "" };
   const status = { dataset: { i18n: "statusWaiting" }, textContent: "" };
@@ -33,7 +58,7 @@ test("Pyne sandbox follows locale lifecycle updates and falls back to its own En
   connect({
     source: parent,
     ports: [channel],
-    data: { protocol: "candlescope.ui-bridge/1", type: "host.connect", sequence: 1, payload: payload("ja") },
+    data: { protocol: "candlescope.ui-bridge/1", type: "host.connect", sequence: 1, payload: payload("ko") },
   });
   assert.equal(document.documentElement.lang, "en");
   assert.equal(title.textContent, "Pyne Workbench");
@@ -45,6 +70,7 @@ test("Pyne sandbox follows locale lifecycle updates and falls back to its own En
     ["es-MX", "es", "Banco de trabajo Pyne"],
     ["es-ES", "es", "Banco de trabajo Pyne"],
     ["fr-CA", "fr", "Atelier Pyne"],
+    ["ja-JP", "ja", "Pyne ワークベンチ"],
   ]) {
     channel.onmessage({ data: {
       protocol: "candlescope.ui-bridge/1", type: "host.lifecycle",

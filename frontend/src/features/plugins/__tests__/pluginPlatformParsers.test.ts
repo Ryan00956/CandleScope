@@ -774,6 +774,15 @@ test("plugin-owned localizations are validated and resolved by the Host locale",
           },
         },
       },
+      fr: {
+        title: "Scanner",
+        schema: {
+          title: "Paramètres de scan",
+          properties: {
+            interval: { title: "Intervalle", enumLabels: ["1 minute", "5 minutes"] },
+          },
+        },
+      },
     },
   });
   Object.assign(value.plugins[0]!.contributions[1]!, {
@@ -783,12 +792,18 @@ test("plugin-owned localizations are validated and resolved by the Host locale",
         fields: { symbol: "标的" },
         emptyState: "暂无结果",
       },
+      fr: {
+        title: "Résultats",
+        fields: { symbol: "Symbole" },
+        emptyState: "Aucun résultat",
+      },
     },
   });
 
   const parsed = parsePluginCatalog(value);
   const zh = buildPluginRegistries(parsed, "zh-CN");
   const en = buildPluginRegistries(parsed, "en");
+  const french = buildPluginRegistries(parsed, "fr");
   assert.equal(zh.commandPalette[0]?.title, "扫描");
   assert.equal(zh.commandPalette[0]?.configuration.inputSchema?.title, "扫描参数");
   assert.deepEqual(
@@ -802,6 +817,18 @@ test("plugin-owned localizations are validated and resolved by the Host locale",
   assert.equal(zhView.configuration.emptyState, "暂无结果");
   assert.equal(en.commandPalette[0]?.title, "Scan");
   assert.equal(en.sidePanel[0]?.title, "Results");
+  assert.equal(french.commandPalette[0]?.title, "Scanner");
+  assert.equal(french.commandPalette[0]?.configuration.inputSchema?.title, "Paramètres de scan");
+  assert.deepEqual(
+    french.commandPalette[0]?.configuration.inputSchema?.properties?.interval?.enumLabels,
+    ["1 minute", "5 minutes"],
+  );
+  const frenchView = french.sidePanel[0];
+  if (!frenchView || frenchView.configuration.renderer === "sandbox") assert.fail("french view missing");
+  assert.equal(frenchView.title, "Résultats");
+  assert.equal(frenchView.configuration.fields[0]?.label, "Symbole");
+  assert.equal(frenchView.configuration.emptyState, "Aucun résultat");
+  assert.equal(buildPluginRegistries(parsed, "fr").commandPalette[0]?.title, "Scanner");
 
   const unknownField = structuredClone(value);
   const viewLocalization = (unknownField.plugins[0]!.contributions[1] as unknown as {

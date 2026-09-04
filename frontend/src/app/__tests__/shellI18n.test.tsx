@@ -48,6 +48,10 @@ test("settings category labels follow the active locale", () => {
     assert.equal(t(SETTINGS_CATEGORIES[0].labelKey), "Appearance");
     assert.equal(t("settings.saveAndClose"), "Save and close");
   });
+  withLocale("fr", () => {
+    assert.equal(t(SETTINGS_CATEGORIES[0].labelKey), "Apparence");
+    assert.equal(t("settings.saveAndClose"), "Enregistrer et fermer");
+  });
 });
 
 test("status bar chrome switches between Chinese and English", () => {
@@ -77,6 +81,13 @@ test("status bar chrome switches between Chinese and English", () => {
   assert.match(en, /Live \(WebSocket\)/);
   assert.match(en, /Binance Spot/);
   assert.doesNotMatch(en, /已连接/);
+
+  const fr = withLocale("fr", () => renderToStaticMarkup(<StatusBar status={status} />));
+  assert.match(fr, /Connecté à Binance/);
+  assert.match(fr, /2 barres/);
+  assert.match(fr, /Direct \(WebSocket\)/);
+  assert.doesNotMatch(fr, /Connected to/);
+  assert.doesNotMatch(fr, /已连接/);
 });
 
 test("right-rail chrome follows the active locale", () => {
@@ -117,6 +128,23 @@ test("right-rail chrome follows the active locale", () => {
   assert.match(en, /Show sidebar/);
   assert.match(en, /Watchlist/);
   assert.doesNotMatch(en, /市场侧栏/);
+
+  const fr = withLocale("fr", () => renderToStaticMarkup(
+    <MarketRightRailFrame
+      source="live"
+      views={viewsFor("fr")}
+      openViewIds={[]}
+      panelCollapsed
+      onToggleView={() => undefined}
+      onTogglePanelCollapsed={() => undefined}
+      renderView={() => null}
+      layout={{ width: 360 }}
+    />,
+  ));
+  assert.match(fr, /aria-label="Barre latérale du marché"/);
+  assert.match(fr, /Afficher la barre latérale/);
+  assert.match(fr, /Liste de suivi/);
+  assert.doesNotMatch(fr, /Market sidebar/);
 });
 
 test("appearance panel exposes a language picker that lists both locales", () => {
@@ -128,6 +156,7 @@ test("appearance panel exposes a language picker that lists both locales", () =>
   assert.match(html, /简体中文/);
   assert.match(html, /English/);
   assert.match(html, /Español/);
+  assert.match(html, /Français/);
 
   const en = withLocale("en", () => renderToStaticMarkup(
     <ChartAppearancePanel
@@ -138,6 +167,18 @@ test("appearance panel exposes a language picker that lists both locales", () =>
   assert.match(en, /Interface language/);
   assert.doesNotMatch(en, /界面语言/);
   assert.match(en, /Español/);
+  assert.match(en, /Français/);
+
+  const fr = withLocale("fr", () => renderToStaticMarkup(
+    <ChartAppearancePanel
+      settings={{ ...DEFAULT_SETTINGS, locale: "fr" }}
+      onUpdate={() => undefined}
+    />,
+  ));
+  assert.match(fr, /Langue/);
+  assert.match(fr, /Français/);
+  assert.doesNotMatch(fr, /界面语言/);
+  assert.doesNotMatch(fr, /Interface language/);
 });
 
 test("status bar, right rail, and appearance chrome switch to Spanish", () => {

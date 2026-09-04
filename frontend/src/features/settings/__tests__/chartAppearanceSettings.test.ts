@@ -37,10 +37,11 @@ test("settings normalization defaults locale to zh-CN and accepts English aliase
   assert.equal(normalizeSettings({ locale: "en" }).locale, "en");
   assert.equal(normalizeSettings({ locale: "en-US" }).locale, "en");
   assert.equal(normalizeSettings({ locale: "zh-Hans" }).locale, "zh-CN");
-  assert.equal(normalizeSettings({ locale: "fr-FR" }).locale, "zh-CN");
   assert.equal(normalizeSettings({ locale: "es" }).locale, "es");
   assert.equal(normalizeSettings({ locale: "es-ES" }).locale, "es");
   assert.equal(normalizeSettings({ locale: "es-MX" }).locale, "es");
+  assert.equal(normalizeSettings({ locale: "fr-FR" }).locale, "fr");
+  assert.equal(normalizeSettings({ locale: "fr-CA" }).locale, "fr");
 });
 
 test("settings storage changes synchronize the complete settings snapshot across windows", () => {
@@ -52,13 +53,16 @@ test("settings storage changes synchronize the complete settings snapshot across
   assert.equal(incoming?.locale, "en");
   assert.equal(settingsFromStorageChange("unrelated-key", "{}"), null);
   assert.equal(settingsFromStorageChange(null, null)?.locale, "zh-CN");
-
   const spanish = settingsFromStorageChange("candlescope-settings", JSON.stringify({
     locale: "es-MX",
   }));
   assert.equal(spanish?.locale, "es");
   const persisted = parseStoredSettings(JSON.stringify({ locale: "es-ES" }));
   assert.equal(persisted.locale, "es");
+  const french = settingsFromStorageChange("candlescope-settings", JSON.stringify({
+    locale: "fr-CA",
+  }));
+  assert.equal(french?.locale, "fr");
 });
 
 test("settings normalization preserves supported chart types and rejects stale values", () => {

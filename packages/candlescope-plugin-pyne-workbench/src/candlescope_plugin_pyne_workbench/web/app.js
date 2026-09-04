@@ -54,6 +54,21 @@
       mainChart: "Gráfico principal",
       theme: "Tema",
     },
+    fr: {
+      title: "Atelier Pyne",
+      statusWaiting: "En attente de la connexion CandleScope",
+      statusRejected: "Protocole de connexion rejeté",
+      statusConnected: "Connecté · exécutez les commandes depuis le panneau du plugin",
+      statusDisposed: "Fermé",
+      howTo: "Mode d’emploi",
+      stepOpenChart: "Ouvrez un graphique principal en direct pris en charge.",
+      stepRunCommand: "Exécutez « Exécuter Pyne sur le graphique actuel » depuis les commandes du plugin.",
+      stepDebug: "Pour un débogage barre par barre, démarrez une session, puis poussez ou prévisualisez des barres.",
+      boundaryTitle: "Limites actuelles",
+      boundaryBody: "Les scripts et les données n’utilisent que les appels de capacité de l’hôte. Les graphiques sont convertis vers le Render IR v2 borné ; les sorties candle, table et linefill qui ne peuvent pas être mappées sans perte restent dans le résumé natif Pyne.",
+      mainChart: "Graphique principal",
+      theme: "Thème",
+    },
   };
   let locale = "zh-CN";
 

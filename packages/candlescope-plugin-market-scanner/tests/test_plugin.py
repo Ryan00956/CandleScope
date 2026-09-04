@@ -20,22 +20,20 @@ from candlescope_plugin_market_scanner.plugin import (
 def test_plugin_error_localizations_accept_additional_languages_and_preserve_fallback(monkeypatch):
     error = PlatformContractError("invalid_request", "market scanner phase is invalid", "phase")
     assert _localized_contract_error(error, "ja") is error
-    monkeypatch.setitem(
-        _CONTRACT_LOCALIZATIONS,
-        "fr",
-        {
-            "market scanner phase is invalid": "Phase invalide",
-            "capabilityUnavailable": "Capacité indisponible : {permission}",
-        },
-    )
     translated = _localized_contract_error(error, "fr-CA")
-    assert translated.message == "Phase invalide"
+    assert translated.message == "La phase du scanner de marché est invalide"
     assert (translated.code, translated.path) == (error.code, error.path)
     capability = PlatformContractError("unavailable", "market.bars.read capability is unavailable")
     assert _localized_contract_error(capability, "fr").message == (
-        "Capacité indisponible : market.bars.read"
+        "Capacité market.bars.read indisponible"
     )
     assert _localized_contract_error(error, "zh-cn").message == "市场扫描器阶段无效"
+    monkeypatch.setitem(_CONTRACT_LOCALIZATIONS, "de", {
+        "market scanner phase is invalid": "Ungültige Phase",
+        "capabilityUnavailable": "Fähigkeit nicht verfügbar: {permission}",
+    })
+    german = _localized_contract_error(error, "de-DE")
+    assert german.message == "Ungültige Phase"
 
 
 def _context(locale: str = "en") -> RequestContext:
@@ -73,6 +71,12 @@ def test_packaged_manifest_owns_entrypoint_and_localized_enum_labels() -> None:
     assert summary.localizations["es"]["fields"]["scannedSymbols"] == "Escaneados"
     signals = next(item for item in manifest.contributions if item.id == "signals")
     assert signals.localizations["es"]["title"] == "Señales del escáner de mercado"
+    french = settings.localizations["fr"]["schema"]["properties"]["interval"]
+    assert french["enumLabels"] == ["1 minute", "5 minutes", "1 heure"]
+    assert results.localizations["fr"]["emptyState"] == (
+        "Lancez le scanner pour afficher les résultats ici"
+    )
+    assert results.localizations["fr"]["fields"]["symbol"] == "Symbole"
 
 
 def test_spanish_contract_errors_follow_parent_locale() -> None:
@@ -111,4 +115,15 @@ def test_plugin_owned_validation_error_follows_request_locale() -> None:
         request_context=_context("zh-CN"),
     )
     with pytest.raises(PlatformContractError, match="只接受空参数"):
+        plugin.invoke(request)
+
+
+def test_plugin_owned_validation_error_follows_french_regional_locale() -> None:
+    plugin = MarketScannerPlugin()
+    request = InvokeRequest(
+        contribution_id="scan",
+        input={"unexpected": True},
+        request_context=_context("fr-CA"),
+    )
+    with pytest.raises(PlatformContractError, match="n’accepte qu’une commande de scan"):
         plugin.invoke(request)

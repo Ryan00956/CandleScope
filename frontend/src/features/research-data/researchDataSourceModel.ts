@@ -1,11 +1,9 @@
-import { LOCALES, getLocale, t, type LocaleId } from "../../i18n/index.js";
+import { LOCALES, t, type LocaleId, type MessageKey } from "../../i18n/index.js";
 import {
   FROZEN_RESEARCH_CONTEXT_SCHEMA,
   FORBIDDEN_ORDINARY_UI_TERMS,
   ORDINARY_RESEARCH_TERMS,
-  RESEARCH_CAPABILITY_COPY,
   RESEARCH_CAPABILITY_IDS,
-  RESEARCH_ERROR_ACTIONS,
   RESEARCH_SOURCE_KINDS,
   RESEARCH_SOURCE_SCHEMA,
   type FrozenResearchContextV1,
@@ -19,25 +17,53 @@ import {
   type ResearchSourceRefV1,
 } from "./researchDataTypes.js";
 
-type ResearchCopyLocale = "en" | "zh" | "ko";
+const RESEARCH_ERROR_ACTION_KEYS = {
+  INVALID_RESEARCH_SOURCE: "research.errorAction.chooseSourceAgain",
+  UNKNOWN_SOURCE_KIND: "research.errorAction.chooseSourceAgain",
+  MISSING_DATASET_IDENTITY: "research.errorAction.chooseDataVersion",
+  MISSING_SNAPSHOT_HASH: "research.errorAction.reopenCompletedResult",
+  INVALID_FROZEN_CONTEXT: "research.errorAction.freezeAgain",
+  CONTEXT_HASH_MISMATCH: "research.errorAction.freezeAgain",
+  FRONTEND_MUST_NOT_INVENT_SNAPSHOT: "research.errorAction.waitForFrozenIdentity",
+} as const satisfies Record<string, MessageKey>;
 
-function researchCopyLocale(locale?: ResearchCopyLocale): ResearchCopyLocale {
-  if (locale) return locale;
-  const host = getLocale();
-  if (host === "en" || host === "ko") return host;
-  return "zh";
+const RESEARCH_CAPABILITY_KEYS = {
+  viewKlines: "research.capability.viewKlines",
+  importCsv: "research.capability.importCsv",
+  importDenied: "research.capability.importDenied",
+  switchLibrary: "research.capability.switchLibrary",
+  activateVersion: "research.capability.activateVersion",
+  versionDenied: "research.capability.versionDenied",
+  manageVersions: "research.capability.manageVersions",
+  barApprox: "research.capability.barApprox",
+  gapDenied: "research.capability.gapDenied",
+  shortenOrImport: "research.capability.shortenOrImport",
+  frozenTape: "research.capability.frozenTape",
+  tapeDenied: "research.capability.tapeDenied",
+  useBarsOrTape: "research.capability.useBarsOrTape",
+  offlineLive: "research.capability.offlineLive",
+  chooseLibrary: "research.capability.chooseLibrary",
+  prepareHistory: "research.capability.prepareHistory",
+  noNetworkBackfill: "research.capability.noNetworkBackfill",
+  useImportedOrShorten: "research.capability.useImportedOrShorten",
+  readOnlyResults: "research.capability.readOnlyResults",
+  localBars: "research.capability.localBars",
+  liveIndicators: "research.capability.liveIndicators",
+  offlineIndicators: "research.capability.offlineIndicators",
+  independentReview: "research.capability.independentReview",
+  bindVersion: "research.capability.bindVersion",
+  bindChart: "research.capability.bindChart",
+  offlineChartStrategy: "research.capability.offlineChartStrategy",
+} as const satisfies Record<string, MessageKey>;
+
+function errorAction(code: string, locale?: LocaleId): string {
+  const key = RESEARCH_ERROR_ACTION_KEYS[code as keyof typeof RESEARCH_ERROR_ACTION_KEYS]
+    ?? "research.errorAction.chooseSourceAgain";
+  return t(key, {}, locale);
 }
 
-function errorAction(code: string, locale?: ResearchCopyLocale): string {
-  const id = researchCopyLocale(locale);
-  const entry = Object.prototype.hasOwnProperty.call(RESEARCH_ERROR_ACTIONS, code)
-    ? RESEARCH_ERROR_ACTIONS[code as keyof typeof RESEARCH_ERROR_ACTIONS]
-    : RESEARCH_ERROR_ACTIONS.fallback;
-  return entry[id];
-}
-
-function capabilityCopy(key: keyof typeof RESEARCH_CAPABILITY_COPY, locale?: ResearchCopyLocale): string {
-  return RESEARCH_CAPABILITY_COPY[key][researchCopyLocale(locale)];
+function capabilityCopy(key: keyof typeof RESEARCH_CAPABILITY_KEYS, locale?: LocaleId): string {
+  return t(RESEARCH_CAPABILITY_KEYS[key], {}, locale);
 }
 
 export class ResearchDataError extends Error {
@@ -226,6 +252,7 @@ export function projectResearchCapabilities(input: {
   quality?: ResearchQualitySummaryV1 | null;
   hasFrozenTrades?: boolean;
   hasResultCapabilities?: boolean | null;
+  locale?: LocaleId;
 }): ResearchCapabilitySummaryV1 {
   const runtimeMode = input.runtimeMode ?? "LIVE";
   const kind = input.sourceKind;
@@ -236,62 +263,63 @@ export function projectResearchCapabilities(input: {
   const offline = runtimeMode === "LOCAL_OFFLINE";
   const hasFrozenTrades = input.hasFrozenTrades === true;
   const fidelityCeiling = hasFrozenTrades ? "TRADE_TAPE" : "BAR_APPROX";
+  const copy = (key: keyof typeof RESEARCH_CAPABILITY_KEYS) => capabilityCopy(key, input.locale);
 
   const capabilities: ResearchCapabilitySummaryV1["capabilities"] = {
-    viewKlines: allow(capabilityCopy("viewKlines")),
+    viewKlines: allow(copy("viewKlines")),
     importNewData: imported
-      ? allow(capabilityCopy("importCsv"))
-      : deny("IMPORT_NOT_AVAILABLE", capabilityCopy("importDenied"), capabilityCopy("switchLibrary")),
+      ? allow(copy("importCsv"))
+      : deny("IMPORT_NOT_AVAILABLE", copy("importDenied"), copy("switchLibrary")),
     modifyRevisionPointer: imported
-      ? allow(capabilityCopy("activateVersion"))
+      ? allow(copy("activateVersion"))
       : deny(
         "REVISION_POINTER_NOT_AVAILABLE",
-        capabilityCopy("versionDenied"),
-        capabilityCopy("manageVersions"),
+        copy("versionDenied"),
+        copy("manageVersions"),
       ),
     barApprox: imported || completed || qualityOk
-      ? allow(capabilityCopy("barApprox"))
-      : deny("DATA_GAP", capabilityCopy("gapDenied"), capabilityCopy("shortenOrImport")),
+      ? allow(copy("barApprox"))
+      : deny("DATA_GAP", copy("gapDenied"), copy("shortenOrImport")),
     tradeTape: hasFrozenTrades
-      ? allow(capabilityCopy("frozenTape"))
-      : deny("UNSUPPORTED_FIDELITY", capabilityCopy("tapeDenied"), capabilityCopy("useBarsOrTape")),
+      ? allow(copy("frozenTape"))
+      : deny("UNSUPPORTED_FIDELITY", copy("tapeDenied"), copy("useBarsOrTape")),
     onlineBackfill: offline
-      ? deny("OFFLINE_LIVE_SOURCE_UNAVAILABLE", capabilityCopy("offlineLive"), capabilityCopy("chooseLibrary"))
+      ? deny("OFFLINE_LIVE_SOURCE_UNAVAILABLE", copy("offlineLive"), copy("chooseLibrary"))
       : chart
-        ? allow(capabilityCopy("prepareHistory"))
+        ? allow(copy("prepareHistory"))
         : deny(
           "IMPORTED_DATASET_NEVER_NETWORKS",
-          capabilityCopy("noNetworkBackfill"),
-          capabilityCopy("useImportedOrShorten"),
+          copy("noNetworkBackfill"),
+          copy("useImportedOrShorten"),
         ),
     indicators: completed
-      ? allow(capabilityCopy("readOnlyResults"))
+      ? allow(copy("readOnlyResults"))
       : imported
-        ? allow(capabilityCopy("localBars"))
+        ? allow(copy("localBars"))
         : !offline
-          ? allow(capabilityCopy("liveIndicators"))
+          ? allow(copy("liveIndicators"))
           : deny(
             "OFFLINE_LIVE_SOURCE_UNAVAILABLE",
-            capabilityCopy("offlineIndicators"),
-            capabilityCopy("chooseLibrary"),
+            copy("offlineIndicators"),
+            copy("chooseLibrary"),
           ),
     drawingsEvents: completed
-      ? allow(capabilityCopy("independentReview"))
+      ? allow(copy("independentReview"))
       : imported
-        ? allow(capabilityCopy("bindVersion"))
-        : allow(capabilityCopy("bindChart")),
+        ? allow(copy("bindVersion"))
+        : allow(copy("bindChart")),
   };
 
   if (offline && chart) {
     capabilities.viewKlines = deny(
       "OFFLINE_LIVE_SOURCE_UNAVAILABLE",
-      capabilityCopy("offlineLive"),
-      capabilityCopy("chooseLibrary"),
+      copy("offlineLive"),
+      copy("chooseLibrary"),
     );
     capabilities.barApprox = deny(
       "OFFLINE_LIVE_SOURCE_UNAVAILABLE",
-      capabilityCopy("offlineChartStrategy"),
-      capabilityCopy("chooseLibrary"),
+      copy("offlineChartStrategy"),
+      copy("chooseLibrary"),
     );
   }
 

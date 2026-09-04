@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-import { getLocale, setLocale } from "../../../i18n/index.js";
+import { LOCALES, getLocale, setLocale, t } from "../../../i18n/index.js";
 import {
   assembleFrozenResearchContext,
   frozenContextCanonicalJson,
@@ -150,6 +150,40 @@ test("LOCAL_OFFLINE hides runnable current chart with a reason", () => {
   const summary = projectResearchCapabilities({ sourceKind: "CURRENT_CHART", runtimeMode: "LOCAL_OFFLINE" });
   assert.equal(isCapabilityAvailable(summary, "barApprox"), false);
   assert.equal(summary.capabilities.barApprox?.reasonCode, "OFFLINE_LIVE_SOURCE_UNAVAILABLE");
+});
+
+test("research actions and capability copy follow every registered locale", () => {
+  const previous = getLocale();
+  try {
+    for (const locale of LOCALES) {
+      setLocale(locale);
+      const error = new ResearchDataError("MISSING_DATASET_IDENTITY", "datasetId is required");
+      assert.equal(error.action, t("research.errorAction.chooseDataVersion", {}, locale));
+
+      const capabilities = projectResearchCapabilities({
+        sourceKind: "CURRENT_CHART",
+        runtimeMode: "LOCAL_OFFLINE",
+        locale,
+      });
+      assert.equal(
+        capabilities.capabilities.viewKlines?.userReason,
+        t("research.capability.offlineLive", {}, locale),
+      );
+      assert.equal(
+        capabilities.capabilities.barApprox?.userAction,
+        t("research.capability.chooseLibrary", {}, locale),
+      );
+    }
+
+    for (const locale of ["es", "fr", "ja", "pt-BR", "ru", "zh-TW"] as const) {
+      assert.notEqual(
+        t("research.errorAction.chooseDataVersion", {}, locale),
+        t("research.errorAction.chooseDataVersion", {}, "zh-CN"),
+      );
+    }
+  } finally {
+    setLocale(previous);
+  }
 });
 
 test("ordinary UI copy never includes internal identity terms", () => {

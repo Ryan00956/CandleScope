@@ -44,6 +44,46 @@ WORKBENCH_PROTOCOL_V1 = "candlescope.pyne-workbench/1"
 _LAYER_ID = "pyne-output"
 
 _CONTRACT_LOCALIZATIONS = {
+    "zh-CN": {
+        "Pyne workbench contribution is not invokable": "Pyne 工作台贡献不可调用",
+        "Pyne session is not active": "Pyne 会话未激活",
+        "preview must be a boolean": "preview 必须是布尔值",
+        "workbench completion token is stale": "工作台完成令牌已失效",
+        "workbench phase is invalid": "工作台阶段无效",
+        "lookbackBars must be from 2 to 5000": "lookbackBars 必须在 2 到 5000 之间",
+        "paramsJson must be bounded JSON text": "paramsJson 必须是长度受限的 JSON 文本",
+        "paramsJson is invalid JSON": "paramsJson 不是有效的 JSON",
+        "paramsJson must contain an object": "paramsJson 必须包含对象",
+        "bar fields are invalid": "K 线字段无效",
+        "Host returned no market bars": "Host 未返回行情 K 线",
+        "Host bars are not all final": "Host 返回的 K 线并非全部已收盘",
+        "Host returned invalid bars": "Host 返回了无效 K 线",
+        "capabilityUnavailable": "{permission} 能力不可用",
+        "boundedString": "{key} 必须是长度受限的字符串",
+    },
+    "es": {
+        "Pyne workbench contribution is not invokable": (
+            "La contribución del banco de trabajo Pyne no se puede invocar"
+        ),
+        "Pyne session is not active": "La sesión de Pyne no está activa",
+        "preview must be a boolean": "preview debe ser un booleano",
+        "workbench completion token is stale": (
+            "El token de finalización del banco de trabajo ha caducado"
+        ),
+        "workbench phase is invalid": "La fase del banco de trabajo no es válida",
+        "lookbackBars must be from 2 to 5000": "lookbackBars debe estar entre 2 y 5000",
+        "paramsJson must be bounded JSON text": (
+            "paramsJson debe ser texto JSON de longitud limitada"
+        ),
+        "paramsJson is invalid JSON": "paramsJson no es un JSON válido",
+        "paramsJson must contain an object": "paramsJson debe contener un objeto",
+        "bar fields are invalid": "Los campos de la vela no son válidos",
+        "Host returned no market bars": "El Host no devolvió velas de mercado",
+        "Host bars are not all final": "No todas las velas del Host están cerradas",
+        "Host returned invalid bars": "El Host devolvió velas no válidas",
+        "capabilityUnavailable": "La capacidad {permission} no está disponible",
+        "boundedString": "{key} debe ser una cadena de longitud limitada",
+    },
     "fr": {
         "Pyne workbench contribution is not invokable": (
             "La contribution de l’atelier Pyne n’est pas invocable"
@@ -100,6 +140,63 @@ _CONTRACT_LOCALIZATIONS = {
         "Host returned invalid bars": "호스트가 유효하지 않은 캔들을 반환함",
         "capabilityUnavailable": "{permission} 기능을 사용할 수 없음",
         "boundedString": "{key}은(는) 제한된 문자열이어야 함",
+    },
+    "pt-BR": {
+        "Pyne workbench contribution is not invokable": (
+            "A contribuição do Pyne Workbench não pode ser invocada"
+        ),
+        "Pyne session is not active": "A sessão Pyne não está ativa",
+        "preview must be a boolean": "preview deve ser um booleano",
+        "workbench completion token is stale": "O token de conclusão do workbench expirou",
+        "workbench phase is invalid": "A fase do workbench é inválida",
+        "lookbackBars must be from 2 to 5000": "lookbackBars deve estar entre 2 e 5000",
+        "paramsJson must be bounded JSON text": (
+            "paramsJson deve ser um texto JSON com tamanho limitado"
+        ),
+        "paramsJson is invalid JSON": "paramsJson não é um JSON válido",
+        "paramsJson must contain an object": "paramsJson deve conter um objeto",
+        "bar fields are invalid": "Os campos do candle são inválidos",
+        "Host returned no market bars": "O Host não retornou candles de mercado",
+        "Host bars are not all final": "Nem todos os candles do Host estão fechados",
+        "Host returned invalid bars": "O Host retornou candles inválidos",
+        "capabilityUnavailable": "A capacidade {permission} não está disponível",
+        "boundedString": "{key} deve ser uma string com tamanho limitado",
+    },
+    "ru": {
+        "Pyne workbench contribution is not invokable": "Вклад верстака Pyne нельзя вызвать",
+        "Pyne session is not active": "Сессия Pyne не активна",
+        "preview must be a boolean": "preview должен быть логическим значением",
+        "workbench completion token is stale": "Токен завершения верстака устарел",
+        "workbench phase is invalid": "Недопустимая фаза верстака",
+        "lookbackBars must be from 2 to 5000": "lookbackBars должен быть от 2 до 5000",
+        "paramsJson must be bounded JSON text": (
+            "paramsJson должен быть ограниченным по длине текстом JSON"
+        ),
+        "paramsJson is invalid JSON": "paramsJson содержит недопустимый JSON",
+        "paramsJson must contain an object": "paramsJson должен содержать объект",
+        "bar fields are invalid": "Недопустимые поля свечи",
+        "Host returned no market bars": "Host не вернул рыночные свечи",
+        "Host bars are not all final": "Не все свечи Host закрыты",
+        "Host returned invalid bars": "Host вернул недопустимые свечи",
+        "capabilityUnavailable": "Возможность {permission} недоступна",
+        "boundedString": "{key} должен быть ограниченной по длине строкой",
+    },
+    "zh-TW": {
+        "Pyne workbench contribution is not invokable": "Pyne 工作台貢獻無法呼叫",
+        "Pyne session is not active": "Pyne 工作階段尚未啟用",
+        "preview must be a boolean": "preview 必須是布林值",
+        "workbench completion token is stale": "工作台完成權杖已失效",
+        "workbench phase is invalid": "工作台階段無效",
+        "lookbackBars must be from 2 to 5000": "lookbackBars 必須介於 2 到 5000 之間",
+        "paramsJson must be bounded JSON text": "paramsJson 必須是長度受限的 JSON 文字",
+        "paramsJson is invalid JSON": "paramsJson 不是有效的 JSON",
+        "paramsJson must contain an object": "paramsJson 必須包含物件",
+        "bar fields are invalid": "K 線欄位無效",
+        "Host returned no market bars": "Host 未傳回行情 K 線",
+        "Host bars are not all final": "Host 傳回的 K 線並非全部已收盤",
+        "Host returned invalid bars": "Host 傳回了無效 K 線",
+        "capabilityUnavailable": "{permission} 功能不可用",
+        "boundedString": "{key} 必須是長度受限的字串",
     },
 }
 

@@ -16,7 +16,10 @@ from candlescope_plugin_sdk.platform_v2 import (
 )
 from candlescope_plugin_sdk.platform_v2.errors import PlatformContractError
 from candlescope_plugin_pyne_workbench import PyneWorkbenchPlugin, pyne_workbench_manifest
-from candlescope_plugin_pyne_workbench.plugin import _localized_contract_error
+from candlescope_plugin_pyne_workbench.plugin import (
+    _CONTRACT_LOCALIZATIONS,
+    _localized_contract_error,
+)
 
 
 CHART = {
@@ -200,6 +203,37 @@ def test_workbench_errors_follow_french_regional_locale() -> None:
                 RequestContext("not-a-contribution", True, 1, "trace-fr", locale="fr-CA"),
             )
         )
+
+
+def test_runtime_contract_errors_cover_every_manifest_locale() -> None:
+    manifest = pyne_workbench_manifest()
+    declared = {
+        locale
+        for contribution in manifest.contributions
+        for locale in contribution.localizations
+    }
+    assert declared == set(_CONTRACT_LOCALIZATIONS)
+
+    error = PlatformContractError("INVALID_CONTRACT", "Pyne session is not active")
+    expected = {
+        "zh-CN": "Pyne 会话未激活",
+        "es": "La sesión de Pyne no está activa",
+        "fr": "La session Pyne n’est pas active",
+        "ja": "Pyne セッションは有効ではありません",
+        "ko": "Pyne 세션이 활성 상태가 아님",
+        "pt-BR": "A sessão Pyne não está ativa",
+        "ru": "Сессия Pyne не активна",
+        "zh-TW": "Pyne 工作階段尚未啟用",
+    }
+    for locale, message in expected.items():
+        translated = _localized_contract_error(error, locale)
+        assert translated.message == message
+        assert translated is not error
+
+    assert _localized_contract_error(error, "es-MX").message == expected["es"]
+    assert _localized_contract_error(error, "pt-br").message == expected["pt-BR"]
+    assert _localized_contract_error(error, "ru-RU").message == expected["ru"]
+    assert _localized_contract_error(error, "zh-tw").message == expected["zh-TW"]
 
 
 def test_manifest_owns_japanese_command_and_schema_copy() -> None:

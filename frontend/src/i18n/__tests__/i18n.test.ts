@@ -205,6 +205,53 @@ test("pt-BR catalog covers every Intl.PluralRules category and selects them at r
   });
 });
 
+/** Product/protocol identifiers that may stay English in pt-BR. */
+const PT_BR_TECHNICAL_IDENTIFIERS = new Set([
+  "Replay", "Backtest", "Challenge", "Sandbox", "Practice", "Spot", "Perp",
+  "Binance", "OKX", "CandleScope", "WebSocket", "JSON", "CSV", "VACUUM",
+  "AND", "OR", "NOT", "LONG", "SHORT", "FULL", "NONE", "WARM", "OFF", "ON",
+  "Host", "Pyne", "Pine", "Mark", "Basis", "Demo", "Tape", "Delta", "Cross",
+  "Hedge", "Run", "Study", "Kline", "SMA", "EMA", "RSI", "MACD", "ATR",
+  "CVD", "MAE", "MFE", "UTC", "HTTP", "REST", "DB", "WAL", "OHLC", "OHLCV",
+  "SHA-256", "PNG", "JPEG", "WebP", "Ctrl", "Esc", "Enter", "Alt",
+  "Snapshot", "Live", "Plugin", "Plugins", "Exchanges", "Exchange",
+  "Point & Figure", "Kagi", "Line Break", "Hong Kong", "Volume", "Momentum",
+  "Webhook", "R:R", "Take profit", "Stop loss", "Base", "Status", "CCXT",
+  "fail closed", "CandleScope Replay · REPLAY", "CandleScope Strategy",
+  "Ampl.", "Total", "Chg", "Vol", "Stack", "Frontend", "Backend", "Proxy",
+  "Ticker", "Mini ticker", "SQLite", "Local", "Normal", "Candles", "Warm",
+  "Hold", "Refs", "Ledger", "Stop", "Maker / Taker bps", "Paper", "Full",
+  "Maker", "Taker", "Bids", "Asks", "Rank", "Diff", "Params", "Python Studio",
+  "In-sample", "Out-of-sample", "Slippage bps", "Slippage / turnover",
+  "Regular", "Runtime", "runtime", "final", "unchanged", "changed", "same",
+  "Publisher", "terminal", "Runs", "Studies", "Checksum", "Fold", "TestRun",
+  "Regime", "Benchmark", "Split", "Viewer", "Viewport", "Original",
+  "Insurance", "Bundle", "Handoff", "Heikin Ashi", "Renko", "Average True Range",
+  "Script", "Overview", "Capital", "Dates", "Fidelity", "Draft", "Copy",
+  "Archive", "Language", "Preset", "State", "Parameter", "Value", "Baseline",
+  "Window", "Hash", "Coverage", "Dataset", "Smoke", "Resume", "Compare",
+  "pending", "empty", "refs", "status", "Rollback", "kind/id",
+]);
+
+function isAllowedEnglishClone(message: string): boolean {
+  const stripped = message
+    .replace(/\{\{?[A-Za-z0-9_]+\}?\}/g, " ")
+    .replace(/[·…|/\-—,.:;()[\]#!?%*]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!stripped) return true;
+  if (PT_BR_TECHNICAL_IDENTIFIERS.has(message.trim()) || PT_BR_TECHNICAL_IDENTIFIERS.has(stripped)) {
+    return true;
+  }
+  const tokens = stripped.split(" ");
+  return tokens.every((token) => (
+    PT_BR_TECHNICAL_IDENTIFIERS.has(token)
+    || /^[A-Z][A-Z0-9_./+]{1,48}$/.test(token)
+    || /^\d/.test(token)
+    || token.length <= 3
+  ));
+}
+
 test("pt-BR host chrome uses Brazilian trading copy rather than English clones or European Portuguese", () => {
   withLocale("pt-BR", () => {
     assert.equal(t("shell.replay"), "Replay");
@@ -217,19 +264,29 @@ test("pt-BR host chrome uses Brazilian trading copy rather than English clones o
     assert.match(t("backtest.title"), /backtest/i);
     assert.equal(translateMarketType("spot"), "Spot");
     assert.equal(translateWsStatus("live"), "Ao vivo (WebSocket)");
-    for (const key of [
-      "shell.settings", "rail.watchlist", "rail.orderBook", "plugin.title",
-      "watchlist.title", "interval.title", "alert.center", "export.title",
-    ] as const) {
-      const value = t(key);
-      assert.notEqual(value, en[key], `${key} must not copy English`);
-      assert.doesNotMatch(value, /\p{Script=Han}/u);
-      assert.doesNotMatch(value, /ecrã|ficheiro|utilizador|percentagem/i);
-    }
-    for (const [key, message] of Object.entries(ptBR)) {
+    assert.equal(t("alert.stepSymbol"), "Escolha um ativo");
+    assert.equal(t("alert.ruleName"), "Nome da regra");
+    assert.equal(t("alert.saving"), "Salvando...");
+    assert.equal(t("alert.empty"), "Ainda não há regras de alerta");
+    assert.equal(t("export.close"), "Fechar painel de exportação");
+    assert.equal(t("export.chartLoading"), "O gráfico ainda está carregando dados.");
+    assert.equal(t("plugin.live.reviewTitle"), "Revisar uma intenção preparada exata");
+    assert.equal(t("core.error.exchangeList"), "Falha ao carregar a lista de exchanges");
+    const clones: string[] = [];
+    const mashups: string[] = [];
+    for (const key of messageKeys()) {
+      const message = t(key);
       assert.doesNotMatch(message, /ecrã|ficheiro|utilizador|percentagem/i, key);
       assert.doesNotMatch(message, /\p{Script=Han}/u, key);
+      if (message === en[key] && !isAllowedEnglishClone(message)) clones.push(key);
+      const plain = message.replace(/\{\{?[A-Za-z0-9_]+\}?\}/g, " ").replace(/\b(?:AND|OR|NOT)\b/g, " ");
+      if (
+        /\b(?:the|and|with|this|that|are|was|were|from|Choose|Saving|still loading|export panel|load the)\b/i.test(plain)
+        && /[áàâãéêíóôõúç]|\b(?:alerta|ativo|gráfico|arquivo|posição|falha|fechar|lista)\b/i.test(plain)
+      ) mashups.push(key);
     }
+    assert.equal(clones.length, 0, `English clones: ${clones.slice(0, 40).join(", ")}`);
+    assert.equal(mashups.length, 0, `EN/PT mashups: ${mashups.slice(0, 40).join(", ")}`);
   });
 });
 

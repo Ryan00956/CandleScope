@@ -127,6 +127,7 @@ test("appearance panel exposes a language picker that lists both locales", () =>
   assert.match(html, /界面语言/);
   assert.match(html, /简体中文/);
   assert.match(html, /English/);
+  assert.match(html, /Español/);
 
   const en = withLocale("en", () => renderToStaticMarkup(
     <ChartAppearancePanel
@@ -136,4 +137,58 @@ test("appearance panel exposes a language picker that lists both locales", () =>
   ));
   assert.match(en, /Interface language/);
   assert.doesNotMatch(en, /界面语言/);
+  assert.match(en, /Español/);
+});
+
+test("status bar, right rail, and appearance chrome switch to Spanish", () => {
+  const status = {
+    connectionStatus: "connected" as const,
+    dataSource: "live",
+    exchangeLabel: "Binance",
+    marketLabel: "Spot",
+    wsStatus: "live",
+    wsStatusLabel: "Live (WebSocket)",
+    barCount: 2,
+    loadingMoreLeft: false,
+    hasMoreLeft: true,
+    exchangeCatalogStatus: "ready",
+  };
+
+  const esStatus = withLocale("es", () => renderToStaticMarkup(<StatusBar status={status} />));
+  assert.match(esStatus, /Conectado a Binance/);
+  assert.match(esStatus, /2 barras/);
+  assert.match(esStatus, /Binance Contado/);
+  assert.doesNotMatch(esStatus, /Connected to/);
+  assert.doesNotMatch(esStatus, /已连接/);
+  assert.doesNotMatch(esStatus, /\p{Script=Han}/u);
+
+  const esRail = withLocale("es", () => renderToStaticMarkup(
+    <MarketRightRailFrame
+      source="live"
+      views={[
+        { id: "watchlist", title: t("rail.watchlist"), icon: <span data-icon="watchlist" />, order: 10, sizing: "flex" },
+        { id: "order-book", title: t("rail.orderBook"), icon: <span data-icon="order-book" />, order: 20, sizing: "fixed", defaultHeight: 320 },
+      ]}
+      openViewIds={[]}
+      panelCollapsed
+      onToggleView={() => undefined}
+      onTogglePanelCollapsed={() => undefined}
+      renderView={() => null}
+      layout={{ width: 360 }}
+    />,
+  ));
+  assert.match(esRail, /libro de [oó]rdenes/i);
+  assert.match(esRail, /Lista de seguimiento|seguimiento/i);
+  assert.doesNotMatch(esRail, /市场侧栏/);
+
+  const esPanel = withLocale("es", () => renderToStaticMarkup(
+    <ChartAppearancePanel
+      settings={{ ...DEFAULT_SETTINGS, locale: "es" }}
+      onUpdate={() => undefined}
+    />,
+  ));
+  assert.match(esPanel, /Español/);
+  assert.match(esPanel, /Idioma de la interfaz/);
+  assert.doesNotMatch(esPanel, /Interface language/);
+  assert.doesNotMatch(esPanel, /界面语言/);
 });

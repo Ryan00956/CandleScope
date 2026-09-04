@@ -230,8 +230,11 @@ body {
 }
 
 .market-rail-accordion-trigger strong {
+  min-width: 0;
+  overflow: hidden;
   font-size: 11px;
   font-weight: 700;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 

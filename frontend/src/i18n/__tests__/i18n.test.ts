@@ -216,7 +216,106 @@ test("hydrateLocale updates the store and is idempotent for the same value", () 
     assert.equal(getLocale(), "en");
     assert.equal(hydrateLocale("en-US"), "en");
     assert.equal(hydrateLocale("zh-CN"), "zh-CN");
+    assert.equal(hydrateLocale("es-MX"), "es");
+    assert.equal(getLocale(), "es");
+    assert.equal(hydrateLocale("es"), "es");
   } finally {
+    setLocale(previous);
+  }
+});
+
+test("Spanish regional tags normalize to es and remain a registered locale", () => {
+  assert.equal(isLocaleId("es"), true);
+  assert.equal(isLocaleId("es-ES"), false);
+  assert.equal(isLocaleId("es-MX"), false);
+  assert.equal(normalizeLocale("es"), "es");
+  assert.equal(normalizeLocale("es-ES"), "es");
+  assert.equal(normalizeLocale("es-MX"), "es");
+  assert.equal(normalizeLocale("ES-es"), "es");
+  assert.equal(normalizeLocale("es-419"), "es");
+  assert.equal(normalizeLocale("pt-BR"), DEFAULT_LOCALE);
+  assert.equal(normalizeLocale("fr"), DEFAULT_LOCALE);
+  assert.ok(LOCALE_OPTIONS.some((option) => option.id === "es" && option.nativeLabel === "Español"));
+  assert.equal(localeDefinition("es").dateTimeLocale, "es-ES");
+  assert.equal(localeDefinition("es").numberLocale, "es-ES");
+  assert.equal(localeDefinition("es").direction ?? "ltr", "ltr");
+});
+
+test("Spanish host copy is translated, keeps placeholders, and uses the trading glossary", () => {
+  const han = /\p{Script=Han}/u;
+  withLocale("es", () => {
+    assert.equal(t("shell.replay"), "Reproducción");
+    assert.equal(t("status.connectedTo", { exchange: "Binance" }), "Conectado a Binance");
+    assert.equal(t("orderBook.title"), "Libro de órdenes");
+    assert.equal(t("watchlist.title"), "Lista de seguimiento");
+    assert.match(t("pane.funding.percent"), /tasa de financiaci[oó]n/i);
+    assert.match(t("replay.hub.marginMode"), /margen/i);
+    assert.match(t("backtest.title"), /prueba retrospectiva/i);
+    assert.match(t("replay.shell.position"), /posici[oó]n/i);
+    assert.match(t("replay.shell.unrealized"), /p[eé]rdidas y ganancias/i);
+    assert.match(t("replay.shell.ordersFills"), /[oó]rdenes/i);
+    assert.match(t("replay.shell.ordersFills"), /ejecuci/i);
+    assert.match(t("shell.replay"), /reproducci[oó]n/i);
+    assert.match(t("replay.init.hedgeHybrid"), /HEDGE_HYBRID/);
+    assert.doesNotMatch(t("replay.init.hedgeHybrid"), han);
+    assert.doesNotMatch(t("shell.replay"), /Replay/);
+    assert.doesNotMatch(t("orderBook.title"), /Order book/i);
+    assert.doesNotMatch(t("status.connectedTo", { exchange: "Binance" }), han);
+    assert.equal(
+      [...t("status.connectedTo").matchAll(/\{([A-Za-z0-9_]+)\}/g)].map((m) => m[1]).join(","),
+      "exchange",
+    );
+  });
+  assert.equal(t("shell.replay", {}, "es"), "Reproducción");
+  assert.notEqual(t("shell.replay", {}, "es"), t("shell.replay", {}, "en"));
+  assert.notEqual(t("orderBook.title", {}, "es"), t("orderBook.title", {}, "zh-CN"));
+});
+
+test("Spanish plurals distinguish one, other, and many and format numbers with a decimal comma", () => {
+  withLocale("es", () => {
+    assert.equal(getDateTimeLocale(), "es-ES");
+    assert.equal(getNumberLocale(), "es-ES");
+    assert.equal(new Intl.NumberFormat(getNumberLocale()).format(1234.56).includes(","), true);
+    assert.match(new Intl.NumberFormat(getNumberLocale()).format(1234.56), /1.?234,56/);
+    assert.equal(tPlural("status.barCount", 1), "1 barra");
+    assert.equal(tPlural("status.barCount", 2), "2 barras");
+    assert.equal(tPlural("status.barCount", 1_000_000), "1000000 barras");
+    assert.equal(tPlural("status.exchangeLimitationCount", 1), "1 limitación del exchange");
+    assert.equal(tPlural("status.exchangeLimitationCount", 3), "3 limitaciones del exchange");
+    assert.equal(tPlural("workbench.intervalCount", 1), "1 intervalo");
+    assert.equal(tPlural("workbench.intervalCount", 4), "4 intervalos");
+    assert.match(tPlural("pane.flow.missing", 1), /1 barra/);
+    assert.match(tPlural("pane.flow.missing", 2), /2 barras/);
+    assert.match(tPlural("pane.flow.gaps", 1), /1 /);
+    assert.match(tPlural("pane.flow.gaps", 2), /2 /);
+    const categories = new Intl.PluralRules("es").resolvedOptions().pluralCategories;
+    assert.ok(categories.includes("one"));
+    assert.ok(categories.includes("other"));
+    assert.ok(categories.includes("many"));
+    assert.equal(typeof localeDefinition("es").messages["status.barCount.many"], "string");
+  });
+});
+
+test("Spanish hydrateLocale writes document lang and ltr direction", () => {
+  const previous = getLocale();
+  const previousDocument = globalThis.document;
+  const documentElement: { lang?: string; dir?: string } = {};
+  try {
+    (globalThis as { document?: { documentElement: { lang?: string; dir?: string } } }).document = {
+      documentElement,
+    };
+    assert.equal(hydrateLocale("es-ES"), "es");
+    assert.equal(documentElement.lang, "es");
+    assert.equal(documentElement.dir, "ltr");
+    hydrateLocale("es-MX");
+    assert.equal(documentElement.lang, "es");
+    assert.equal(documentElement.dir, "ltr");
+  } finally {
+    if (previousDocument === undefined) {
+      delete (globalThis as { document?: unknown }).document;
+    } else {
+      (globalThis as { document: typeof previousDocument }).document = previousDocument;
+    }
     setLocale(previous);
   }
 });

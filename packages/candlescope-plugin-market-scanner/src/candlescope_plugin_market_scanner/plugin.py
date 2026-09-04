@@ -27,10 +27,20 @@ _CONTRACT_LOCALIZATIONS = {
         "market scanner phase is invalid": "市场扫描器阶段无效",
         "capabilityUnavailable": "{permission} 能力不可用",
     },
+    "es": {
+        "market scanner accepts only an empty scan command": "el escáner de mercado solo acepta un comando de escaneo vacío",
+        "market scanner completion token is stale": "el token de finalización del escáner de mercado está caducado",
+        "Host returned invalid scanner settings": "El host devolvió ajustes de escáner no válidos",
+        "Host returned an invalid symbol page": "El host devolvió una página de símbolos no válida",
+        "market scanner phase is invalid": "la fase del escáner de mercado no es válida",
+        "capabilityUnavailable": "Capacidad no disponible: {permission}",
+    },
 }
 
 
-def _localized_contract_error(error: PlatformContractError, locale: str | None) -> PlatformContractError:
+def _localized_contract_error(
+    error: PlatformContractError, locale: str | None
+) -> PlatformContractError:
     candidate = (locale or "").strip().lower()
     messages = None
     while candidate:

@@ -20,10 +20,14 @@ from candlescope_plugin_market_scanner.plugin import (
 def test_plugin_error_localizations_accept_additional_languages_and_preserve_fallback(monkeypatch):
     error = PlatformContractError("invalid_request", "market scanner phase is invalid", "phase")
     assert _localized_contract_error(error, "ja") is error
-    monkeypatch.setitem(_CONTRACT_LOCALIZATIONS, "fr", {
-        "market scanner phase is invalid": "Phase invalide",
-        "capabilityUnavailable": "Capacité indisponible : {permission}",
-    })
+    monkeypatch.setitem(
+        _CONTRACT_LOCALIZATIONS,
+        "fr",
+        {
+            "market scanner phase is invalid": "Phase invalide",
+            "capabilityUnavailable": "Capacité indisponible : {permission}",
+        },
+    )
     translated = _localized_contract_error(error, "fr-CA")
     assert translated.message == "Phase invalide"
     assert (translated.code, translated.path) == (error.code, error.path)
@@ -51,6 +55,37 @@ def test_packaged_manifest_owns_entrypoint_and_localized_enum_labels() -> None:
     settings = next(item for item in manifest.contributions if item.id == "settings")
     interval = settings.localizations["zh-CN"]["schema"]["properties"]["interval"]
     assert interval["enumLabels"] == ["1 分钟", "5 分钟", "1 小时"]
+    es_interval = settings.localizations["es"]["schema"]["properties"]["interval"]
+    assert es_interval["enumLabels"] == ["1 minuto", "5 minutos", "1 hora"]
+    assert len(es_interval["enumLabels"]) == len(
+        settings.configuration["schema"]["properties"]["interval"]["enum"]
+    )
+    scan = next(item for item in manifest.contributions if item.id == "scan")
+    assert scan.localizations["es"]["title"] == "Escanear mercados autorizados"
+    results = next(item for item in manifest.contributions if item.id == "results")
+    es_results = results.localizations["es"]
+    assert es_results["title"] == "Resultados del escáner de mercado"
+    assert set(es_results["fields"]) == {
+        field["field"] for field in results.configuration["fields"]
+    }
+    assert "Ejecute el escáner" in es_results["emptyState"]
+    summary = next(item for item in manifest.contributions if item.id == "summary")
+    assert summary.localizations["es"]["fields"]["scannedSymbols"] == "Escaneados"
+    signals = next(item for item in manifest.contributions if item.id == "signals")
+    assert signals.localizations["es"]["title"] == "Señales del escáner de mercado"
+
+
+def test_spanish_contract_errors_follow_parent_locale() -> None:
+    error = PlatformContractError("invalid_request", "market scanner phase is invalid", "phase")
+    translated = _localized_contract_error(error, "es-MX")
+    assert translated.message == "la fase del escáner de mercado no es válida"
+    assert (translated.code, translated.path) == (error.code, error.path)
+    capability = PlatformContractError("unavailable", "market.bars.read capability is unavailable")
+    assert _localized_contract_error(capability, "es-ES").message == (
+        "Capacidad no disponible: market.bars.read"
+    )
+    assert _localized_contract_error(error, "pt-BR") is error
+    assert "es" in _CONTRACT_LOCALIZATIONS
 
 
 def test_scan_preserves_invocation_locale_on_host_calls() -> None:

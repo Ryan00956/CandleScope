@@ -113,7 +113,7 @@ export default function StrategyResearchApp({
   intent: StrategyResearchLaunchIntent;
   libraryEnabled?: boolean;
 }) {
-  useLocale();
+  const locale = useLocale();
   const pageExportRef = useRef<HTMLDivElement | null>(null);
   const { settings, setSettings, resolvedTheme } = useChartSettingsRuntime();
   const library = useResearchDataLibrary();
@@ -277,8 +277,10 @@ export default function StrategyResearchApp({
   }, [chartUiScope]);
 
   const capabilities = useMemo(
-    () => (source ? runtime.capabilitiesFor(source.kind) : runtime.capabilitiesFor("IMPORTED_DATASET")),
-    [runtime, source],
+    () => (source
+      ? runtime.capabilitiesFor(source.kind, locale)
+      : runtime.capabilitiesFor("IMPORTED_DATASET", locale)),
+    [locale, runtime, source],
   );
 
   const scriptDraft = state.script.draftId;

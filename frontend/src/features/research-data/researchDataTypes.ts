@@ -96,13 +96,13 @@ export type ResearchDataErrorShape = {
 };
 
 export const ORDINARY_RESEARCH_TERMS = {
-  currentChart: { en: "Current chart", zh: "当前图表" },
-  importedLibrary: { en: "Local library", zh: "本地资料库" },
-  completedResult: { en: "Completed result", zh: "完成结果" },
-  dataVersion: { en: "Data version", zh: "数据版本" },
-  frozenReproducible: { en: "Data is frozen and reproducible", zh: "数据已冻结，可复现" },
-  dataGap: { en: "Data has gaps", zh: "数据有缺口" },
-  barApprox: { en: "Bar estimate", zh: "基于 K 线估算" },
+  currentChart: { en: "Current chart", zh: "当前图表", ja: "現在のチャート", ko: "현재 차트" },
+  importedLibrary: { en: "Local library", zh: "本地资料库", ja: "ローカルライブラリ", ko: "로컬 라이브러리" },
+  completedResult: { en: "Completed result", zh: "完成结果", ja: "完了した結果", ko: "완료 결과" },
+  dataVersion: { en: "Data version", zh: "数据版本", ja: "データ版", ko: "데이터 버전" },
+  frozenReproducible: { en: "Data is frozen and reproducible", zh: "数据已冻结，可复现", ja: "データは凍結済みで再現できます", ko: "데이터는 동결되어 재현 가능" },
+  dataGap: { en: "Data has gaps", zh: "数据有缺口", ja: "データに欠落があります", ko: "데이터에 공백이 있음" },
+  barApprox: { en: "Bar estimate", zh: "基于 K 线估算", ja: "ローソク足からの推定", ko: "캔들 기반 추정" },
 } as const;
 
 export const FORBIDDEN_ORDINARY_UI_TERMS = [

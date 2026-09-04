@@ -6,7 +6,9 @@
     "version": "0.1.0",
     "publisher": "candlescope",
     "license": "GPL-3.0-only",
-    "engines": { "candlescope": ">=0.4.0 <0.5.0" }
+    "engines": {
+      "candlescope": ">=0.4.0 <0.5.0"
+    }
   },
   "backend": {
     "entrypoints": [
@@ -14,7 +16,9 @@
         "id": "main",
         "pythonModule": "candlescope_plugin_market_scanner",
         "resourceProfile": "standard",
-        "activationEvents": ["onCommand"]
+        "activationEvents": [
+          "onCommand"
+        ]
       }
     ]
   },
@@ -26,10 +30,36 @@
       "entrypoint": "main",
       "configuration": {
         "localizations": {
-          "zh-CN": { "title": "扫描已授权市场" }
+          "zh-CN": {
+            "title": "扫描已授权市场"
+          },
+          "es": {
+            "title": "Escanear mercados autorizados"
+          },
+          "fr": {
+            "title": "Scanner les marchés autorisés"
+          },
+          "ja": {
+            "title": "許可済み市場をスキャン"
+          },
+          "ko": {
+            "title": "승인된 시장 스캔"
+          },
+          "pt-BR": {
+            "title": "Escanear mercados autorizados"
+          },
+          "ru": {
+            "title": "Сканировать разрешённые рынки"
+          },
+          "zh-TW": {
+            "title": "掃描已授權市場"
+          }
         },
         "requiresUserAction": true,
-        "placements": ["commandPalette", "topToolbar"],
+        "placements": [
+          "commandPalette",
+          "topToolbar"
+        ],
         "inputSchema": {
           "type": "object",
           "properties": {},
@@ -49,14 +79,215 @@
             "title": "市场扫描器设置",
             "schema": {
               "properties": {
-                "quoteAsset": { "title": "计价资产" },
-                "symbolsLimit": { "title": "扫描标的数量" },
+                "quoteAsset": {
+                  "title": "计价资产"
+                },
+                "symbolsLimit": {
+                  "title": "扫描标的数量"
+                },
                 "interval": {
                   "title": "周期",
-                  "enumLabels": ["1 分钟", "5 分钟", "1 小时"]
+                  "enumLabels": [
+                    "1 分钟",
+                    "5 分钟",
+                    "1 小时"
+                  ]
                 },
-                "lookbackBars": { "title": "回看 K 线数" },
-                "minimumMovePct": { "title": "最小涨跌幅百分比" }
+                "lookbackBars": {
+                  "title": "回看 K 线数"
+                },
+                "minimumMovePct": {
+                  "title": "最小涨跌幅百分比"
+                }
+              }
+            }
+          },
+          "es": {
+            "title": "Ajustes del escáner de mercado",
+            "schema": {
+              "properties": {
+                "quoteAsset": {
+                  "title": "Activo de cotización"
+                },
+                "symbolsLimit": {
+                  "title": "Número de símbolos a escanear"
+                },
+                "interval": {
+                  "title": "Intervalo",
+                  "enumLabels": [
+                    "1 minuto",
+                    "5 minutos",
+                    "1 hora"
+                  ]
+                },
+                "lookbackBars": {
+                  "title": "Barras de retrospectiva"
+                },
+                "minimumMovePct": {
+                  "title": "Variación mínima porcentual"
+                }
+              }
+            }
+          },
+          "fr": {
+            "title": "Paramètres du scanner de marché",
+            "schema": {
+              "properties": {
+                "quoteAsset": {
+                  "title": "Actif de cotation"
+                },
+                "symbolsLimit": {
+                  "title": "Nombre de symboles à scanner"
+                },
+                "interval": {
+                  "title": "Intervalle",
+                  "enumLabels": [
+                    "1 minute",
+                    "5 minutes",
+                    "1 heure"
+                  ]
+                },
+                "lookbackBars": {
+                  "title": "Barres de rétrospection"
+                },
+                "minimumMovePct": {
+                  "title": "Variation minimale en pourcentage"
+                }
+              }
+            }
+          },
+          "ja": {
+            "title": "マーケットスキャナー設定",
+            "schema": {
+              "properties": {
+                "quoteAsset": {
+                  "title": "決済通貨"
+                },
+                "symbolsLimit": {
+                  "title": "スキャン銘柄数"
+                },
+                "interval": {
+                  "title": "時間足",
+                  "enumLabels": [
+                    "1分",
+                    "5分",
+                    "1時間"
+                  ]
+                },
+                "lookbackBars": {
+                  "title": "遡及本数"
+                },
+                "minimumMovePct": {
+                  "title": "最小騰落率（%）"
+                }
+              }
+            }
+          },
+          "ko": {
+            "title": "시장 스캐너 설정",
+            "schema": {
+              "properties": {
+                "quoteAsset": {
+                  "title": "호가 자산"
+                },
+                "symbolsLimit": {
+                  "title": "스캔 종목 수"
+                },
+                "interval": {
+                  "title": "주기",
+                  "enumLabels": [
+                    "1분",
+                    "5분",
+                    "1시간"
+                  ]
+                },
+                "lookbackBars": {
+                  "title": "조회 캔들 수"
+                },
+                "minimumMovePct": {
+                  "title": "최소 등락률(%)"
+                }
+              }
+            }
+          },
+          "pt-BR": {
+            "title": "Configurações do scanner de mercado",
+            "schema": {
+              "properties": {
+                "quoteAsset": {
+                  "title": "Ativo de cotação"
+                },
+                "symbolsLimit": {
+                  "title": "Quantidade de ativos a escanear"
+                },
+                "interval": {
+                  "title": "Intervalo",
+                  "enumLabels": [
+                    "1 minuto",
+                    "5 minutos",
+                    "1 hora"
+                  ]
+                },
+                "lookbackBars": {
+                  "title": "Barras de lookback"
+                },
+                "minimumMovePct": {
+                  "title": "Variação mínima (%)"
+                }
+              }
+            }
+          },
+          "ru": {
+            "title": "Настройки сканера рынка",
+            "schema": {
+              "properties": {
+                "quoteAsset": {
+                  "title": "Котируемый актив"
+                },
+                "symbolsLimit": {
+                  "title": "Число инструментов"
+                },
+                "interval": {
+                  "title": "Интервал",
+                  "enumLabels": [
+                    "1 минута",
+                    "5 минут",
+                    "1 час"
+                  ]
+                },
+                "lookbackBars": {
+                  "title": "Свечей назад"
+                },
+                "minimumMovePct": {
+                  "title": "Мин. изменение, %"
+                }
+              }
+            }
+          },
+          "zh-TW": {
+            "title": "市場掃描器設定",
+            "schema": {
+              "properties": {
+                "quoteAsset": {
+                  "title": "計價資產"
+                },
+                "symbolsLimit": {
+                  "title": "掃描標的數量"
+                },
+                "interval": {
+                  "title": "週期",
+                  "enumLabels": [
+                    "1 分鐘",
+                    "5 分鐘",
+                    "1 小時"
+                  ]
+                },
+                "lookbackBars": {
+                  "title": "回看 K 線數"
+                },
+                "minimumMovePct": {
+                  "title": "最小漲跌幅百分比"
+                }
               }
             }
           }
@@ -64,11 +295,35 @@
         "schema": {
           "type": "object",
           "properties": {
-            "quoteAsset": { "type": "string", "enum": ["USDT"] },
-            "symbolsLimit": { "type": "integer", "minimum": 1, "maximum": 5 },
-            "interval": { "type": "string", "enum": ["1m", "5m", "1h"] },
-            "lookbackBars": { "type": "integer", "minimum": 2, "maximum": 50 },
-            "minimumMovePct": { "type": "number", "minimum": 0, "maximum": 100 }
+            "quoteAsset": {
+              "type": "string",
+              "enum": [
+                "USDT"
+              ]
+            },
+            "symbolsLimit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 5
+            },
+            "interval": {
+              "type": "string",
+              "enum": [
+                "1m",
+                "5m",
+                "1h"
+              ]
+            },
+            "lookbackBars": {
+              "type": "integer",
+              "minimum": 2,
+              "maximum": 50
+            },
+            "minimumMovePct": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100
+            }
           },
           "required": [
             "quoteAsset",
@@ -104,6 +359,76 @@
               "time": "收盘时间"
             },
             "emptyState": "运行扫描器后将在此显示结果"
+          },
+          "es": {
+            "title": "Resultados del escáner de mercado",
+            "fields": {
+              "symbol": "Símbolo",
+              "changePct": "Variación",
+              "close": "Cierre",
+              "time": "Cerrado a las"
+            },
+            "emptyState": "Ejecute el escáner para mostrar resultados aquí"
+          },
+          "fr": {
+            "title": "Résultats du scanner de marché",
+            "fields": {
+              "symbol": "Symbole",
+              "changePct": "Variation",
+              "close": "Clôture",
+              "time": "Heure de clôture"
+            },
+            "emptyState": "Lancez le scanner pour afficher les résultats ici"
+          },
+          "ja": {
+            "title": "マーケットスキャナー結果",
+            "fields": {
+              "symbol": "銘柄",
+              "changePct": "騰落率",
+              "close": "終値",
+              "time": "終値時刻"
+            },
+            "emptyState": "スキャナーを実行すると結果が表示されます"
+          },
+          "ko": {
+            "title": "시장 스캔 결과",
+            "fields": {
+              "symbol": "종목",
+              "changePct": "등락률",
+              "close": "종가",
+              "time": "종가 시각"
+            },
+            "emptyState": "스캐너를 실행하면 결과가 여기에 표시됩니다"
+          },
+          "pt-BR": {
+            "title": "Resultados do scanner de mercado",
+            "fields": {
+              "symbol": "Ativo",
+              "changePct": "Variação",
+              "close": "Fechamento",
+              "time": "Horário de fechamento"
+            },
+            "emptyState": "Execute o scanner para preencher os resultados"
+          },
+          "ru": {
+            "title": "Результаты сканера рынка",
+            "fields": {
+              "symbol": "Инструмент",
+              "changePct": "Изменение",
+              "close": "Закрытие",
+              "time": "Время закрытия"
+            },
+            "emptyState": "Результаты появятся здесь после запуска сканера"
+          },
+          "zh-TW": {
+            "title": "市場掃描結果",
+            "fields": {
+              "symbol": "標的",
+              "changePct": "漲跌幅",
+              "close": "收盤價",
+              "time": "收盤時間"
+            },
+            "emptyState": "執行掃描器後將在此顯示結果"
           }
         },
         "slot": "sidePanel",
@@ -111,13 +436,31 @@
         "source": {
           "kind": "storage.document",
           "name": "latest-scan",
-          "path": ["matches"]
+          "path": [
+            "matches"
+          ]
         },
         "fields": [
-          { "field": "symbol", "label": "Symbol", "format": "text" },
-          { "field": "changePct", "label": "Move", "format": "percent" },
-          { "field": "close", "label": "Close", "format": "price" },
-          { "field": "time", "label": "Closed at", "format": "timestamp" }
+          {
+            "field": "symbol",
+            "label": "Symbol",
+            "format": "text"
+          },
+          {
+            "field": "changePct",
+            "label": "Move",
+            "format": "percent"
+          },
+          {
+            "field": "close",
+            "label": "Close",
+            "format": "price"
+          },
+          {
+            "field": "time",
+            "label": "Closed at",
+            "format": "timestamp"
+          }
         ],
         "maxItems": 50,
         "emptyState": "Run the scanner to populate results",
@@ -133,8 +476,67 @@
         "localizations": {
           "zh-CN": {
             "title": "市场扫描摘要",
-            "fields": { "scannedSymbols": "已扫描", "interval": "周期" },
+            "fields": {
+              "scannedSymbols": "已扫描",
+              "interval": "周期"
+            },
             "emptyState": "扫描器空闲"
+          },
+          "es": {
+            "title": "Resumen del escáner de mercado",
+            "fields": {
+              "scannedSymbols": "Escaneados",
+              "interval": "Intervalo"
+            },
+            "emptyState": "Escáner inactivo"
+          },
+          "fr": {
+            "title": "Synthèse du scanner de marché",
+            "fields": {
+              "scannedSymbols": "Scannés",
+              "interval": "Intervalle"
+            },
+            "emptyState": "Scanner inactif"
+          },
+          "ja": {
+            "title": "マーケットスキャナー概要",
+            "fields": {
+              "scannedSymbols": "スキャン済み",
+              "interval": "時間足"
+            },
+            "emptyState": "スキャナー待機中"
+          },
+          "ko": {
+            "title": "시장 스캔 요약",
+            "fields": {
+              "scannedSymbols": "스캔됨",
+              "interval": "주기"
+            },
+            "emptyState": "스캐너 대기 중"
+          },
+          "pt-BR": {
+            "title": "Resumo do scanner de mercado",
+            "fields": {
+              "scannedSymbols": "Escaneados",
+              "interval": "Intervalo"
+            },
+            "emptyState": "Scanner ocioso"
+          },
+          "ru": {
+            "title": "Сводка сканера рынка",
+            "fields": {
+              "scannedSymbols": "Просканировано",
+              "interval": "Интервал"
+            },
+            "emptyState": "Сканер простаивает"
+          },
+          "zh-TW": {
+            "title": "市場掃描摘要",
+            "fields": {
+              "scannedSymbols": "已掃描",
+              "interval": "週期"
+            },
+            "emptyState": "掃描器空閒"
           }
         },
         "slot": "statusArea",
@@ -145,8 +547,16 @@
           "path": []
         },
         "fields": [
-          { "field": "scannedSymbols", "label": "Scanned", "format": "number" },
-          { "field": "interval", "label": "Interval", "format": "text" }
+          {
+            "field": "scannedSymbols",
+            "label": "Scanned",
+            "format": "number"
+          },
+          {
+            "field": "interval",
+            "label": "Interval",
+            "format": "text"
+          }
         ],
         "maxItems": 1,
         "emptyState": "Scanner idle"
@@ -159,7 +569,30 @@
       "entrypoint": "main",
       "configuration": {
         "localizations": {
-          "zh-CN": { "title": "市场扫描信号" }
+          "zh-CN": {
+            "title": "市场扫描信号"
+          },
+          "es": {
+            "title": "Señales del escáner de mercado"
+          },
+          "fr": {
+            "title": "Signaux du scanner de marché"
+          },
+          "ja": {
+            "title": "マーケットスキャナーシグナル"
+          },
+          "ko": {
+            "title": "시장 스캔 신호"
+          },
+          "pt-BR": {
+            "title": "Sinais do scanner de mercado"
+          },
+          "ru": {
+            "title": "Сигналы сканера рынка"
+          },
+          "zh-TW": {
+            "title": "市場掃描訊號"
+          }
         },
         "target": "main-chart",
         "zOrder": "above-series",
@@ -171,38 +604,84 @@
   ],
   "permissions": {
     "required": [
-      { "id": "settings.plugin.read", "scope": {} },
+      {
+        "id": "settings.plugin.read",
+        "scope": {}
+      },
       {
         "id": "market.symbols.read",
         "scope": {
-          "contexts": ["live"],
-          "exchanges": ["binance"],
-          "marketTypes": ["spot"],
-          "quoteAssets": ["USDT"],
-          "symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"],
+          "contexts": [
+            "live"
+          ],
+          "exchanges": [
+            "binance"
+          ],
+          "marketTypes": [
+            "spot"
+          ],
+          "quoteAssets": [
+            "USDT"
+          ],
+          "symbols": [
+            "BTCUSDT",
+            "ETHUSDT",
+            "SOLUSDT",
+            "BNBUSDT",
+            "XRPUSDT"
+          ],
           "maxSymbolsPerCall": 5
         }
       },
       {
         "id": "market.bars.read",
         "scope": {
-          "contexts": ["live"],
-          "exchanges": ["binance"],
-          "marketTypes": ["spot"],
-          "symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"],
-          "intervals": ["1m", "5m", "1h"],
+          "contexts": [
+            "live"
+          ],
+          "exchanges": [
+            "binance"
+          ],
+          "marketTypes": [
+            "spot"
+          ],
+          "symbols": [
+            "BTCUSDT",
+            "ETHUSDT",
+            "SOLUSDT",
+            "BNBUSDT",
+            "XRPUSDT"
+          ],
+          "intervals": [
+            "1m",
+            "5m",
+            "1h"
+          ],
           "maxHistoryBars": 50,
           "maxConcurrent": 1
         }
       },
-      { "id": "storage.private", "scope": { "maxBytes": 1048576 } },
+      {
+        "id": "storage.private",
+        "scope": {
+          "maxBytes": 1048576
+        }
+      },
       {
         "id": "chart.layer.publish",
         "scope": {
-          "contexts": ["live"],
-          "exchanges": ["binance"],
-          "marketTypes": ["spot"],
-          "layers": ["signals"],
+          "contexts": [
+            "live"
+          ],
+          "exchanges": [
+            "binance"
+          ],
+          "marketTypes": [
+            "spot"
+          ],
+          "layers": [
+            "signals"
+          ],
           "maxItems": 16
         }
       }

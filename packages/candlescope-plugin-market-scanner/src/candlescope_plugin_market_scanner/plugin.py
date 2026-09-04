@@ -27,10 +27,82 @@ _CONTRACT_LOCALIZATIONS = {
         "market scanner phase is invalid": "市场扫描器阶段无效",
         "capabilityUnavailable": "{permission} 能力不可用",
     },
+    "es": {
+        "market scanner accepts only an empty scan command": "el escáner de mercado solo acepta un comando de escaneo vacío",
+        "market scanner completion token is stale": "el token de finalización del escáner de mercado está caducado",
+        "Host returned invalid scanner settings": "El host devolvió ajustes de escáner no válidos",
+        "Host returned an invalid symbol page": "El host devolvió una página de símbolos no válida",
+        "market scanner phase is invalid": "la fase del escáner de mercado no es válida",
+        "capabilityUnavailable": "Capacidad no disponible: {permission}",
+    },
+    "fr": {
+        "market scanner accepts only an empty scan command": (
+            "Le scanner de marché n’accepte qu’une commande de scan sans paramètres"
+        ),
+        "market scanner completion token is stale": (
+            "Le jeton d’achèvement du scanner de marché a expiré"
+        ),
+        "Host returned invalid scanner settings": (
+            "L’hôte a renvoyé des paramètres de scanner invalides"
+        ),
+        "Host returned an invalid symbol page": (
+            "L’hôte a renvoyé une page de symboles invalide"
+        ),
+        "market scanner phase is invalid": "La phase du scanner de marché est invalide",
+        "capabilityUnavailable": "Capacité {permission} indisponible",
+    },
+    "ja": {
+        "market scanner accepts only an empty scan command": "マーケットスキャナーは空のスキャンコマンドのみ受け付けます",
+        "market scanner completion token is stale": "マーケットスキャナーの完了トークンは無効です",
+        "Host returned invalid scanner settings": "ホストが返したスキャナー設定が不正です",
+        "Host returned an invalid symbol page": "ホストが返した銘柄ページが不正です",
+        "market scanner phase is invalid": "マーケットスキャナーの段階が不正です",
+        "capabilityUnavailable": "{permission} 能力は利用できません",
+    },
+    "ko": {
+        "market scanner accepts only an empty scan command": "시장 스캐너는 빈 인자 스캔 명령만 허용",
+        "market scanner completion token is stale": "시장 스캐너 완료 토큰이 만료됨",
+        "Host returned invalid scanner settings": "호스트가 반환한 스캐너 설정이 유효하지 않음",
+        "Host returned an invalid symbol page": "호스트가 반환한 종목 페이지가 유효하지 않음",
+        "market scanner phase is invalid": "시장 스캐너 단계가 유효하지 않음",
+        "capabilityUnavailable": "{permission} 기능을 사용할 수 없음",
+    },
+    "pt-BR": {
+        "market scanner accepts only an empty scan command": (
+            "O scanner de mercado aceita apenas um comando de varredura sem parâmetros"
+        ),
+        "market scanner completion token is stale": (
+            "O token de conclusão do scanner de mercado expirou"
+        ),
+        "Host returned invalid scanner settings": (
+            "O Host devolveu configurações inválidas do scanner"
+        ),
+        "Host returned an invalid symbol page": ("O Host devolveu uma página de ativos inválida"),
+        "market scanner phase is invalid": "A fase do scanner de mercado é inválida",
+        "capabilityUnavailable": "A capacidade {permission} não está disponível",
+    },
+    "ru": {
+        "market scanner accepts only an empty scan command": "Сканер рынка принимает только команду сканирования без параметров",
+        "market scanner completion token is stale": "Токен завершения сканера рынка устарел",
+        "Host returned invalid scanner settings": "Host вернул недопустимые настройки сканера",
+        "Host returned an invalid symbol page": "Host вернул недопустимую страницу инструментов",
+        "market scanner phase is invalid": "Недопустимая фаза сканера рынка",
+        "capabilityUnavailable": "Возможность {permission} недоступна",
+    },
+    "zh-TW": {
+        "market scanner accepts only an empty scan command": "市場掃描器只接受空參數掃描命令",
+        "market scanner completion token is stale": "市場掃描器完成令牌已失效",
+        "Host returned invalid scanner settings": "宿主傳回的掃描器設定無效",
+        "Host returned an invalid symbol page": "宿主傳回的標的頁面無效",
+        "market scanner phase is invalid": "市場掃描器階段無效",
+        "capabilityUnavailable": "{permission} 能力不可用",
+    },
 }
 
 
-def _localized_contract_error(error: PlatformContractError, locale: str | None) -> PlatformContractError:
+def _localized_contract_error(
+    error: PlatformContractError, locale: str | None
+) -> PlatformContractError:
     candidate = (locale or "").strip().lower()
     messages = None
     while candidate:

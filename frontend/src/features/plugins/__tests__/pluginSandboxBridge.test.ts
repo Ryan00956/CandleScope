@@ -94,6 +94,19 @@ test("host bridge rejects an oversized initial snapshot before transfer", () => 
   session.dispose();
 });
 
+test("host bridge forwards zh-TW on connect", () => {
+  const received: Record<string, unknown>[] = [];
+  const target = {
+    postMessage(message: unknown) {
+      received.push(message as Record<string, unknown>);
+    },
+  } as unknown as Window;
+  const session = new SandboxBridgeSession(identity, { ...snapshot, locale: "zh-TW" });
+  session.connect(target);
+  assert.equal((received[0]?.payload as { locale?: string }).locale, "zh-TW");
+  session.dispose();
+});
+
 test("one-time MessageChannel carries only lifecycle and bounded view messages", async (context) => {
   let connect: Record<string, unknown> | null = null;
   let pluginPort: MessagePort | null = null;
@@ -150,11 +163,12 @@ test("one-time MessageChannel carries only lifecycle and bounded view messages",
   assert.equal(session.state, "suspended");
   session.resume();
   assert.equal(session.state, "ready");
-  session.updateSnapshot({ ...snapshot, theme: "light" });
+  session.updateSnapshot({ ...snapshot, theme: "light", locale: "zh-TW" });
   session.setFocused(true);
   await waitFor(() => (hostMessages.at(-1)?.payload as { focused?: boolean } | undefined)?.focused === true);
   assert.equal((hostMessages.at(-1)?.payload as { focused?: boolean }).focused, true);
   assert.equal((hostMessages.at(-1)?.payload as { theme?: string }).theme, "light");
+  assert.equal((hostMessages.at(-1)?.payload as { locale?: string }).locale, "zh-TW");
   session.dispose();
   assert.equal(session.state, "disposed");
   assert.deepEqual(failures, []);

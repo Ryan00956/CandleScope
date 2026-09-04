@@ -37,7 +37,36 @@ test("settings normalization defaults locale to zh-CN and accepts English aliase
   assert.equal(normalizeSettings({ locale: "en" }).locale, "en");
   assert.equal(normalizeSettings({ locale: "en-US" }).locale, "en");
   assert.equal(normalizeSettings({ locale: "zh-Hans" }).locale, "zh-CN");
-  assert.equal(normalizeSettings({ locale: "fr-FR" }).locale, "zh-CN");
+  assert.equal(normalizeSettings({ locale: "es" }).locale, "es");
+  assert.equal(normalizeSettings({ locale: "es-ES" }).locale, "es");
+  assert.equal(normalizeSettings({ locale: "es-MX" }).locale, "es");
+  assert.equal(normalizeSettings({ locale: "fr-FR" }).locale, "fr");
+  assert.equal(normalizeSettings({ locale: "fr-CA" }).locale, "fr");
+  assert.equal(normalizeSettings({ locale: "ja" }).locale, "ja");
+  assert.equal(normalizeSettings({ locale: "ja-JP" }).locale, "ja");
+  assert.equal(normalizeSettings({ locale: "ko" }).locale, "ko");
+  assert.equal(normalizeSettings({ locale: "ko-KR" }).locale, "ko");
+  assert.equal(normalizeSettings({ locale: "KO-kr" }).locale, "ko");
+  assert.equal(normalizeSettings({ locale: "pt-BR" }).locale, "pt-BR");
+  assert.equal(normalizeSettings({ locale: "pt-br" }).locale, "pt-BR");
+  assert.equal(normalizeSettings({ locale: "PT-BR" }).locale, "pt-BR");
+  assert.equal(normalizeSettings({ locale: "pt" }).locale, "zh-CN");
+  assert.equal(normalizeSettings({ locale: "pt-PT" }).locale, "zh-CN");
+  assert.equal(normalizeSettings({ locale: "ru" }).locale, "ru");
+  assert.equal(normalizeSettings({ locale: "ru-RU" }).locale, "ru");
+});
+
+test("settings persist and restore zh-TW across storage events and old settings", () => {
+  assert.equal(normalizeSettings({ locale: "zh-TW" }).locale, "zh-TW");
+  assert.equal(normalizeSettings({ locale: "zh-tw" }).locale, "zh-TW");
+  assert.equal(normalizeSettings({ locale: "zh-Hant-TW" }).locale, "zh-TW");
+  assert.equal(parseStoredSettings(JSON.stringify({ locale: "zh-TW" })).locale, "zh-TW");
+  const incoming = settingsFromStorageChange("candlescope-settings", JSON.stringify({
+    locale: "zh-Hant-TW",
+  }));
+  assert.equal(incoming?.locale, "zh-TW");
+  assert.equal(normalizeSettings({ theme: "light" }).locale, "zh-CN");
+  assert.equal(normalizeSettings({ locale: "zh-HK" }).locale, "zh-CN");
 });
 
 test("settings storage changes synchronize the complete settings snapshot across windows", () => {
@@ -47,8 +76,41 @@ test("settings storage changes synchronize the complete settings snapshot across
   }));
   assert.equal(incoming?.theme, "light");
   assert.equal(incoming?.locale, "en");
+  const korean = settingsFromStorageChange("candlescope-settings", JSON.stringify({
+    locale: "ko-KR",
+  }));
+  assert.equal(korean?.locale, "ko");
+  const russian = settingsFromStorageChange("candlescope-settings", JSON.stringify({
+    theme: "dark",
+    locale: "ru-RU",
+  }));
+  assert.equal(russian?.locale, "ru");
+  assert.equal(parseStoredSettings(JSON.stringify({ locale: "ru" })).locale, "ru");
   assert.equal(settingsFromStorageChange("unrelated-key", "{}"), null);
   assert.equal(settingsFromStorageChange(null, null)?.locale, "zh-CN");
+  const spanish = settingsFromStorageChange("candlescope-settings", JSON.stringify({
+    locale: "es-MX",
+  }));
+  assert.equal(spanish?.locale, "es");
+  const persisted = parseStoredSettings(JSON.stringify({ locale: "es-ES" }));
+  assert.equal(persisted.locale, "es");
+  const french = settingsFromStorageChange("candlescope-settings", JSON.stringify({
+    locale: "fr-CA",
+  }));
+  assert.equal(french?.locale, "fr");
+  assert.equal(settingsFromStorageChange("candlescope-settings", JSON.stringify({
+    locale: "ja-JP",
+  }))?.locale, "ja");
+
+  const ptIncoming = settingsFromStorageChange("candlescope-settings", JSON.stringify({
+    theme: "dark",
+    locale: "pt-br",
+  }));
+  assert.equal(ptIncoming?.locale, "pt-BR");
+  assert.equal(
+    settingsFromStorageChange("candlescope-settings", JSON.stringify({ locale: "pt-PT" }))?.locale,
+    "zh-CN",
+  );
 });
 
 test("settings normalization preserves supported chart types and rejects stale values", () => {

@@ -43,6 +43,198 @@ from .render_adapter import AdaptedRender, adapt_pyne_output
 WORKBENCH_PROTOCOL_V1 = "candlescope.pyne-workbench/1"
 _LAYER_ID = "pyne-output"
 
+_CONTRACT_LOCALIZATIONS = {
+    "zh-CN": {
+        "Pyne workbench contribution is not invokable": "Pyne 工作台贡献不可调用",
+        "Pyne session is not active": "Pyne 会话未激活",
+        "preview must be a boolean": "preview 必须是布尔值",
+        "workbench completion token is stale": "工作台完成令牌已失效",
+        "workbench phase is invalid": "工作台阶段无效",
+        "lookbackBars must be from 2 to 5000": "lookbackBars 必须在 2 到 5000 之间",
+        "paramsJson must be bounded JSON text": "paramsJson 必须是长度受限的 JSON 文本",
+        "paramsJson is invalid JSON": "paramsJson 不是有效的 JSON",
+        "paramsJson must contain an object": "paramsJson 必须包含对象",
+        "bar fields are invalid": "K 线字段无效",
+        "Host returned no market bars": "Host 未返回行情 K 线",
+        "Host bars are not all final": "Host 返回的 K 线并非全部已收盘",
+        "Host returned invalid bars": "Host 返回了无效 K 线",
+        "capabilityUnavailable": "{permission} 能力不可用",
+        "boundedString": "{key} 必须是长度受限的字符串",
+    },
+    "es": {
+        "Pyne workbench contribution is not invokable": (
+            "La contribución del banco de trabajo Pyne no se puede invocar"
+        ),
+        "Pyne session is not active": "La sesión de Pyne no está activa",
+        "preview must be a boolean": "preview debe ser un booleano",
+        "workbench completion token is stale": (
+            "El token de finalización del banco de trabajo ha caducado"
+        ),
+        "workbench phase is invalid": "La fase del banco de trabajo no es válida",
+        "lookbackBars must be from 2 to 5000": "lookbackBars debe estar entre 2 y 5000",
+        "paramsJson must be bounded JSON text": (
+            "paramsJson debe ser texto JSON de longitud limitada"
+        ),
+        "paramsJson is invalid JSON": "paramsJson no es un JSON válido",
+        "paramsJson must contain an object": "paramsJson debe contener un objeto",
+        "bar fields are invalid": "Los campos de la vela no son válidos",
+        "Host returned no market bars": "El Host no devolvió velas de mercado",
+        "Host bars are not all final": "No todas las velas del Host están cerradas",
+        "Host returned invalid bars": "El Host devolvió velas no válidas",
+        "capabilityUnavailable": "La capacidad {permission} no está disponible",
+        "boundedString": "{key} debe ser una cadena de longitud limitada",
+    },
+    "fr": {
+        "Pyne workbench contribution is not invokable": (
+            "La contribution de l’atelier Pyne n’est pas invocable"
+        ),
+        "Pyne session is not active": "La session Pyne n’est pas active",
+        "preview must be a boolean": "preview doit être un booléen",
+        "workbench completion token is stale": "Le jeton d’achèvement de l’atelier a expiré",
+        "workbench phase is invalid": "La phase de l’atelier est invalide",
+        "lookbackBars must be from 2 to 5000": (
+            "lookbackBars doit être compris entre 2 et 5 000"
+        ),
+        "paramsJson must be bounded JSON text": (
+            "paramsJson doit être un texte JSON borné"
+        ),
+        "paramsJson is invalid JSON": "paramsJson n’est pas un JSON valide",
+        "paramsJson must contain an object": "paramsJson doit contenir un objet",
+        "bar fields are invalid": "Les champs de barre sont invalides",
+        "Host returned no market bars": "L’hôte n’a renvoyé aucune barre de marché",
+        "Host bars are not all final": "Les barres de l’hôte ne sont pas toutes finales",
+        "Host returned invalid bars": "L’hôte a renvoyé des barres invalides",
+        "capabilityUnavailable": "Capacité {permission} indisponible",
+        "boundedString": "{key} doit être une chaîne bornée",
+    },
+    "ja": {
+        "Pyne workbench contribution is not invokable": "Pyne ワークベンチのコントリビューションは実行できません",
+        "Pyne session is not active": "Pyne セッションは有効ではありません",
+        "preview must be a boolean": "preview は真偽値である必要があります",
+        "workbench completion token is stale": "ワークベンチの完了トークンは無効です",
+        "workbench phase is invalid": "ワークベンチの段階が不正です",
+        "lookbackBars must be from 2 to 5000": "lookbackBars は 2 から 5000 である必要があります",
+        "paramsJson must be bounded JSON text": "paramsJson は長さ制限のある JSON テキストである必要があります",
+        "paramsJson is invalid JSON": "paramsJson は不正な JSON です",
+        "paramsJson must contain an object": "paramsJson はオブジェクトである必要があります",
+        "bar fields are invalid": "ローソク足フィールドが不正です",
+        "Host returned no market bars": "ホストが市場のローソク足を返しませんでした",
+        "Host bars are not all final": "ホストのローソク足がすべて確定していません",
+        "Host returned invalid bars": "ホストが不正なローソク足を返しました",
+        "capabilityUnavailable": "{permission} 能力は利用できません",
+        "boundedString": "{key} は長さ制限のある文字列である必要があります",
+    },
+    "ko": {
+        "Pyne workbench contribution is not invokable": "Pyne 작업대 기여는 호출할 수 없음",
+        "Pyne session is not active": "Pyne 세션이 활성 상태가 아님",
+        "preview must be a boolean": "preview는 불리언이어야 함",
+        "workbench completion token is stale": "작업대 완료 토큰이 만료됨",
+        "workbench phase is invalid": "작업대 단계가 유효하지 않음",
+        "lookbackBars must be from 2 to 5000": "lookbackBars는 2에서 5000 사이여야 함",
+        "paramsJson must be bounded JSON text": "paramsJson은 제한된 JSON 텍스트여야 함",
+        "paramsJson is invalid JSON": "paramsJson이 유효한 JSON이 아님",
+        "paramsJson must contain an object": "paramsJson은 객체여야 함",
+        "bar fields are invalid": "캔들 필드가 유효하지 않음",
+        "Host returned no market bars": "호스트가 시장 캔들을 반환하지 않음",
+        "Host bars are not all final": "호스트 캔들이 모두 확정이 아님",
+        "Host returned invalid bars": "호스트가 유효하지 않은 캔들을 반환함",
+        "capabilityUnavailable": "{permission} 기능을 사용할 수 없음",
+        "boundedString": "{key}은(는) 제한된 문자열이어야 함",
+    },
+    "pt-BR": {
+        "Pyne workbench contribution is not invokable": (
+            "A contribuição do Pyne Workbench não pode ser invocada"
+        ),
+        "Pyne session is not active": "A sessão Pyne não está ativa",
+        "preview must be a boolean": "preview deve ser um booleano",
+        "workbench completion token is stale": "O token de conclusão do workbench expirou",
+        "workbench phase is invalid": "A fase do workbench é inválida",
+        "lookbackBars must be from 2 to 5000": "lookbackBars deve estar entre 2 e 5000",
+        "paramsJson must be bounded JSON text": (
+            "paramsJson deve ser um texto JSON com tamanho limitado"
+        ),
+        "paramsJson is invalid JSON": "paramsJson não é um JSON válido",
+        "paramsJson must contain an object": "paramsJson deve conter um objeto",
+        "bar fields are invalid": "Os campos do candle são inválidos",
+        "Host returned no market bars": "O Host não retornou candles de mercado",
+        "Host bars are not all final": "Nem todos os candles do Host estão fechados",
+        "Host returned invalid bars": "O Host retornou candles inválidos",
+        "capabilityUnavailable": "A capacidade {permission} não está disponível",
+        "boundedString": "{key} deve ser uma string com tamanho limitado",
+    },
+    "ru": {
+        "Pyne workbench contribution is not invokable": "Вклад верстака Pyne нельзя вызвать",
+        "Pyne session is not active": "Сессия Pyne не активна",
+        "preview must be a boolean": "preview должен быть логическим значением",
+        "workbench completion token is stale": "Токен завершения верстака устарел",
+        "workbench phase is invalid": "Недопустимая фаза верстака",
+        "lookbackBars must be from 2 to 5000": "lookbackBars должен быть от 2 до 5000",
+        "paramsJson must be bounded JSON text": (
+            "paramsJson должен быть ограниченным по длине текстом JSON"
+        ),
+        "paramsJson is invalid JSON": "paramsJson содержит недопустимый JSON",
+        "paramsJson must contain an object": "paramsJson должен содержать объект",
+        "bar fields are invalid": "Недопустимые поля свечи",
+        "Host returned no market bars": "Host не вернул рыночные свечи",
+        "Host bars are not all final": "Не все свечи Host закрыты",
+        "Host returned invalid bars": "Host вернул недопустимые свечи",
+        "capabilityUnavailable": "Возможность {permission} недоступна",
+        "boundedString": "{key} должен быть ограниченной по длине строкой",
+    },
+    "zh-TW": {
+        "Pyne workbench contribution is not invokable": "Pyne 工作台貢獻無法呼叫",
+        "Pyne session is not active": "Pyne 工作階段尚未啟用",
+        "preview must be a boolean": "preview 必須是布林值",
+        "workbench completion token is stale": "工作台完成權杖已失效",
+        "workbench phase is invalid": "工作台階段無效",
+        "lookbackBars must be from 2 to 5000": "lookbackBars 必須介於 2 到 5000 之間",
+        "paramsJson must be bounded JSON text": "paramsJson 必須是長度受限的 JSON 文字",
+        "paramsJson is invalid JSON": "paramsJson 不是有效的 JSON",
+        "paramsJson must contain an object": "paramsJson 必須包含物件",
+        "bar fields are invalid": "K 線欄位無效",
+        "Host returned no market bars": "Host 未傳回行情 K 線",
+        "Host bars are not all final": "Host 傳回的 K 線並非全部已收盤",
+        "Host returned invalid bars": "Host 傳回了無效 K 線",
+        "capabilityUnavailable": "{permission} 功能不可用",
+        "boundedString": "{key} 必須是長度受限的字串",
+    },
+}
+
+
+def _localized_contract_error(
+    error: PlatformContractError, locale: str | None
+) -> PlatformContractError:
+    candidate = (locale or "").strip().lower()
+    messages = None
+    while candidate:
+        messages = next(
+            (
+                value
+                for key, value in _CONTRACT_LOCALIZATIONS.items()
+                if key.lower() == candidate
+            ),
+            None,
+        )
+        if messages is not None:
+            break
+        candidate = candidate.rpartition("-")[0]
+    if messages is None:
+        return error
+    message = messages.get(error.message)
+    if message is None and error.message.endswith(" capability is unavailable"):
+        permission = error.message.removesuffix(" capability is unavailable")
+        template = messages.get("capabilityUnavailable")
+        if template is not None:
+            message = template.replace("{permission}", permission)
+    if message is None and error.message.endswith(" must be a bounded string"):
+        key = error.message.removesuffix(" must be a bounded string")
+        template = messages.get("boundedString")
+        if template is not None:
+            message = template.replace("{key}", key)
+    if message is None:
+        return error
+    return PlatformContractError(error.code, message, error.path)
+
 
 def pyne_workbench_manifest() -> PluginManifest:
     resource = files(__package__).joinpath("manifest.json")
@@ -115,6 +307,12 @@ class PyneWorkbenchPlugin(BasePlatformPlugin):
         }
 
     def invoke(self, request: InvokeRequest) -> InvocationOutcome:
+        try:
+            return self._invoke(request)
+        except PlatformContractError as error:
+            raise _localized_contract_error(error, request.request_context.locale) from error
+
+    def _invoke(self, request: InvokeRequest) -> InvocationOutcome:
         operation = request.contribution_id
         if operation == "close-session":
             session_id = _required_string(request.input, "sessionId", maximum=128)
@@ -207,6 +405,18 @@ class PyneWorkbenchPlugin(BasePlatformPlugin):
         return self._publish(token, state)
 
     def complete_host_call(
+        self,
+        token: str,
+        response: RpcSuccess | RpcFailure,
+    ) -> InvocationOutcome:
+        state = self._pending.get(token)
+        locale = state.context.locale if state is not None else None
+        try:
+            return self._complete_host_call(token, response)
+        except PlatformContractError as error:
+            raise _localized_contract_error(error, locale) from error
+
+    def _complete_host_call(
         self,
         token: str,
         response: RpcSuccess | RpcFailure,

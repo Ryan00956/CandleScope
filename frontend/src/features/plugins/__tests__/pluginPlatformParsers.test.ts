@@ -15,6 +15,7 @@ import {
   parsePluginTrustReview,
   parsePluginV1CompatibilityPreview,
 } from "../pluginPlatformParsers.js";
+import { normalizeLocale } from "../../../i18n/index.js";
 import { buildPluginRegistries } from "../pluginRegistries.js";
 
 function plugin(id = "acme.scanner", available = true) {
@@ -774,6 +775,33 @@ test("plugin-owned localizations are validated and resolved by the Host locale",
           },
         },
       },
+      fr: {
+        title: "Scanner",
+        schema: {
+          title: "Paramètres de scan",
+          properties: {
+            interval: { title: "Intervalle", enumLabels: ["1 minute", "5 minutes"] },
+          },
+        },
+      },
+      ja: {
+        title: "スキャン",
+        schema: {
+          title: "スキャンパラメータ",
+          properties: {
+            interval: { title: "時間足", enumLabels: ["1分", "5分"] },
+          },
+        },
+      },
+      "pt-BR": {
+        title: "Escanear",
+        schema: {
+          title: "Parâmetros da varredura",
+          properties: {
+            interval: { title: "Intervalo", enumLabels: ["1 minuto", "5 minutos"] },
+          },
+        },
+      },
     },
   });
   Object.assign(value.plugins[0]!.contributions[1]!, {
@@ -783,12 +811,30 @@ test("plugin-owned localizations are validated and resolved by the Host locale",
         fields: { symbol: "标的" },
         emptyState: "暂无结果",
       },
+      fr: {
+        title: "Résultats",
+        fields: { symbol: "Symbole" },
+        emptyState: "Aucun résultat",
+      },
+      ja: {
+        title: "結果",
+        fields: { symbol: "銘柄" },
+        emptyState: "結果はまだありません",
+      },
+      "pt-BR": {
+        title: "Resultados",
+        fields: { symbol: "Ativo" },
+        emptyState: "Execute o scanner para preencher os resultados",
+      },
     },
   });
 
   const parsed = parsePluginCatalog(value);
   const zh = buildPluginRegistries(parsed, "zh-CN");
   const en = buildPluginRegistries(parsed, "en");
+  const french = buildPluginRegistries(parsed, "fr");
+  const ja = buildPluginRegistries(parsed, "ja");
+  const pt = buildPluginRegistries(parsed, "pt-BR");
   assert.equal(zh.commandPalette[0]?.title, "扫描");
   assert.equal(zh.commandPalette[0]?.configuration.inputSchema?.title, "扫描参数");
   assert.deepEqual(
@@ -802,6 +848,41 @@ test("plugin-owned localizations are validated and resolved by the Host locale",
   assert.equal(zhView.configuration.emptyState, "暂无结果");
   assert.equal(en.commandPalette[0]?.title, "Scan");
   assert.equal(en.sidePanel[0]?.title, "Results");
+  assert.equal(french.commandPalette[0]?.title, "Scanner");
+  assert.equal(french.commandPalette[0]?.configuration.inputSchema?.title, "Paramètres de scan");
+  assert.deepEqual(
+    french.commandPalette[0]?.configuration.inputSchema?.properties?.interval?.enumLabels,
+    ["1 minute", "5 minutes"],
+  );
+  const frenchView = french.sidePanel[0];
+  if (!frenchView || frenchView.configuration.renderer === "sandbox") assert.fail("french view missing");
+  assert.equal(frenchView.title, "Résultats");
+  assert.equal(frenchView.configuration.fields[0]?.label, "Symbole");
+  assert.equal(frenchView.configuration.emptyState, "Aucun résultat");
+  assert.equal(buildPluginRegistries(parsed, "fr").commandPalette[0]?.title, "Scanner");
+  assert.equal(ja.commandPalette[0]?.title, "スキャン");
+  assert.deepEqual(
+    ja.commandPalette[0]?.configuration.inputSchema?.properties?.interval?.enumLabels,
+    ["1分", "5分"],
+  );
+  const jaView = ja.sidePanel[0];
+  if (!jaView || jaView.configuration.renderer === "sandbox") assert.fail("japanese localized view missing");
+  assert.equal(jaView.configuration.fields[0]?.label, "銘柄");
+  assert.equal(jaView.configuration.emptyState, "結果はまだありません");
+  assert.equal(pt.commandPalette[0]?.title, "Escanear");
+  assert.equal(pt.commandPalette[0]?.configuration.inputSchema?.title, "Parâmetros da varredura");
+  assert.deepEqual(
+    pt.commandPalette[0]?.configuration.inputSchema?.properties?.interval?.enumLabels,
+    ["1 minuto", "5 minutos"],
+  );
+  const ptView = pt.sidePanel[0];
+  if (!ptView || ptView.configuration.renderer === "sandbox") assert.fail("localized pt-BR view missing");
+  assert.equal(ptView.configuration.fields[0]?.label, "Ativo");
+  assert.equal(ptView.configuration.emptyState, "Execute o scanner para preencher os resultados");
+  assert.equal(buildPluginRegistries(parsed, normalizeLocale("pt-br")).commandPalette[0]?.title, "Escanear");
+  assert.equal(buildPluginRegistries(parsed, normalizeLocale("PT-BR")).sidePanel[0]?.title, "Resultados");
+  assert.equal(buildPluginRegistries(parsed, normalizeLocale("pt")).commandPalette[0]?.title, "扫描");
+  assert.equal(buildPluginRegistries(parsed, normalizeLocale("pt-PT")).sidePanel[0]?.title, "结果");
 
   const unknownField = structuredClone(value);
   const viewLocalization = (unknownField.plugins[0]!.contributions[1] as unknown as {
@@ -825,6 +906,38 @@ test("plugin-owned localizations are validated and resolved by the Host locale",
   }).localizations["zh-CN"]!.schema.properties.interval;
   intervalLocalization.enumLabels = ["1 分钟"];
   assert.throws(() => parsePluginCatalog(mismatchedEnumLabels), /enumLabels/i);
+});
+
+test("zh-TW plugin copy is selected exactly and missing zh-TW uses plugin default text", () => {
+  const value = catalog();
+  Object.assign(value.plugins[0]!.contributions[0]!, {
+    localizations: {
+      "zh-CN": { title: "扫描" },
+      "zh-TW": { title: "掃描" },
+    },
+  });
+  Object.assign(value.plugins[0]!.contributions[1]!, {
+    localizations: {
+      "zh-CN": { title: "结果", fields: { symbol: "标的" }, emptyState: "暂无结果" },
+      "zh-TW": { title: "結果", fields: { symbol: "標的" }, emptyState: "尚無結果" },
+    },
+  });
+  const parsed = parsePluginCatalog(value);
+  const tw = buildPluginRegistries(parsed, "zh-TW");
+  assert.equal(tw.commandPalette[0]?.title, "掃描");
+  assert.equal(tw.sidePanel[0]?.title, "結果");
+  const twView = tw.sidePanel[0];
+  if (!twView || twView.configuration.renderer === "sandbox") assert.fail("localized view missing");
+  assert.equal(twView.configuration.fields[0]?.label, "標的");
+  assert.equal(twView.configuration.emptyState, "尚無結果");
+
+  const withoutTaiwan = catalog();
+  Object.assign(withoutTaiwan.plugins[0]!.contributions[0]!, {
+    localizations: { "zh-CN": { title: "扫描" } },
+  });
+  const fallback = buildPluginRegistries(parsePluginCatalog(withoutTaiwan), "zh-TW");
+  assert.equal(fallback.commandPalette[0]?.title, "Scan");
+  assert.notEqual(fallback.commandPalette[0]?.title, "扫描");
 });
 
 test("Phase 13 compatibility catalog is strict and never enters executable registries", () => {

@@ -3,6 +3,7 @@ from __future__ import annotations
 from importlib.resources import files
 
 import jsonschema
+import pytest
 
 from candlescope_plugin_sdk.platform_v2 import (
     ActivationRequest,
@@ -13,7 +14,12 @@ from candlescope_plugin_sdk.platform_v2 import (
     RpcSuccess,
     manifest_schema,
 )
+from candlescope_plugin_sdk.platform_v2.errors import PlatformContractError
 from candlescope_plugin_pyne_workbench import PyneWorkbenchPlugin, pyne_workbench_manifest
+from candlescope_plugin_pyne_workbench.plugin import (
+    _CONTRACT_LOCALIZATIONS,
+    _localized_contract_error,
+)
 
 
 CHART = {
@@ -28,8 +34,24 @@ CHART = {
 BARS = {
     "data": [
         {"time": 60, "open": 10, "high": 11, "low": 9, "close": 10, "volume": 1, "is_closed": True},
-        {"time": 120, "open": 10, "high": 12, "low": 9, "close": 11, "volume": 2, "is_closed": True},
-        {"time": 180, "open": 11, "high": 13, "low": 10, "close": 12, "volume": 3, "is_closed": True},
+        {
+            "time": 120,
+            "open": 10,
+            "high": 12,
+            "low": 9,
+            "close": 11,
+            "volume": 2,
+            "is_closed": True,
+        },
+        {
+            "time": 180,
+            "open": 11,
+            "high": 13,
+            "low": 10,
+            "close": 12,
+            "volume": 3,
+            "is_closed": True,
+        },
     ],
     "coverage": {"allRowsFinal": True},
 }
@@ -76,6 +98,11 @@ def test_manifest_is_independent_v2_plugin_with_bounded_capabilities() -> None:
         "strategy-provider/1",
     }
     assert "pyne-workbench" in {item.id for item in manifest.backend_entrypoints}
+    run = next(item for item in manifest.contributions if item.id == "run")
+    assert run.localizations["pt-BR"]["title"] == "Executar Pyne no gráfico atual"
+    assert run.localizations["pt-BR"]["schema"]["properties"]["source"]["title"] == (
+        "Código-fonte Pyne"
+    )
     assert [item.id for item in manifest.permissions.required] == [
         "chart.context.read",
         "market.bars.read",
@@ -83,16 +110,194 @@ def test_manifest_is_independent_v2_plugin_with_bounded_capabilities() -> None:
     ]
 
 
-def test_sandbox_ui_owns_zh_cn_and_english_copy() -> None:
+def test_sandbox_ui_owns_zh_cn_english_and_japanese_copy() -> None:
     web = files("candlescope_plugin_pyne_workbench").joinpath("web")
     html = web.joinpath("index.html").read_text(encoding="utf-8")
     javascript = web.joinpath("app.js").read_text(encoding="utf-8")
 
     assert 'data-i18n="statusWaiting"' in html
     assert '"zh-CN": {' in javascript
+    assert '"zh-TW": {' in javascript
     assert "en: {" in javascript
+    assert "es: {" in javascript
+    assert "Banco de trabajo Pyne" in javascript
+    assert "Esperando a CandleScope" in javascript
+    assert "fr: {" in javascript
+    assert "Atelier Pyne" in javascript
+    assert "ja: {" in javascript
+    assert "Pyne ワークベンチ" in javascript
+    assert "ko: {" in javascript
+    assert "Pyne 작업대" in javascript
+    assert '"pt-BR": {' in javascript
+    assert "Aguardando conexão do CandleScope" in javascript
+    assert "Executar Pyne no gráfico atual" in javascript
+    assert "ru: {" in javascript
+    assert "Верстак Pyne" in javascript
+    assert "等待 CandleScope 連線" in javascript
     assert "applyLocale(payload.locale)" in javascript
     assert 'setStatus("statusRejected")' in javascript
+    assert "ecrã" not in javascript
+    assert "ficheiro" not in javascript
+    assert "utilizador" not in javascript
+    assert "percentagem" not in javascript
+
+
+def test_packaged_manifest_owns_spanish_localizations() -> None:
+    manifest = pyne_workbench_manifest()
+    by_id = {item.id: item for item in manifest.contributions}
+    assert by_id["run"].localizations["es"]["title"] == "Ejecutar Pyne en el gráfico actual"
+    run_schema = by_id["run"].localizations["es"]["schema"]["properties"]
+    assert run_schema["source"]["title"] == "Código fuente Pyne"
+    assert run_schema["lookbackBars"]["title"] == "Barras de retrospectiva"
+    assert (
+        by_id["start-session"].localizations["es"]["title"] == "Iniciar sesión incremental de Pyne"
+    )
+    push_schema = by_id["push-bar"].localizations["es"]["schema"]["properties"]
+    assert push_schema["open"]["title"] == "Apertura"
+    assert push_schema["close"]["title"] == "Cierre"
+    assert (
+        by_id["snapshot-session"].localizations["es"]["title"]
+        == "Crear instantánea de la sesión Pyne"
+    )
+    assert by_id["close-session"].localizations["es"]["title"] == "Cerrar sesión Pyne"
+    assert (
+        by_id["pyne-strategy"].localizations["es"]["title"]
+        == "Proveedor de estrategia de prueba retrospectiva Pyne"
+    )
+    assert by_id["workbench-view"].localizations["es"]["title"] == "Banco de trabajo Pyne"
+    assert by_id["pyne-output"].localizations["es"]["title"] == "Salida Pyne"
+
+
+def test_manifest_owns_french_contribution_copy() -> None:
+    manifest = pyne_workbench_manifest()
+    titles = {
+        item.id: item.localizations["fr"]["title"]
+        for item in manifest.contributions
+        if "fr" in item.localizations
+    }
+    assert titles["run"] == "Exécuter Pyne sur le graphique actuel"
+    assert titles["workbench-view"] == "Atelier Pyne"
+    assert titles["pyne-strategy"] == "Fournisseur de stratégie backtest Pyne"
+    run = next(item for item in manifest.contributions if item.id == "run")
+    assert run.localizations["fr"]["schema"]["properties"]["lookbackBars"]["title"] == (
+        "Barres de rétrospection"
+    )
+
+
+def test_workbench_errors_follow_french_regional_locale() -> None:
+    error = PlatformContractError("INVALID_CONTRACT", "Pyne session is not active")
+    translated = _localized_contract_error(error, "fr-CA")
+    assert translated.message == "La session Pyne n’est pas active"
+    capability = PlatformContractError(
+        "INVALID_CONTRACT", "chart.layer.publish capability is unavailable"
+    )
+    assert _localized_contract_error(capability, "fr").message == (
+        "Capacité chart.layer.publish indisponible"
+    )
+    plugin = _plugin()
+    with pytest.raises(PlatformContractError, match="n’est pas invocable"):
+        plugin.invoke(
+            InvokeRequest(
+                "not-a-contribution",
+                {},
+                RequestContext("not-a-contribution", True, 1, "trace-fr", locale="fr-CA"),
+            )
+        )
+
+
+def test_runtime_contract_errors_cover_every_manifest_locale() -> None:
+    manifest = pyne_workbench_manifest()
+    declared = {
+        locale
+        for contribution in manifest.contributions
+        for locale in contribution.localizations
+    }
+    assert declared == set(_CONTRACT_LOCALIZATIONS)
+
+    error = PlatformContractError("INVALID_CONTRACT", "Pyne session is not active")
+    expected = {
+        "zh-CN": "Pyne 会话未激活",
+        "es": "La sesión de Pyne no está activa",
+        "fr": "La session Pyne n’est pas active",
+        "ja": "Pyne セッションは有効ではありません",
+        "ko": "Pyne 세션이 활성 상태가 아님",
+        "pt-BR": "A sessão Pyne não está ativa",
+        "ru": "Сессия Pyne не активна",
+        "zh-TW": "Pyne 工作階段尚未啟用",
+    }
+    for locale, message in expected.items():
+        translated = _localized_contract_error(error, locale)
+        assert translated.message == message
+        assert translated is not error
+
+    assert _localized_contract_error(error, "es-MX").message == expected["es"]
+    assert _localized_contract_error(error, "pt-br").message == expected["pt-BR"]
+    assert _localized_contract_error(error, "ru-RU").message == expected["ru"]
+    assert _localized_contract_error(error, "zh-tw").message == expected["zh-TW"]
+
+
+def test_manifest_owns_japanese_command_and_schema_copy() -> None:
+    manifest = pyne_workbench_manifest()
+    run = next(item for item in manifest.contributions if item.id == "run")
+    assert run.localizations["ja"]["title"] == "現在のチャートで Pyne を実行"
+    assert run.localizations["ja"]["schema"]["properties"]["lookbackBars"]["title"] == "遡及本数"
+    view = next(item for item in manifest.contributions if item.id == "workbench-view")
+    assert view.localizations["ja"]["title"] == "Pyne ワークベンチ"
+
+
+def test_plugin_owned_errors_follow_japanese_locale() -> None:
+    error = PlatformContractError(
+        "INVALID_CONTRACT",
+        "Pyne workbench contribution is not invokable",
+        "invoke.unknown",
+    )
+    translated = _localized_contract_error(error, "ja-JP")
+    assert translated.message == "Pyne ワークベンチのコントリビューションは実行できません"
+    plugin = _plugin()
+    with pytest.raises(PlatformContractError, match="実行できません"):
+        plugin.invoke(
+            InvokeRequest(
+                "unknown",
+                {},
+                RequestContext("unknown", True, 1, "trace-ja", "ja"),
+            )
+        )
+def test_plugin_owned_korean_errors_follow_ko_and_ko_kr() -> None:
+    plugin = _plugin()
+    with pytest.raises(PlatformContractError, match="호출할 수 없음"):
+        plugin.invoke(
+            InvokeRequest(
+                "not-a-command",
+                {},
+                RequestContext("not-a-command", True, 1, "trace-ko", locale="ko-KR"),
+            )
+        )
+    error = PlatformContractError("INVALID_CONTRACT", "workbench phase is invalid")
+    assert _localized_contract_error(error, "ko").message == "작업대 단계가 유효하지 않음"
+    assert _localized_contract_error(error, "ko-KR").message == "작업대 단계가 유효하지 않음"
+    english = PlatformContractError("INVALID_CONTRACT", "workbench phase is invalid")
+    assert _localized_contract_error(english, "en") is english
+
+
+def test_manifest_owns_korean_contribution_copy() -> None:
+    manifest = pyne_workbench_manifest()
+    localized = [item for item in manifest.contributions if item.localizations]
+    assert localized
+    for item in localized:
+        assert "ko" in item.localizations, item.id
+        korean = item.localizations["ko"]
+        assert korean["title"]
+        chinese = item.localizations["zh-CN"]
+        if "schema" in chinese:
+            assert set(korean["schema"]["properties"]) == set(chinese["schema"]["properties"])
+
+
+def test_manifest_owns_zh_tw_contribution_copy() -> None:
+    manifest = pyne_workbench_manifest()
+    run = next(item for item in manifest.contributions if item.id == "run")
+    assert run.localizations["zh-TW"]["title"] == "在當前圖表執行 Pyne"
+    view = next(item for item in manifest.contributions if item.id == "workbench-view")
+    assert view.localizations["zh-TW"]["title"] == "Pyne 工作台"
 
 
 def test_batch_command_reads_chart_bars_and_publishes_render_v2() -> None:
@@ -122,8 +327,7 @@ def test_batch_command_brokers_exact_request_data_before_publish() -> None:
         "run",
         {
             "source": (
-                'requested = request.security("BTCUSDT", "5m", close)\n'
-                'plot(requested, "Requested")'
+                'requested = request.security("BTCUSDT", "5m", close)\nplot(requested, "Requested")'
             ),
             "lookbackBars": 3,
         },

@@ -19,7 +19,7 @@
   --accent-cyan: #06b6d4;
 
   /* 其他常量 */
-  --font-sans: 'Inter', -apple-system, sans-serif;
+  --font-sans: 'Inter', system-ui, -apple-system, 'Segoe UI', 'Malgun Gothic', 'Apple SD Gothic Neo', 'Noto Sans KR', 'Noto Sans', 'Liberation Sans', sans-serif;
   --font-mono: 'JetBrains Mono', monospace;
   --radius-md: 8px;
   --radius-sm: 4px;
@@ -230,9 +230,17 @@ body {
 }
 
 .market-rail-accordion-trigger strong {
+  min-width: 0;
+  overflow: hidden;
   font-size: 11px;
   font-weight: 700;
+  text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+html[lang="ru"] .market-rail-accordion-trigger strong {
+  white-space: normal;
+  line-height: 1.25;
 }
 
 .market-rail-accordion-summary {

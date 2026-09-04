@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
+import { LOCALES, getLocale, setLocale, t } from "../../../i18n/index.js";
 import {
   assembleFrozenResearchContext,
   frozenContextCanonicalJson,
@@ -17,6 +18,7 @@ import {
   sha256HexUtf8,
   ResearchDataError,
 } from "../researchDataSourceModel.js";
+import { researchLibraryErrorMessage } from "../researchDataFormat.js";
 import {
   FORBIDDEN_ORDINARY_UI_TERMS,
   type ResearchSourceRefV1,
@@ -150,15 +152,89 @@ test("LOCAL_OFFLINE hides runnable current chart with a reason", () => {
   assert.equal(summary.capabilities.barApprox?.reasonCode, "OFFLINE_LIVE_SOURCE_UNAVAILABLE");
 });
 
+test("research actions and capability copy follow every registered locale", () => {
+  const previous = getLocale();
+  try {
+    for (const locale of LOCALES) {
+      setLocale(locale);
+      const error = new ResearchDataError("MISSING_DATASET_IDENTITY", "datasetId is required");
+      assert.equal(error.action, t("research.errorAction.chooseDataVersion", {}, locale));
+
+      const capabilities = projectResearchCapabilities({
+        sourceKind: "CURRENT_CHART",
+        runtimeMode: "LOCAL_OFFLINE",
+        locale,
+      });
+      assert.equal(
+        capabilities.capabilities.viewKlines?.userReason,
+        t("research.capability.offlineLive", {}, locale),
+      );
+      assert.equal(
+        capabilities.capabilities.barApprox?.userAction,
+        t("research.capability.chooseLibrary", {}, locale),
+      );
+    }
+
+    for (const locale of ["es", "fr", "ja", "pt-BR", "ru", "zh-TW"] as const) {
+      assert.notEqual(
+        t("research.errorAction.chooseDataVersion", {}, locale),
+        t("research.errorAction.chooseDataVersion", {}, "zh-CN"),
+      );
+    }
+  } finally {
+    setLocale(previous);
+  }
+});
+
 test("ordinary UI copy never includes internal identity terms", () => {
   assert.deepEqual(ordinaryTermsContainInternalIdentity(), []);
   assert.equal(ordinarySourceLabel("CURRENT_CHART"), "当前图表");
   assert.equal(ordinarySourceLabel("IMPORTED_DATASET"), "本地资料库");
   assert.equal(ordinarySourceLabel("COMPLETED_RUN"), "完成结果");
+  assert.equal(ordinarySourceLabel("CURRENT_CHART", "ja"), "現在のチャート");
+  assert.equal(ordinarySourceLabel("IMPORTED_DATASET", "ja"), "ローカルライブラリ");
+  assert.equal(ordinarySourceLabel("COMPLETED_RUN", "ja"), "完了した結果");
+  assert.equal(ordinarySourceLabel("CURRENT_CHART", "ko"), "현재 차트");
+  assert.equal(ordinarySourceLabel("IMPORTED_DATASET", "ko"), "로컬 라이브러리");
+  assert.equal(ordinarySourceLabel("COMPLETED_RUN", "ko"), "완료 결과");
+  const previous = getLocale();
+  try {
+    setLocale("ko");
+    assert.equal(ordinarySourceLabel("CURRENT_CHART"), "현재 차트");
+    const koreanError = new ResearchDataError("MISSING_DATASET_IDENTITY", "datasetId is required");
+    assert.match(koreanError.action, /\p{Script=Hangul}/u);
+    assert.doesNotMatch(koreanError.action, /\p{Script=Han}/u);
+    assert.equal(researchLibraryErrorMessage(koreanError), koreanError.action);
+    const koreanCaps = projectResearchCapabilities({
+      sourceKind: "CURRENT_CHART",
+      runtimeMode: "LOCAL_OFFLINE",
+    });
+    const barApprox = koreanCaps.capabilities.barApprox;
+    const viewKlines = koreanCaps.capabilities.viewKlines;
+    assert.ok(barApprox);
+    assert.ok(viewKlines);
+    assert.match(barApprox.userAction, /\p{Script=Hangul}/u);
+    assert.match(viewKlines.userReason, /\p{Script=Hangul}/u);
+    assert.doesNotMatch(barApprox.userAction, /\p{Script=Han}/u);
+    assert.doesNotMatch(viewKlines.userReason, /\p{Script=Han}/u);
+  } finally {
+    setLocale(previous);
+  }
+  assert.equal(
+    new ResearchDataError("MISSING_DATASET_IDENTITY", "datasetId is required").action,
+    "重新选择本地资料库中的数据版本",
+  );
+  assert.equal(ordinarySourceLabel("CURRENT_CHART", "zh-CN"), "当前图表");
+  assert.equal(ordinarySourceLabel("IMPORTED_DATASET", "zh-CN"), "本地资料库");
+  assert.equal(ordinarySourceLabel("COMPLETED_RUN", "zh-CN"), "完成结果");
+  assert.equal(ordinarySourceLabel("CURRENT_CHART", "zh-TW"), "當前圖表");
+  assert.equal(ordinarySourceLabel("IMPORTED_DATASET", "zh-TW"), "本地資料庫");
+  assert.equal(ordinarySourceLabel("COMPLETED_RUN", "zh-TW"), "完成結果");
   const joined = [
     ordinarySourceLabel("CURRENT_CHART", "en"),
     ordinarySourceLabel("IMPORTED_DATASET", "en"),
     ordinarySourceLabel("COMPLETED_RUN", "en"),
+    ordinarySourceLabel("CURRENT_CHART", "ko"),
   ].join(" ").toLowerCase();
   for (const term of FORBIDDEN_ORDINARY_UI_TERMS) {
     assert.equal(joined.includes(term.toLowerCase()), false);

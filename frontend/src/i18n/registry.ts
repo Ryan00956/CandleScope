@@ -1,5 +1,12 @@
 import { en } from "./catalogs/en.js";
+import { es } from "./catalogs/es.js";
+import { fr } from "./catalogs/fr.js";
+import { ja } from "./catalogs/ja.js";
+import { ko } from "./catalogs/ko.js";
+import { ptBR } from "./catalogs/pt-BR.js";
+import { ru } from "./catalogs/ru.js";
 import { zhCN } from "./catalogs/zh-CN.js";
+import { zhTW } from "./catalogs/zh-TW.js";
 import type { MessageCatalog } from "./messageCatalog.js";
 
 export interface LocaleDefinition {
@@ -23,6 +30,58 @@ export const LOCALE_REGISTRY = {
     dateTimeLocale: "en-GB",
     numberLocale: "en-US",
     messages: en,
+  },
+  es: {
+    nativeLabel: "Español",
+    dateTimeLocale: "es-ES",
+    numberLocale: "es-ES",
+    direction: "ltr",
+    messages: es,
+  },
+  fr: {
+    nativeLabel: "Français",
+    dateTimeLocale: "fr-FR",
+    numberLocale: "fr-FR",
+    direction: "ltr",
+    messages: fr,
+  },
+  ja: {
+    nativeLabel: "日本語",
+    aliases: ["ja-JP"],
+    dateTimeLocale: "ja-JP",
+    numberLocale: "ja-JP",
+    direction: "ltr",
+    messages: ja,
+  },
+  ko: {
+    nativeLabel: "한국어",
+    dateTimeLocale: "ko-KR",
+    numberLocale: "ko-KR",
+    direction: "ltr",
+    messages: ko,
+  },
+  "pt-BR": {
+    nativeLabel: "Português (Brasil)",
+    dateTimeLocale: "pt-BR",
+    numberLocale: "pt-BR",
+    direction: "ltr",
+    messages: ptBR,
+  },
+  ru: {
+    nativeLabel: "Русский",
+    aliases: ["ru-RU"],
+    dateTimeLocale: "ru-RU",
+    numberLocale: "ru-RU",
+    direction: "ltr",
+    messages: ru,
+  },
+  "zh-TW": {
+    nativeLabel: "繁體中文",
+    aliases: ["zh-Hant-TW"],
+    dateTimeLocale: "zh-TW",
+    numberLocale: "zh-TW",
+    direction: "ltr",
+    messages: zhTW,
   },
 } as const satisfies Readonly<Record<string, LocaleDefinition>>;
 

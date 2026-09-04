@@ -118,6 +118,35 @@ test("built-in workspace names follow locale without rewriting persisted user da
   assert.equal(chartWorkspaceDisplayName(second, "zh-CN"), "左右双图工作区 2");
 });
 
+test("zh-TW built-in workspace names follow locale without rewriting custom names", () => {
+  const defaultWorkspace = createDefaultChartWorkspaceRecord(100, "zh-TW");
+  assert.equal(defaultWorkspace.name, "預設工作區");
+  assert.deepEqual(defaultWorkspace.builtinName, { kind: "default" });
+  assert.equal(chartWorkspaceDisplayName(defaultWorkspace, "zh-TW"), "預設工作區");
+  assert.equal(chartWorkspaceDisplayName(defaultWorkspace, "en"), "Default workspace");
+  assert.equal(chartWorkspaceDisplayName({
+    name: "我的自訂布局",
+  }, "zh-TW"), "我的自訂布局");
+
+  const firstName = nextChartWorkspaceTemplateBuiltinName("split-vertical", [], "zh-TW");
+  assert.equal(firstName.name, "左右雙圖工作區");
+  const first = createChartWorkspaceRecord({
+    id: "workspace-tw-one",
+    name: firstName.name,
+    builtinName: firstName.builtinName,
+    createdAt: 101,
+  });
+  const secondName = nextChartWorkspaceTemplateBuiltinName("split-vertical", [first], "zh-TW");
+  assert.equal(secondName.name, "左右雙圖工作區 2");
+
+  const legacyDefault = createDefaultChartWorkspaceRecord(100, "zh-TW");
+  const raw = { ...legacyDefault };
+  delete raw.builtinName;
+  const normalized = normalizeChartWorkspaceRecord(raw, 200);
+  assert.deepEqual(normalized?.builtinName, { kind: "default" });
+  assert.equal(normalized && chartWorkspaceDisplayName(normalized, "en"), "Default workspace");
+});
+
 test("legacy default workspace records gain built-in name provenance during normalization", () => {
   const legacy = createDefaultChartWorkspaceRecord(100, "zh-CN");
   const raw = { ...legacy };

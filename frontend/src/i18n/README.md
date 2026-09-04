@@ -5,7 +5,17 @@ chrome. It is app-wide infrastructure, not a business feature.
 
 ## Public Contract
 
-- Default locale is `zh-CN`. Supported locales are `zh-CN` and `en`.
+- Default locale is `zh-CN`. Supported locales are `zh-CN`, `en`, `es`, `fr`,
+  `ja`, `ko`, `pt-BR`, `ru`, and `zh-TW`.
+- Bare `pt` is not an alias of `pt-BR`. Locale matching still walks BCP 47
+  parents, so `pt-BR` and case variants such as `pt-br` resolve to Brazilian
+  Portuguese, but `pt` and `pt-PT` fall back to the product default. This is a
+  product decision: CLDR treats `pt` as Brazil, but CandleScope must not mix
+  European Portuguese with Brazilian Portuguese unless a dedicated `pt-PT`
+  catalog is registered.
+- Traditional Chinese uses the native label 繁體中文 and the alias
+  `zh-Hant-TW` only. `zh-HK`, `zh-MO`, and bare `zh-Hant` are not mapped to
+  `zh-TW`.
 - `registry.ts` is the single registration point for catalogs, native labels,
   aliases and optional date/number format locales. `LocaleId`, the settings
   options, locale normalization and catalog checks are derived from it.

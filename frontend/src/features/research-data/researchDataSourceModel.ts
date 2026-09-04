@@ -1,3 +1,4 @@
+import { LOCALES, t, type LocaleId, type MessageKey } from "../../i18n/index.js";
 import {
   FROZEN_RESEARCH_CONTEXT_SCHEMA,
   FORBIDDEN_ORDINARY_UI_TERMS,
@@ -16,15 +17,54 @@ import {
   type ResearchSourceRefV1,
 } from "./researchDataTypes.js";
 
-const ERROR_ACTIONS: Record<string, string> = {
-  INVALID_RESEARCH_SOURCE: "重新选择数据来源",
-  UNKNOWN_SOURCE_KIND: "重新选择数据来源",
-  MISSING_DATASET_IDENTITY: "重新选择本地资料库中的数据版本",
-  MISSING_SNAPSHOT_HASH: "从完成结果重新打开，不要手工填写身份",
-  INVALID_FROZEN_CONTEXT: "重新冻结数据后再运行",
-  CONTEXT_HASH_MISMATCH: "重新冻结数据后再运行",
-  FRONTEND_MUST_NOT_INVENT_SNAPSHOT: "等待后端返回已冻结身份",
-};
+const RESEARCH_ERROR_ACTION_KEYS = {
+  INVALID_RESEARCH_SOURCE: "research.errorAction.chooseSourceAgain",
+  UNKNOWN_SOURCE_KIND: "research.errorAction.chooseSourceAgain",
+  MISSING_DATASET_IDENTITY: "research.errorAction.chooseDataVersion",
+  MISSING_SNAPSHOT_HASH: "research.errorAction.reopenCompletedResult",
+  INVALID_FROZEN_CONTEXT: "research.errorAction.freezeAgain",
+  CONTEXT_HASH_MISMATCH: "research.errorAction.freezeAgain",
+  FRONTEND_MUST_NOT_INVENT_SNAPSHOT: "research.errorAction.waitForFrozenIdentity",
+} as const satisfies Record<string, MessageKey>;
+
+const RESEARCH_CAPABILITY_KEYS = {
+  viewKlines: "research.capability.viewKlines",
+  importCsv: "research.capability.importCsv",
+  importDenied: "research.capability.importDenied",
+  switchLibrary: "research.capability.switchLibrary",
+  activateVersion: "research.capability.activateVersion",
+  versionDenied: "research.capability.versionDenied",
+  manageVersions: "research.capability.manageVersions",
+  barApprox: "research.capability.barApprox",
+  gapDenied: "research.capability.gapDenied",
+  shortenOrImport: "research.capability.shortenOrImport",
+  frozenTape: "research.capability.frozenTape",
+  tapeDenied: "research.capability.tapeDenied",
+  useBarsOrTape: "research.capability.useBarsOrTape",
+  offlineLive: "research.capability.offlineLive",
+  chooseLibrary: "research.capability.chooseLibrary",
+  prepareHistory: "research.capability.prepareHistory",
+  noNetworkBackfill: "research.capability.noNetworkBackfill",
+  useImportedOrShorten: "research.capability.useImportedOrShorten",
+  readOnlyResults: "research.capability.readOnlyResults",
+  localBars: "research.capability.localBars",
+  liveIndicators: "research.capability.liveIndicators",
+  offlineIndicators: "research.capability.offlineIndicators",
+  independentReview: "research.capability.independentReview",
+  bindVersion: "research.capability.bindVersion",
+  bindChart: "research.capability.bindChart",
+  offlineChartStrategy: "research.capability.offlineChartStrategy",
+} as const satisfies Record<string, MessageKey>;
+
+function errorAction(code: string, locale?: LocaleId): string {
+  const key = RESEARCH_ERROR_ACTION_KEYS[code as keyof typeof RESEARCH_ERROR_ACTION_KEYS]
+    ?? "research.errorAction.chooseSourceAgain";
+  return t(key, {}, locale);
+}
+
+function capabilityCopy(key: keyof typeof RESEARCH_CAPABILITY_KEYS, locale?: LocaleId): string {
+  return t(RESEARCH_CAPABILITY_KEYS[key], {}, locale);
+}
 
 export class ResearchDataError extends Error {
   readonly code: string;
@@ -35,7 +75,7 @@ export class ResearchDataError extends Error {
     super(message);
     this.name = "ResearchDataError";
     this.code = code;
-    this.action = ERROR_ACTIONS[code] ?? "重新选择来源";
+    this.action = errorAction(code);
     this.details = details;
   }
 
@@ -212,6 +252,7 @@ export function projectResearchCapabilities(input: {
   quality?: ResearchQualitySummaryV1 | null;
   hasFrozenTrades?: boolean;
   hasResultCapabilities?: boolean | null;
+  locale?: LocaleId;
 }): ResearchCapabilitySummaryV1 {
   const runtimeMode = input.runtimeMode ?? "LIVE";
   const kind = input.sourceKind;
@@ -222,50 +263,63 @@ export function projectResearchCapabilities(input: {
   const offline = runtimeMode === "LOCAL_OFFLINE";
   const hasFrozenTrades = input.hasFrozenTrades === true;
   const fidelityCeiling = hasFrozenTrades ? "TRADE_TAPE" : "BAR_APPROX";
+  const copy = (key: keyof typeof RESEARCH_CAPABILITY_KEYS) => capabilityCopy(key, input.locale);
 
   const capabilities: ResearchCapabilitySummaryV1["capabilities"] = {
-    viewKlines: allow("可以查看 K 线"),
+    viewKlines: allow(copy("viewKlines")),
     importNewData: imported
-      ? allow("可以导入 CSV")
-      : deny("IMPORT_NOT_AVAILABLE", "当前来源不能导入新数据", "切换到本地资料库"),
+      ? allow(copy("importCsv"))
+      : deny("IMPORT_NOT_AVAILABLE", copy("importDenied"), copy("switchLibrary")),
     modifyRevisionPointer: imported
-      ? allow("可以激活数据版本")
-      : deny("REVISION_POINTER_NOT_AVAILABLE", "当前来源不能修改数据版本", "在本地资料库中管理数据版本"),
+      ? allow(copy("activateVersion"))
+      : deny(
+        "REVISION_POINTER_NOT_AVAILABLE",
+        copy("versionDenied"),
+        copy("manageVersions"),
+      ),
     barApprox: imported || completed || qualityOk
-      ? allow("基于 K 线估算")
-      : deny("DATA_GAP", "所选区间存在缺口", "缩短区间或导入完整数据"),
+      ? allow(copy("barApprox"))
+      : deny("DATA_GAP", copy("gapDenied"), copy("shortenOrImport")),
     tradeTape: hasFrozenTrades
-      ? allow("已有冻结成交")
-      : deny("UNSUPPORTED_FIDELITY", "当前数据不支持逐笔精度，只能基于 K 线估算", "使用 K 线估算或导入成交数据"),
+      ? allow(copy("frozenTape"))
+      : deny("UNSUPPORTED_FIDELITY", copy("tapeDenied"), copy("useBarsOrTape")),
     onlineBackfill: offline
-      ? deny("OFFLINE_LIVE_SOURCE_UNAVAILABLE", "离线运行时没有实时行情", "选择本地资料库")
+      ? deny("OFFLINE_LIVE_SOURCE_UNAVAILABLE", copy("offlineLive"), copy("chooseLibrary"))
       : chart
-        ? allow("用户确认后可准备缺失历史")
-        : deny("IMPORTED_DATASET_NEVER_NETWORKS", "导入数据不会联网补历史", "使用已导入的数据或缩短区间"),
+        ? allow(copy("prepareHistory"))
+        : deny(
+          "IMPORTED_DATASET_NEVER_NETWORKS",
+          copy("noNetworkBackfill"),
+          copy("useImportedOrShorten"),
+        ),
     indicators: completed
-      ? allow("只读结果能力")
+      ? allow(copy("readOnlyResults"))
       : imported
-        ? allow("本地显式-bars 指标")
+        ? allow(copy("localBars"))
         : !offline
-          ? allow("当前行情指标")
-          : deny("OFFLINE_LIVE_SOURCE_UNAVAILABLE", "离线运行时没有实时行情指标", "选择本地资料库"),
+          ? allow(copy("liveIndicators"))
+          : deny(
+            "OFFLINE_LIVE_SOURCE_UNAVAILABLE",
+            copy("offlineIndicators"),
+            copy("chooseLibrary"),
+          ),
     drawingsEvents: completed
-      ? allow("独立复核范围")
+      ? allow(copy("independentReview"))
       : imported
-        ? allow("绑定当前数据版本")
-        : allow("绑定当前图表"),
+        ? allow(copy("bindVersion"))
+        : allow(copy("bindChart")),
   };
 
   if (offline && chart) {
     capabilities.viewKlines = deny(
       "OFFLINE_LIVE_SOURCE_UNAVAILABLE",
-      "离线运行时没有实时行情",
-      "选择本地资料库",
+      copy("offlineLive"),
+      copy("chooseLibrary"),
     );
     capabilities.barApprox = deny(
       "OFFLINE_LIVE_SOURCE_UNAVAILABLE",
-      "离线运行时不能运行当前图表策略",
-      "选择本地资料库",
+      copy("offlineChartStrategy"),
+      copy("chooseLibrary"),
     );
   }
 
@@ -343,10 +397,16 @@ export async function parseFrozenResearchContext(value: unknown): Promise<Frozen
   return assembleFrozenResearchContext(value, capability as unknown as ResearchCapabilitySummaryV1);
 }
 
-export function ordinarySourceLabel(kind: ResearchSourceKind, locale: "en" | "zh" = "zh"): string {
-  if (kind === "CURRENT_CHART") return ORDINARY_RESEARCH_TERMS.currentChart[locale];
-  if (kind === "IMPORTED_DATASET") return ORDINARY_RESEARCH_TERMS.importedLibrary[locale];
-  return ORDINARY_RESEARCH_TERMS.completedResult[locale];
+export function ordinarySourceLabel(
+  kind: ResearchSourceKind,
+  locale?: LocaleId,
+): string {
+  const key = kind === "CURRENT_CHART"
+    ? "research.source.currentChart"
+    : kind === "IMPORTED_DATASET"
+      ? "research.source.importedLibrary"
+      : "research.source.completedResult";
+  return t(key, {}, locale);
 }
 
 export function ordinaryTermsContainInternalIdentity(): string[] {
@@ -356,6 +416,14 @@ export function ordinaryTermsContainInternalIdentity(): string[] {
     for (const text of Object.values(pair)) {
       const lower = text.toLowerCase();
       if (forbidden.some((term) => lower.includes(term))) hits.push(`${key}:${text}`);
+    }
+  }
+  for (const locale of LOCALES) {
+    for (const kind of RESEARCH_SOURCE_KINDS) {
+      const text = ordinarySourceLabel(kind, locale);
+      if (forbidden.some((term) => text.toLowerCase().includes(term))) {
+        hits.push(`${locale}:${kind}:${text}`);
+      }
     }
   }
   return hits;

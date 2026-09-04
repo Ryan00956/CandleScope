@@ -1,6 +1,7 @@
 import {
   projectResearchCapabilities,
 } from "../research-data/researchDataSourceModel.js";
+import type { LocaleId } from "../../i18n/index.js";
 import type {
   ResearchCapabilitySummaryV1,
   ResearchRuntimeMode,
@@ -39,10 +40,11 @@ export class StrategyResearchRuntime {
     return this.state;
   }
 
-  capabilitiesFor(kind: ResearchSourceKind): ResearchCapabilitySummaryV1 {
+  capabilitiesFor(kind: ResearchSourceKind, locale?: LocaleId): ResearchCapabilitySummaryV1 {
     return projectResearchCapabilities({
       sourceKind: kind,
       runtimeMode: this.runtimeMode,
+      ...(locale ? { locale } : {}),
     });
   }
 

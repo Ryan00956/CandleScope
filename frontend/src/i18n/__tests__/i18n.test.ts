@@ -231,7 +231,65 @@ const PT_BR_TECHNICAL_IDENTIFIERS = new Set([
   "Archive", "Language", "Preset", "State", "Parameter", "Value", "Baseline",
   "Window", "Hash", "Coverage", "Dataset", "Smoke", "Resume", "Compare",
   "pending", "empty", "refs", "status", "Rollback", "kind/id",
+  "Reverse", "Dataset", "download", "Downloads", "funding",
+  "Review", "Fork", "One Step Back", "High/Low", "Percentage",
+  "stream", "Train", "Test", "TestRuns", "debug",
 ]);
+
+const PT_BR_TECHNICAL_TOKEN = new Set(
+  [...PT_BR_TECHNICAL_IDENTIFIERS]
+    .flatMap((value) => value.split(/[^A-Za-z0-9_+./-]+/))
+    .map((token) => token.toLowerCase())
+    .filter((token) => token.length > 1 && token !== "and" && token !== "or" && token !== "not"),
+);
+
+/** Leftover English verbs/nouns that must not mix with Portuguese copy. */
+const PT_BR_LEFTOVER_ENGLISH = new Set([
+  "failed", "submit", "submitting", "rules", "notifications", "restore", "armed",
+  "secrets", "whitelist", "later", "reason", "choose", "saving", "loading", "clear",
+  "clearing", "retry", "search", "switch", "command", "result", "unknown",
+  "requested", "waits", "until", "converges", "fees", "leverage", "change",
+  "auditable", "pinned", "execution", "owned", "ingestion", "public", "account",
+  "trading", "access", "workspace", "save", "selection", "integrity", "validation",
+  "control", "method", "installed", "independent", "audit", "policy", "drawing",
+  "evidence", "review", "again", "current", "draft", "lost", "parameters", "size",
+  "exceeds", "rejects", "order", "must", "between", "timed", "accepted",
+  "refreshed", "adjusting", "updated", "protection", "canceled", "atomically",
+  "canceling", "historical", "input", "revealed", "mode", "model", "bounded",
+  "equity", "curve", "label", "training", "overlay", "first", "archive", "confirm",
+  "downgrade", "selecting", "select", "reveal", "irreversible", "permanently",
+  "writes", "action", "takes", "effect", "fully", "locks", "continuity", "check",
+  "hosted", "security", "stay", "disabled", "request", "future", "session", "type",
+  "trigger", "sync", "visible", "duration", "unsupported", "start", "fall",
+  "eligible", "align", "interval", "capability", "catalog", "does", "match",
+  "exact", "history", "unavailable", "lacks", "complete", "rate", "settlement",
+  "versioned", "deterministic", "simulated", "contains", "duplicates", "items",
+  "wallet", "unrealized", "maintenance", "frozen", "actual", "position",
+  "notional", "peak", "signal", "events", "panel", "empty", "name", "tree",
+  "fired", "times", "unlimited", "today", "last", "days", "unacknowledged",
+  "acknowledged", "hits", "filter", "running", "subscriptions", "warming",
+  "degraded", "recovering", "config", "ready", "default", "delivery", "dismiss",
+  "notification", "step", "scope", "whole", "pane", "page", "includes", "such",
+  "format", "conditions", "nested", "logic", "channels", "expiry", "condition",
+  "expired", "matching", "fire", "update", "duplicate", "copy", "acknowledgement",
+  "test", "load", "list", "reading", "view", "show", "none", "hint", "nothing",
+  "compatible", "under", "symbols", "verifies", "official", "provide",
+  "trustworthy", "row", "shares", "immutable", "identity", "projection", "stores",
+  "isolated", "available", "refresh", "reset", "file", "bridge", "the", "and",
+  "with", "this", "that", "are", "was", "were", "from", "into", "onto", "after",
+  "before", "cannot", "will", "would", "does", "did", "you", "your", "been",
+  "than", "then", "where", "which", "while", "using", "used", "still", "already",
+  "also", "each", "every", "code", "variable", "owns", "absolute",
+  "sized", "bypass", "risk", "waiting", "reconciliation", "completed", "template",
+  "debug", "cleared", "removed", "shared", "filters", "capped", "identified",
+  "instrument", "estimate", "invent", "health", "vague", "continue", "permission",
+  "facts", "column", "aligned", "grid", "larger", "built", "reliably", "currently",
+  "supports", "resyncing", "continuous", "connecting", "stream", "unconfirmed",
+  "silently", "assume", "read", "preset", "rebinds", "revision", "paste",
+  "return", "fixed", "only", "changed",
+]);
+
+const PT_BR_COLUMN_TOKENS = new Set(["time", "open", "high", "low", "close", "volume"]);
 
 function isAllowedEnglishClone(message: string): boolean {
   const stripped = message
@@ -250,6 +308,26 @@ function isAllowedEnglishClone(message: string): boolean {
     || /^\d/.test(token)
     || token.length <= 3
   ));
+}
+
+function hasPortugueseCopy(message: string): boolean {
+  return /[áàâãéêíóôõúçÁÀÂÃÉÊÍÓÔÕÚÇ]|\b(?:não|para|com|uma|alerta|ativo|ativos|gráfico|arquivo|posição|ordem|execução|margem|salvar|excluir|fechar|abrir|lista|falha|conta|buscar|treino|atual|disponível|indisponível|desconhecido|redefinir|atualizar|mercado|quantidade|integridade|regras|motivo|valor|modo|tempo|servidor|somente|leitura|nome|regra|modelo|tipo|entrada|histórico|indicadores|ordens|alavancagem|financiamento|trabalho|código|variável|política|evidência|resultados|personalizado|intervalo|livro|ofertas|estratégia|selecionar|criar|ativar|voltar|adicionar)\b/i.test(message);
+}
+
+function leftoverEnglishTokens(message: string): string[] {
+  const plain = message
+    .replace(/\{\{?[A-Za-z0-9_]+\}?\}/g, " ")
+    .replace(/\bfail closed\b/gi, " ")
+    .replace(/\bmark-to-market\b/gi, " ")
+    .replace(/\bopen interest\b/gi, " ")
+    .replace(/\b[A-Z][A-Z0-9_]{1,48}\b/g, " ");
+  return plain.split(/[^A-Za-zÀ-ÿ0-9_]+/u).filter((token) => {
+    if (!token || token.length <= 2) return false;
+    if (token === "AND" || token === "OR" || token === "NOT") return false;
+    const lower = token.toLowerCase();
+    if (PT_BR_TECHNICAL_TOKEN.has(lower) || PT_BR_COLUMN_TOKENS.has(lower)) return false;
+    return PT_BR_LEFTOVER_ENGLISH.has(lower);
+  });
 }
 
 test("pt-BR host chrome uses Brazilian trading copy rather than English clones or European Portuguese", () => {
@@ -272,6 +350,12 @@ test("pt-BR host chrome uses Brazilian trading copy rather than English clones o
     assert.equal(t("export.chartLoading"), "O gráfico ainda está carregando dados.");
     assert.equal(t("plugin.live.reviewTitle"), "Revisar uma intenção preparada exata");
     assert.equal(t("core.error.exchangeList"), "Falha ao carregar a lista de exchanges");
+    assert.equal(t("alert.noProducts"), "Nenhum ativo disponível");
+    assert.equal(t("alert.refreshRules"), "Atualizar regras");
+    assert.equal(t("alert.toastRegion"), "Notificações de alerta");
+    assert.equal(t("local.resetFailed"), "Falha ao redefinir");
+    assert.equal(t("export.saveFailed"), "Falha ao salvar. Tente de novo mais tarde.");
+    assert.equal(t("core.error.workspaceRestore"), "Falha ao restaurar a área de trabalho");
     const clones: string[] = [];
     const mashups: string[] = [];
     for (const key of messageKeys()) {
@@ -279,11 +363,12 @@ test("pt-BR host chrome uses Brazilian trading copy rather than English clones o
       assert.doesNotMatch(message, /ecrã|ficheiro|utilizador|percentagem/i, key);
       assert.doesNotMatch(message, /\p{Script=Han}/u, key);
       if (message === en[key] && !isAllowedEnglishClone(message)) clones.push(key);
-      const plain = message.replace(/\{\{?[A-Za-z0-9_]+\}?\}/g, " ").replace(/\b(?:AND|OR|NOT)\b/g, " ");
-      if (
-        /\b(?:the|and|with|this|that|are|was|were|from|Choose|Saving|still loading|export panel|load the)\b/i.test(plain)
-        && /[áàâãéêíóôõúç]|\b(?:alerta|ativo|gráfico|arquivo|posição|falha|fechar|lista)\b/i.test(plain)
-      ) mashups.push(key);
+      const leftover = leftoverEnglishTokens(message);
+      const grammarMashup = /\b(?:Disponível|Indisponível) (?:ativos|símbolos)|ativos disponível\b/i.test(message);
+      const englishNoPrefix = /^No /.test(en[key]) && /^No /.test(message) && hasPortugueseCopy(message);
+      if ((leftover.length > 0 && hasPortugueseCopy(message)) || grammarMashup || englishNoPrefix) {
+        mashups.push(key);
+      }
     }
     assert.equal(clones.length, 0, `English clones: ${clones.slice(0, 40).join(", ")}`);
     assert.equal(mashups.length, 0, `EN/PT mashups: ${mashups.slice(0, 40).join(", ")}`);

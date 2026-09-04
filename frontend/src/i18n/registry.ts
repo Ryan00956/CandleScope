@@ -6,6 +6,7 @@ import { ko } from "./catalogs/ko.js";
 import { ptBR } from "./catalogs/pt-BR.js";
 import { ru } from "./catalogs/ru.js";
 import { zhCN } from "./catalogs/zh-CN.js";
+import { zhTW } from "./catalogs/zh-TW.js";
 import type { MessageCatalog } from "./messageCatalog.js";
 
 export interface LocaleDefinition {
@@ -73,6 +74,14 @@ export const LOCALE_REGISTRY = {
     numberLocale: "ru-RU",
     direction: "ltr",
     messages: ru,
+  },
+  "zh-TW": {
+    nativeLabel: "繁體中文",
+    aliases: ["zh-Hant-TW"],
+    dateTimeLocale: "zh-TW",
+    numberLocale: "zh-TW",
+    direction: "ltr",
+    messages: zhTW,
   },
 } as const satisfies Readonly<Record<string, LocaleDefinition>>;
 

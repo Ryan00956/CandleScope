@@ -190,6 +190,12 @@ test("ordinary UI copy never includes internal identity terms", () => {
     new ResearchDataError("MISSING_DATASET_IDENTITY", "datasetId is required").action,
     "重新选择本地资料库中的数据版本",
   );
+  assert.equal(ordinarySourceLabel("CURRENT_CHART", "zh-CN"), "当前图表");
+  assert.equal(ordinarySourceLabel("IMPORTED_DATASET", "zh-CN"), "本地资料库");
+  assert.equal(ordinarySourceLabel("COMPLETED_RUN", "zh-CN"), "完成结果");
+  assert.equal(ordinarySourceLabel("CURRENT_CHART", "zh-TW"), "當前圖表");
+  assert.equal(ordinarySourceLabel("IMPORTED_DATASET", "zh-TW"), "本地資料庫");
+  assert.equal(ordinarySourceLabel("COMPLETED_RUN", "zh-TW"), "完成結果");
   const joined = [
     ordinarySourceLabel("CURRENT_CHART", "en"),
     ordinarySourceLabel("IMPORTED_DATASET", "en"),

@@ -89,6 +89,14 @@ _CONTRACT_LOCALIZATIONS = {
         "market scanner phase is invalid": "Недопустимая фаза сканера рынка",
         "capabilityUnavailable": "Возможность {permission} недоступна",
     },
+    "zh-TW": {
+        "market scanner accepts only an empty scan command": "市場掃描器只接受空參數掃描命令",
+        "market scanner completion token is stale": "市場掃描器完成令牌已失效",
+        "Host returned invalid scanner settings": "宿主傳回的掃描器設定無效",
+        "Host returned an invalid symbol page": "宿主傳回的標的頁面無效",
+        "market scanner phase is invalid": "市場掃描器階段無效",
+        "capabilityUnavailable": "{permission} 能力不可用",
+    },
 }
 
 

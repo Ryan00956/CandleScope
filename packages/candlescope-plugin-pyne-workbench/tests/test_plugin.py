@@ -5,8 +5,6 @@ from importlib.resources import files
 import jsonschema
 import pytest
 
-import pytest
-
 from candlescope_plugin_sdk.platform_v2 import (
     ActivationRequest,
     CapabilityGrant,
@@ -116,6 +114,7 @@ def test_sandbox_ui_owns_zh_cn_english_and_japanese_copy() -> None:
 
     assert 'data-i18n="statusWaiting"' in html
     assert '"zh-CN": {' in javascript
+    assert '"zh-TW": {' in javascript
     assert "en: {" in javascript
     assert "es: {" in javascript
     assert "Banco de trabajo Pyne" in javascript
@@ -131,6 +130,7 @@ def test_sandbox_ui_owns_zh_cn_english_and_japanese_copy() -> None:
     assert "Executar Pyne no gráfico atual" in javascript
     assert "ru: {" in javascript
     assert "Верстак Pyne" in javascript
+    assert "等待 CandleScope 連線" in javascript
     assert "applyLocale(payload.locale)" in javascript
     assert 'setStatus("statusRejected")' in javascript
     assert "ecrã" not in javascript
@@ -256,6 +256,14 @@ def test_manifest_owns_korean_contribution_copy() -> None:
         chinese = item.localizations["zh-CN"]
         if "schema" in chinese:
             assert set(korean["schema"]["properties"]) == set(chinese["schema"]["properties"])
+
+
+def test_manifest_owns_zh_tw_contribution_copy() -> None:
+    manifest = pyne_workbench_manifest()
+    run = next(item for item in manifest.contributions if item.id == "run")
+    assert run.localizations["zh-TW"]["title"] == "在當前圖表執行 Pyne"
+    view = next(item for item in manifest.contributions if item.id == "workbench-view")
+    assert view.localizations["zh-TW"]["title"] == "Pyne 工作台"
 
 
 def test_batch_command_reads_chart_bars_and_publishes_render_v2() -> None:

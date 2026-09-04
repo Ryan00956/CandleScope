@@ -908,6 +908,38 @@ test("plugin-owned localizations are validated and resolved by the Host locale",
   assert.throws(() => parsePluginCatalog(mismatchedEnumLabels), /enumLabels/i);
 });
 
+test("zh-TW plugin copy is selected exactly and missing zh-TW uses plugin default text", () => {
+  const value = catalog();
+  Object.assign(value.plugins[0]!.contributions[0]!, {
+    localizations: {
+      "zh-CN": { title: "扫描" },
+      "zh-TW": { title: "掃描" },
+    },
+  });
+  Object.assign(value.plugins[0]!.contributions[1]!, {
+    localizations: {
+      "zh-CN": { title: "结果", fields: { symbol: "标的" }, emptyState: "暂无结果" },
+      "zh-TW": { title: "結果", fields: { symbol: "標的" }, emptyState: "尚無結果" },
+    },
+  });
+  const parsed = parsePluginCatalog(value);
+  const tw = buildPluginRegistries(parsed, "zh-TW");
+  assert.equal(tw.commandPalette[0]?.title, "掃描");
+  assert.equal(tw.sidePanel[0]?.title, "結果");
+  const twView = tw.sidePanel[0];
+  if (!twView || twView.configuration.renderer === "sandbox") assert.fail("localized view missing");
+  assert.equal(twView.configuration.fields[0]?.label, "標的");
+  assert.equal(twView.configuration.emptyState, "尚無結果");
+
+  const withoutTaiwan = catalog();
+  Object.assign(withoutTaiwan.plugins[0]!.contributions[0]!, {
+    localizations: { "zh-CN": { title: "扫描" } },
+  });
+  const fallback = buildPluginRegistries(parsePluginCatalog(withoutTaiwan), "zh-TW");
+  assert.equal(fallback.commandPalette[0]?.title, "Scan");
+  assert.notEqual(fallback.commandPalette[0]?.title, "扫描");
+});
+
 test("Phase 13 compatibility catalog is strict and never enters executable registries", () => {
   const parsed = parsePluginCatalog(catalog());
   assert.equal(parsed.schemaVersion, "candlescope.plugin-catalog/2");

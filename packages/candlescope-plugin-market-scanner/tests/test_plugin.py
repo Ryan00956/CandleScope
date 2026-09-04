@@ -53,6 +53,8 @@ def test_plugin_error_localizations_accept_additional_languages_and_preserve_fal
     )
     assert _localized_contract_error(error, "ru").message == "Недопустимая фаза сканера рынка"
     assert _localized_contract_error(error, "ru-RU").message == "Недопустимая фаза сканера рынка"
+    assert _localized_contract_error(error, "zh-TW").message == "市場掃描器階段無效"
+    assert _localized_contract_error(error, "zh-tw").message == "市場掃描器階段無效"
 
 
 def _context(locale: str = "en") -> RequestContext:
@@ -114,6 +116,9 @@ def test_packaged_manifest_owns_entrypoint_and_localized_enum_labels() -> None:
     assert summary.localizations["pt-BR"]["emptyState"] == "Scanner ocioso"
     ru_interval = settings.localizations["ru"]["schema"]["properties"]["interval"]
     assert ru_interval["enumLabels"] == ["1 минута", "5 минут", "1 час"]
+    tw_interval = settings.localizations["zh-TW"]["schema"]["properties"]["interval"]
+    assert tw_interval["enumLabels"] == ["1 分鐘", "5 分鐘", "1 小時"]
+    assert settings.localizations["zh-TW"]["title"] == "市場掃描器設定"
 
 
 def test_spanish_contract_errors_follow_parent_locale() -> None:
@@ -143,8 +148,6 @@ def test_packaged_manifest_owns_korean_contribution_copy() -> None:
             assert korean["emptyState"]
         if "schema" in chinese:
             assert set(korean["schema"]["properties"]) == set(chinese["schema"]["properties"])
-
-
 def test_scan_preserves_invocation_locale_on_host_calls() -> None:
     plugin = MarketScannerPlugin()
     manifest = plugin.manifest()
@@ -158,6 +161,21 @@ def test_scan_preserves_invocation_locale_on_host_calls() -> None:
     )
     assert isinstance(outcome, HostCallInvocation)
     assert outcome.call.request_context.locale == "zh-CN"
+
+
+def test_scan_preserves_zh_tw_invocation_locale_on_host_calls() -> None:
+    plugin = MarketScannerPlugin()
+    manifest = plugin.manifest()
+    permissions = tuple(
+        CapabilityGrant(handle=f"cap-{index}", permission_id=permission.id)
+        for index, permission in enumerate(manifest.permissions.required)
+    )
+    plugin.activate(ActivationRequest(instance_id="test-zh-tw", generation=1, capabilities=permissions))
+    outcome = plugin.invoke(
+        InvokeRequest(contribution_id="scan", input={}, request_context=_context("zh-TW"))
+    )
+    assert isinstance(outcome, HostCallInvocation)
+    assert outcome.call.request_context.locale == "zh-TW"
 
 
 def test_plugin_owned_validation_error_follows_request_locale() -> None:
@@ -217,3 +235,14 @@ def test_plugin_owned_korean_errors_follow_ko_and_ko_kr() -> None:
         "market.bars.read 기능을 사용할 수 없음"
     )
     assert "ko" in _CONTRACT_LOCALIZATIONS
+
+
+def test_plugin_owned_validation_error_follows_zh_tw_locale() -> None:
+    plugin = MarketScannerPlugin()
+    tw_request = InvokeRequest(
+        contribution_id="scan",
+        input={"unexpected": True},
+        request_context=_context("zh-TW"),
+    )
+    with pytest.raises(PlatformContractError, match="只接受空參數"):
+        plugin.invoke(tw_request)

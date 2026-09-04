@@ -63,8 +63,9 @@ test("Pyne sandbox follows locale lifecycle updates and falls back to its own En
   assert.equal(document.documentElement.lang, "en");
   assert.equal(title.textContent, "Pyne Workbench");
   let sequence = 1;
-  for (const [requested, expected, label] of [
+  for (const [requested, expected, label, connected] of [
     ["zh-CN", "zh-CN", "Pyne 工作台"],
+    ["zh-TW", "zh-TW", "Pyne 工作台", "已連線 · 命令從外掛面板執行"],
     ["EN-us", "en", "Pyne Workbench"],
     ["es", "es", "Banco de trabajo Pyne"],
     ["es-MX", "es", "Banco de trabajo Pyne"],
@@ -87,5 +88,6 @@ test("Pyne sandbox follows locale lifecycle updates and falls back to its own En
     } });
     assert.equal(document.documentElement.lang, expected);
     assert.equal(title.textContent, label);
+    if (connected !== undefined) assert.equal(status.textContent, connected);
   }
 });

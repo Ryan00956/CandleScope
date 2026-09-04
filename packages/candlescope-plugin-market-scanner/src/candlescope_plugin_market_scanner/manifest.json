@@ -50,6 +50,9 @@
           },
           "ru": {
             "title": "Сканировать разрешённые рынки"
+          },
+          "zh-TW": {
+            "title": "掃描已授權市場"
           }
         },
         "requiresUserAction": true,
@@ -260,6 +263,33 @@
                 }
               }
             }
+          },
+          "zh-TW": {
+            "title": "市場掃描器設定",
+            "schema": {
+              "properties": {
+                "quoteAsset": {
+                  "title": "計價資產"
+                },
+                "symbolsLimit": {
+                  "title": "掃描標的數量"
+                },
+                "interval": {
+                  "title": "週期",
+                  "enumLabels": [
+                    "1 分鐘",
+                    "5 分鐘",
+                    "1 小時"
+                  ]
+                },
+                "lookbackBars": {
+                  "title": "回看 K 線數"
+                },
+                "minimumMovePct": {
+                  "title": "最小漲跌幅百分比"
+                }
+              }
+            }
           }
         },
         "schema": {
@@ -389,6 +419,16 @@
               "time": "Время закрытия"
             },
             "emptyState": "Результаты появятся здесь после запуска сканера"
+          },
+          "zh-TW": {
+            "title": "市場掃描結果",
+            "fields": {
+              "symbol": "標的",
+              "changePct": "漲跌幅",
+              "close": "收盤價",
+              "time": "收盤時間"
+            },
+            "emptyState": "執行掃描器後將在此顯示結果"
           }
         },
         "slot": "sidePanel",
@@ -489,6 +529,14 @@
               "interval": "Интервал"
             },
             "emptyState": "Сканер простаивает"
+          },
+          "zh-TW": {
+            "title": "市場掃描摘要",
+            "fields": {
+              "scannedSymbols": "已掃描",
+              "interval": "週期"
+            },
+            "emptyState": "掃描器空閒"
           }
         },
         "slot": "statusArea",
@@ -541,6 +589,9 @@
           },
           "ru": {
             "title": "Сигналы сканера рынка"
+          },
+          "zh-TW": {
+            "title": "市場掃描訊號"
           }
         },
         "target": "main-chart",

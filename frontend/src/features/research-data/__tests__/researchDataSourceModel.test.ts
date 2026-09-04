@@ -175,10 +175,14 @@ test("ordinary UI copy never includes internal identity terms", () => {
       sourceKind: "CURRENT_CHART",
       runtimeMode: "LOCAL_OFFLINE",
     });
-    assert.match(koreanCaps.capabilities.barApprox.userAction, /\p{Script=Hangul}/u);
-    assert.match(koreanCaps.capabilities.viewKlines.userReason, /\p{Script=Hangul}/u);
-    assert.doesNotMatch(koreanCaps.capabilities.barApprox.userAction, /\p{Script=Han}/u);
-    assert.doesNotMatch(koreanCaps.capabilities.viewKlines.userReason, /\p{Script=Han}/u);
+    const barApprox = koreanCaps.capabilities.barApprox;
+    const viewKlines = koreanCaps.capabilities.viewKlines;
+    assert.ok(barApprox);
+    assert.ok(viewKlines);
+    assert.match(barApprox.userAction, /\p{Script=Hangul}/u);
+    assert.match(viewKlines.userReason, /\p{Script=Hangul}/u);
+    assert.doesNotMatch(barApprox.userAction, /\p{Script=Han}/u);
+    assert.doesNotMatch(viewKlines.userReason, /\p{Script=Han}/u);
   } finally {
     setLocale(previous);
   }

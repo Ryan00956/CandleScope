@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-test("registering a third catalog enables normalization, switching, formatting and host copy", () => {
+test("registering an additional catalog enables normalization, switching, formatting and host copy", () => {
   const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "candlescope-locale-"));
   try {
     fs.cpSync(new URL("../src/i18n/", import.meta.url), path.join(fixtureRoot, "i18n"), { recursive: true });
@@ -15,13 +15,13 @@ test("registering a third catalog enables normalization, switching, formatting a
     const marker = "export const LOCALE_REGISTRY = {";
     assert.ok(registry.includes(marker));
     fs.writeFileSync(registryPath, registry.replace(marker, `${marker}
-      ko: {
-        nativeLabel: "한국어 (fixture)",
+      id: {
+        nativeLabel: "Bahasa Indonesia (fixture)",
         messages: {
           ...en,
-          "shell.replay": "테스트 재생",
-          "status.barCount": "{count} 개",
-          "workbench.manualHistory.title": "테스트 기록",
+          "shell.replay": "Pemutaran uji",
+          "status.barCount": "{count} item",
+          "workbench.manualHistory.title": "Riwayat uji",
         },
       },
     `));
@@ -34,19 +34,19 @@ test("registering a third catalog enables normalization, switching, formatting a
       globalThis.document = { documentElement: {} };
       let notifications = 0;
       const unsubscribe = subscribeLocale(() => { notifications++; });
-      assert.equal(isLocaleId("ko"), true);
-      assert.equal(normalizeLocale("ko-KR"), "ko");
-      assert.ok(LOCALE_OPTIONS.some(option => option.id === "ko"));
-      setLocale("ko-KR");
-      assert.equal(getLocale(), "ko");
-      assert.equal(document.documentElement.lang, "ko");
+      assert.equal(isLocaleId("id"), true);
+      assert.equal(normalizeLocale("id-ID"), "id");
+      assert.ok(LOCALE_OPTIONS.some(option => option.id === "id"));
+      setLocale("id-ID");
+      assert.equal(getLocale(), "id");
+      assert.equal(document.documentElement.lang, "id");
       assert.equal(document.documentElement.dir, "ltr");
-      assert.equal(getDateTimeLocale(), "ko");
-      assert.equal(getNumberLocale(), "ko");
-      assert.equal(t("shell.replay"), "테스트 재생");
-      assert.equal(t("workbench.manualHistory.title"), "테스트 기록");
-      assert.equal(tPlural("status.barCount", 1), "1 개");
-      setLocale("ko");
+      assert.equal(getDateTimeLocale(), "id");
+      assert.equal(getNumberLocale(), "id");
+      assert.equal(t("shell.replay"), "Pemutaran uji");
+      assert.equal(t("workbench.manualHistory.title"), "Riwayat uji");
+      assert.equal(tPlural("status.barCount", 1), "1 item");
+      setLocale("id");
       assert.equal(notifications, 1);
       setLocale("en");
       assert.equal(t("shell.replay"), "Replay");

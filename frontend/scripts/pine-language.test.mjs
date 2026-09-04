@@ -1,9 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import monarchCompile from "monaco-editor/editor/standalone/common/monarch/monarchCompile.js";
-
-const compile = monarchCompile.compile ?? monarchCompile;
+import { compile } from "monaco-editor/editor/standalone/common/monarch/monarchCompile.js";
 
 import {
   configurePineHostCapabilities,

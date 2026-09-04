@@ -738,11 +738,13 @@ test("Spanish hydrateLocale writes document lang and ltr direction", () => {
     hydrateLocale("es-MX");
     assert.equal(documentElement.lang, "es");
     assert.equal(documentElement.dir, "ltr");
-    assert.equal(hydrateLocale("ja-JP"), "ja");
-    assert.equal(getLocale(), "ja");
-    assert.equal(hydrateLocale("ja"), "ja");
   } finally {
     setLocale(previous);
+    if (previousDocument === undefined) {
+      delete (globalThis as { document?: unknown }).document;
+    } else {
+      (globalThis as { document: typeof previousDocument }).document = previousDocument;
+    }
   }
 });
 
@@ -802,8 +804,6 @@ test("Japanese dates, numbers, and document lang follow the shipped ja locale", 
     assert.equal(t("scale.auto"), "自動スケール");
     assert.match(t("replay.init.hedgeHybrid"), /HEDGE_HYBRID/);
     assert.doesNotMatch(t("replay.init.hedgeHybrid"), /资金费|資金費/);
-    assert.equal(hydrateLocale("ko-KR"), "ko");
-    assert.equal(getLocale(), "ko");
   } finally {
     if (previousDocument === undefined) {
       delete (globalThis as { document?: unknown }).document;

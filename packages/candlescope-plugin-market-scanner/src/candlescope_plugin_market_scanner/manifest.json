@@ -26,7 +26,8 @@
       "entrypoint": "main",
       "configuration": {
         "localizations": {
-          "zh-CN": { "title": "扫描已授权市场" }
+          "zh-CN": { "title": "扫描已授权市场" },
+          "ja": { "title": "許可済み市場をスキャン" }
         },
         "requiresUserAction": true,
         "placements": ["commandPalette", "topToolbar"],
@@ -57,6 +58,21 @@
                 },
                 "lookbackBars": { "title": "回看 K 线数" },
                 "minimumMovePct": { "title": "最小涨跌幅百分比" }
+              }
+            }
+          },
+          "ja": {
+            "title": "マーケットスキャナー設定",
+            "schema": {
+              "properties": {
+                "quoteAsset": { "title": "決済通貨" },
+                "symbolsLimit": { "title": "スキャン銘柄数" },
+                "interval": {
+                  "title": "時間足",
+                  "enumLabels": ["1分", "5分", "1時間"]
+                },
+                "lookbackBars": { "title": "遡及本数" },
+                "minimumMovePct": { "title": "最小騰落率（%）" }
               }
             }
           }
@@ -104,6 +120,16 @@
               "time": "收盘时间"
             },
             "emptyState": "运行扫描器后将在此显示结果"
+          },
+          "ja": {
+            "title": "マーケットスキャナー結果",
+            "fields": {
+              "symbol": "銘柄",
+              "changePct": "騰落率",
+              "close": "終値",
+              "time": "終値時刻"
+            },
+            "emptyState": "スキャナーを実行すると結果が表示されます"
           }
         },
         "slot": "sidePanel",
@@ -135,6 +161,11 @@
             "title": "市场扫描摘要",
             "fields": { "scannedSymbols": "已扫描", "interval": "周期" },
             "emptyState": "扫描器空闲"
+          },
+          "ja": {
+            "title": "マーケットスキャナー概要",
+            "fields": { "scannedSymbols": "スキャン済み", "interval": "時間足" },
+            "emptyState": "スキャナー待機中"
           }
         },
         "slot": "statusArea",
@@ -159,7 +190,8 @@
       "entrypoint": "main",
       "configuration": {
         "localizations": {
-          "zh-CN": { "title": "市场扫描信号" }
+          "zh-CN": { "title": "市场扫描信号" },
+          "ja": { "title": "マーケットスキャナーシグナル" }
         },
         "target": "main-chart",
         "zOrder": "above-series",

@@ -1,3 +1,4 @@
+import { getLocale, type LocaleId } from "../../i18n/index.js";
 import {
   FROZEN_RESEARCH_CONTEXT_SCHEMA,
   FORBIDDEN_ORDINARY_UI_TERMS,
@@ -343,10 +344,21 @@ export async function parseFrozenResearchContext(value: unknown): Promise<Frozen
   return assembleFrozenResearchContext(value, capability as unknown as ResearchCapabilitySummaryV1);
 }
 
-export function ordinarySourceLabel(kind: ResearchSourceKind, locale: "en" | "zh" = "zh"): string {
-  if (kind === "CURRENT_CHART") return ORDINARY_RESEARCH_TERMS.currentChart[locale];
-  if (kind === "IMPORTED_DATASET") return ORDINARY_RESEARCH_TERMS.importedLibrary[locale];
-  return ORDINARY_RESEARCH_TERMS.completedResult[locale];
+type OrdinaryLocale = keyof typeof ORDINARY_RESEARCH_TERMS.currentChart;
+
+function ordinaryLocale(locale: LocaleId | OrdinaryLocale = getLocale()): OrdinaryLocale {
+  if (locale === "en" || locale === "ja" || locale === "zh") return locale;
+  return "zh";
+}
+
+export function ordinarySourceLabel(
+  kind: ResearchSourceKind,
+  locale: LocaleId | OrdinaryLocale = getLocale(),
+): string {
+  const selected = ordinaryLocale(locale);
+  if (kind === "CURRENT_CHART") return ORDINARY_RESEARCH_TERMS.currentChart[selected];
+  if (kind === "IMPORTED_DATASET") return ORDINARY_RESEARCH_TERMS.importedLibrary[selected];
+  return ORDINARY_RESEARCH_TERMS.completedResult[selected];
 }
 
 export function ordinaryTermsContainInternalIdentity(): string[] {

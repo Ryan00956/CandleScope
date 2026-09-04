@@ -54,6 +54,16 @@
               "lookbackBars": {"title": "回看 K 线数"}
             }
           }
+        },
+        "ja": {
+          "title": "現在のチャートで Pyne を実行",
+          "schema": {
+            "properties": {
+              "source": {"title": "Pyne ソース"},
+              "paramsJson": {"title": "パラメータ JSON"},
+              "lookbackBars": {"title": "遡及本数"}
+            }
+          }
         }
       },
         "requiresUserAction": true,
@@ -86,6 +96,18 @@
               "paramsJson": {"title": "参数 JSON"},
               "lookbackBars": {"title": "回看 K 线数"},
               "retentionBars": {"title": "保留 K 线数"}
+            }
+          }
+        },
+        "ja": {
+          "title": "増分 Pyne セッションを開始",
+          "schema": {
+            "properties": {
+              "sessionId": {"title": "セッション ID"},
+              "source": {"title": "Pyne ソース"},
+              "paramsJson": {"title": "パラメータ JSON"},
+              "lookbackBars": {"title": "遡及本数"},
+              "retentionBars": {"title": "保持本数"}
             }
           }
         }
@@ -127,6 +149,21 @@
               "preview": {"title": "仅预览"}
             }
           }
+        },
+        "ja": {
+          "title": "Pyne セッションにローソク足を送る",
+          "schema": {
+            "properties": {
+              "sessionId": {"title": "セッション ID"},
+              "time": {"title": "時刻"},
+              "open": {"title": "始値"},
+              "high": {"title": "高値"},
+              "low": {"title": "安値"},
+              "close": {"title": "終値"},
+              "volume": {"title": "出来高"},
+              "preview": {"title": "プレビューのみ"}
+            }
+          }
         }
       },
         "requiresUserAction": true,
@@ -162,6 +199,14 @@
               "sessionId": {"title": "会话 ID"}
             }
           }
+        },
+        "ja": {
+          "title": "Pyne セッションのスナップショットを作成",
+          "schema": {
+            "properties": {
+              "sessionId": {"title": "セッション ID"}
+            }
+          }
         }
       },
         "requiresUserAction": true,
@@ -190,6 +235,14 @@
               "sessionId": {"title": "会话 ID"}
             }
           }
+        },
+        "ja": {
+          "title": "Pyne セッションを閉じる",
+          "schema": {
+            "properties": {
+              "sessionId": {"title": "セッション ID"}
+            }
+          }
         }
       },
         "requiresUserAction": true,
@@ -213,6 +266,9 @@
       "localizations": {
         "zh-CN": {
           "title": "Pyne 回测策略提供器"
+        },
+        "ja": {
+          "title": "Pyne バックテスト戦略プロバイダー"
         }
       },
         "inputModes": ["BAR_CLOSE"],
@@ -232,6 +288,9 @@
       "localizations": {
         "zh-CN": {
           "title": "Pyne 工作台"
+        },
+        "ja": {
+          "title": "Pyne ワークベンチ"
         }
       },
         "slot": "sidePanel",
@@ -248,6 +307,9 @@
       "localizations": {
         "zh-CN": {
           "title": "Pyne 输出"
+        },
+        "ja": {
+          "title": "Pyne 出力"
         }
       },
         "target": "main-chart",

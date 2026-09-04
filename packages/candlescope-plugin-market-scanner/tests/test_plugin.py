@@ -19,7 +19,7 @@ from candlescope_plugin_market_scanner.plugin import (
 
 def test_plugin_error_localizations_accept_additional_languages_and_preserve_fallback(monkeypatch):
     error = PlatformContractError("invalid_request", "market scanner phase is invalid", "phase")
-    assert _localized_contract_error(error, "ja") is error
+    assert _localized_contract_error(error, "ko") is error
     monkeypatch.setitem(_CONTRACT_LOCALIZATIONS, "fr", {
         "market scanner phase is invalid": "Phase invalide",
         "capabilityUnavailable": "Capacité indisponible : {permission}",
@@ -32,6 +32,10 @@ def test_plugin_error_localizations_accept_additional_languages_and_preserve_fal
         "Capacité indisponible : market.bars.read"
     )
     assert _localized_contract_error(error, "zh-cn").message == "市场扫描器阶段无效"
+    assert _localized_contract_error(error, "ja-JP").message == "マーケットスキャナーの段階が不正です"
+    assert _localized_contract_error(capability, "ja").message == (
+        "market.bars.read 能力は利用できません"
+    )
 
 
 def _context(locale: str = "en") -> RequestContext:
@@ -51,6 +55,12 @@ def test_packaged_manifest_owns_entrypoint_and_localized_enum_labels() -> None:
     settings = next(item for item in manifest.contributions if item.id == "settings")
     interval = settings.localizations["zh-CN"]["schema"]["properties"]["interval"]
     assert interval["enumLabels"] == ["1 分钟", "5 分钟", "1 小时"]
+    ja_interval = settings.localizations["ja"]["schema"]["properties"]["interval"]
+    assert ja_interval["title"] == "時間足"
+    assert ja_interval["enumLabels"] == ["1分", "5分", "1時間"]
+    results = next(item for item in manifest.contributions if item.id == "results")
+    assert results.localizations["ja"]["fields"]["symbol"] == "銘柄"
+    assert results.localizations["ja"]["emptyState"] == "スキャナーを実行すると結果が表示されます"
 
 
 def test_scan_preserves_invocation_locale_on_host_calls() -> None:
@@ -76,4 +86,15 @@ def test_plugin_owned_validation_error_follows_request_locale() -> None:
         request_context=_context("zh-CN"),
     )
     with pytest.raises(PlatformContractError, match="只接受空参数"):
+        plugin.invoke(request)
+
+
+def test_plugin_owned_validation_error_follows_japanese_locale() -> None:
+    plugin = MarketScannerPlugin()
+    request = InvokeRequest(
+        contribution_id="scan",
+        input={"unexpected": True},
+        request_context=_context("ja-JP"),
+    )
+    with pytest.raises(PlatformContractError, match="空のスキャンコマンドのみ"):
         plugin.invoke(request)

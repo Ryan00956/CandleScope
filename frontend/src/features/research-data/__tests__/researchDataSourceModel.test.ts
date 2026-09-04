@@ -155,6 +155,9 @@ test("ordinary UI copy never includes internal identity terms", () => {
   assert.equal(ordinarySourceLabel("CURRENT_CHART"), "当前图表");
   assert.equal(ordinarySourceLabel("IMPORTED_DATASET"), "本地资料库");
   assert.equal(ordinarySourceLabel("COMPLETED_RUN"), "完成结果");
+  assert.equal(ordinarySourceLabel("CURRENT_CHART", "ja"), "現在のチャート");
+  assert.equal(ordinarySourceLabel("IMPORTED_DATASET", "ja"), "ローカルライブラリ");
+  assert.equal(ordinarySourceLabel("COMPLETED_RUN", "ja"), "完了した結果");
   const joined = [
     ordinarySourceLabel("CURRENT_CHART", "en"),
     ordinarySourceLabel("IMPORTED_DATASET", "en"),

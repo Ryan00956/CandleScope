@@ -774,6 +774,15 @@ test("plugin-owned localizations are validated and resolved by the Host locale",
           },
         },
       },
+      ja: {
+        title: "スキャン",
+        schema: {
+          title: "スキャンパラメータ",
+          properties: {
+            interval: { title: "時間足", enumLabels: ["1分", "5分"] },
+          },
+        },
+      },
     },
   });
   Object.assign(value.plugins[0]!.contributions[1]!, {
@@ -783,12 +792,18 @@ test("plugin-owned localizations are validated and resolved by the Host locale",
         fields: { symbol: "标的" },
         emptyState: "暂无结果",
       },
+      ja: {
+        title: "結果",
+        fields: { symbol: "銘柄" },
+        emptyState: "結果はまだありません",
+      },
     },
   });
 
   const parsed = parsePluginCatalog(value);
   const zh = buildPluginRegistries(parsed, "zh-CN");
   const en = buildPluginRegistries(parsed, "en");
+  const ja = buildPluginRegistries(parsed, "ja");
   assert.equal(zh.commandPalette[0]?.title, "扫描");
   assert.equal(zh.commandPalette[0]?.configuration.inputSchema?.title, "扫描参数");
   assert.deepEqual(
@@ -802,6 +817,15 @@ test("plugin-owned localizations are validated and resolved by the Host locale",
   assert.equal(zhView.configuration.emptyState, "暂无结果");
   assert.equal(en.commandPalette[0]?.title, "Scan");
   assert.equal(en.sidePanel[0]?.title, "Results");
+  assert.equal(ja.commandPalette[0]?.title, "スキャン");
+  assert.deepEqual(
+    ja.commandPalette[0]?.configuration.inputSchema?.properties?.interval?.enumLabels,
+    ["1分", "5分"],
+  );
+  const jaView = ja.sidePanel[0];
+  if (!jaView || jaView.configuration.renderer === "sandbox") assert.fail("japanese localized view missing");
+  assert.equal(jaView.configuration.fields[0]?.label, "銘柄");
+  assert.equal(jaView.configuration.emptyState, "結果はまだありません");
 
   const unknownField = structuredClone(value);
   const viewLocalization = (unknownField.plugins[0]!.contributions[1] as unknown as {

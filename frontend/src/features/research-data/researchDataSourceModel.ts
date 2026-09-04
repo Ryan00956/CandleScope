@@ -1,3 +1,4 @@
+import { getLocale } from "../../i18n/index.js";
 import {
   FROZEN_RESEARCH_CONTEXT_SCHEMA,
   FORBIDDEN_ORDINARY_UI_TERMS,
@@ -343,10 +344,20 @@ export async function parseFrozenResearchContext(value: unknown): Promise<Frozen
   return assembleFrozenResearchContext(value, capability as unknown as ResearchCapabilitySummaryV1);
 }
 
-export function ordinarySourceLabel(kind: ResearchSourceKind, locale: "en" | "zh" = "zh"): string {
-  if (kind === "CURRENT_CHART") return ORDINARY_RESEARCH_TERMS.currentChart[locale];
-  if (kind === "IMPORTED_DATASET") return ORDINARY_RESEARCH_TERMS.importedLibrary[locale];
-  return ORDINARY_RESEARCH_TERMS.completedResult[locale];
+type OrdinaryLocale = "en" | "zh" | "ko";
+
+function ordinaryLocale(locale?: OrdinaryLocale): OrdinaryLocale {
+  if (locale) return locale;
+  const host = getLocale();
+  if (host === "en" || host === "ko") return host;
+  return "zh";
+}
+
+export function ordinarySourceLabel(kind: ResearchSourceKind, locale?: OrdinaryLocale): string {
+  const id = ordinaryLocale(locale);
+  if (kind === "CURRENT_CHART") return ORDINARY_RESEARCH_TERMS.currentChart[id];
+  if (kind === "IMPORTED_DATASET") return ORDINARY_RESEARCH_TERMS.importedLibrary[id];
+  return ORDINARY_RESEARCH_TERMS.completedResult[id];
 }
 
 export function ordinaryTermsContainInternalIdentity(): string[] {

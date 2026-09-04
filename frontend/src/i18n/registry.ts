@@ -1,4 +1,5 @@
 import { en } from "./catalogs/en.js";
+import { ko } from "./catalogs/ko.js";
 import { zhCN } from "./catalogs/zh-CN.js";
 import type { MessageCatalog } from "./messageCatalog.js";
 
@@ -23,6 +24,13 @@ export const LOCALE_REGISTRY = {
     dateTimeLocale: "en-GB",
     numberLocale: "en-US",
     messages: en,
+  },
+  ko: {
+    nativeLabel: "한국어",
+    dateTimeLocale: "ko-KR",
+    numberLocale: "ko-KR",
+    direction: "ltr",
+    messages: ko,
   },
 } as const satisfies Readonly<Record<string, LocaleDefinition>>;
 

@@ -43,6 +43,55 @@ from .render_adapter import AdaptedRender, adapt_pyne_output
 WORKBENCH_PROTOCOL_V1 = "candlescope.pyne-workbench/1"
 _LAYER_ID = "pyne-output"
 
+_CONTRACT_LOCALIZATIONS = {
+    "ko": {
+        "Pyne workbench contribution is not invokable": "Pyne 작업대 기여는 호출할 수 없음",
+        "Pyne session is not active": "Pyne 세션이 활성 상태가 아님",
+        "preview must be a boolean": "preview는 불리언이어야 함",
+        "workbench completion token is stale": "작업대 완료 토큰이 만료됨",
+        "workbench phase is invalid": "작업대 단계가 유효하지 않음",
+        "lookbackBars must be from 2 to 5000": "lookbackBars는 2에서 5000 사이여야 함",
+        "paramsJson must be bounded JSON text": "paramsJson은 제한된 JSON 텍스트여야 함",
+        "paramsJson is invalid JSON": "paramsJson이 유효한 JSON이 아님",
+        "paramsJson must contain an object": "paramsJson은 객체여야 함",
+        "bar fields are invalid": "캔들 필드가 유효하지 않음",
+        "Host returned no market bars": "호스트가 시장 캔들을 반환하지 않음",
+        "Host bars are not all final": "호스트 캔들이 모두 확정이 아님",
+        "Host returned invalid bars": "호스트가 유효하지 않은 캔들을 반환함",
+        "capabilityUnavailable": "{permission} 기능을 사용할 수 없음",
+        "boundedString": "{key}은(는) 제한된 문자열이어야 함",
+    },
+}
+
+
+def _localized_contract_error(error: PlatformContractError, locale: str | None) -> PlatformContractError:
+    candidate = (locale or "").strip().lower()
+    messages = None
+    while candidate:
+        messages = next(
+            (value for key, value in _CONTRACT_LOCALIZATIONS.items() if key.lower() == candidate),
+            None,
+        )
+        if messages is not None:
+            break
+        candidate = candidate.rpartition("-")[0]
+    if messages is None:
+        return error
+    message = messages.get(error.message)
+    if message is None and error.message.endswith(" capability is unavailable"):
+        permission = error.message.removesuffix(" capability is unavailable")
+        template = messages.get("capabilityUnavailable")
+        if template is not None:
+            message = template.replace("{permission}", permission)
+    if message is None and error.message.endswith(" must be a bounded string"):
+        key = error.message.removesuffix(" must be a bounded string")
+        template = messages.get("boundedString")
+        if template is not None:
+            message = template.replace("{key}", key)
+    if message is None:
+        return error
+    return PlatformContractError(error.code, message, error.path)
+
 
 def pyne_workbench_manifest() -> PluginManifest:
     resource = files(__package__).joinpath("manifest.json")
@@ -115,6 +164,12 @@ class PyneWorkbenchPlugin(BasePlatformPlugin):
         }
 
     def invoke(self, request: InvokeRequest) -> InvocationOutcome:
+        try:
+            return self._invoke(request)
+        except PlatformContractError as error:
+            raise _localized_contract_error(error, request.request_context.locale) from error
+
+    def _invoke(self, request: InvokeRequest) -> InvocationOutcome:
         operation = request.contribution_id
         if operation == "close-session":
             session_id = _required_string(request.input, "sessionId", maximum=128)
@@ -212,6 +267,18 @@ class PyneWorkbenchPlugin(BasePlatformPlugin):
         response: RpcSuccess | RpcFailure,
     ) -> InvocationOutcome:
         state = self._pending.get(token)
+        locale = state.context.locale if state is not None else None
+        try:
+            return self._complete_host_call(token, response, state)
+        except PlatformContractError as error:
+            raise _localized_contract_error(error, locale) from error
+
+    def _complete_host_call(
+        self,
+        token: str,
+        response: RpcSuccess | RpcFailure,
+        state: _InvocationState | None,
+    ) -> InvocationOutcome:
         if state is None:
             raise PlatformContractError("INVALID_CONTRACT", "workbench completion token is stale")
         if isinstance(response, RpcFailure):

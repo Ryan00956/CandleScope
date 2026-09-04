@@ -38,6 +38,9 @@ test("settings normalization defaults locale to zh-CN and accepts English aliase
   assert.equal(normalizeSettings({ locale: "en-US" }).locale, "en");
   assert.equal(normalizeSettings({ locale: "zh-Hans" }).locale, "zh-CN");
   assert.equal(normalizeSettings({ locale: "fr-FR" }).locale, "zh-CN");
+  assert.equal(normalizeSettings({ locale: "ko" }).locale, "ko");
+  assert.equal(normalizeSettings({ locale: "ko-KR" }).locale, "ko");
+  assert.equal(normalizeSettings({ locale: "KO-kr" }).locale, "ko");
 });
 
 test("settings storage changes synchronize the complete settings snapshot across windows", () => {
@@ -47,6 +50,10 @@ test("settings storage changes synchronize the complete settings snapshot across
   }));
   assert.equal(incoming?.theme, "light");
   assert.equal(incoming?.locale, "en");
+  const korean = settingsFromStorageChange("candlescope-settings", JSON.stringify({
+    locale: "ko-KR",
+  }));
+  assert.equal(korean?.locale, "ko");
   assert.equal(settingsFromStorageChange("unrelated-key", "{}"), null);
   assert.equal(settingsFromStorageChange(null, null)?.locale, "zh-CN");
 });

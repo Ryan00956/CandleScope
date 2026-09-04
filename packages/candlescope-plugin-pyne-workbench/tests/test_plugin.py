@@ -3,6 +3,7 @@ from __future__ import annotations
 from importlib.resources import files
 
 import jsonschema
+import pytest
 
 from candlescope_plugin_sdk.platform_v2 import (
     ActivationRequest,
@@ -13,7 +14,9 @@ from candlescope_plugin_sdk.platform_v2 import (
     RpcSuccess,
     manifest_schema,
 )
+from candlescope_plugin_sdk.platform_v2.errors import PlatformContractError
 from candlescope_plugin_pyne_workbench import PyneWorkbenchPlugin, pyne_workbench_manifest
+from candlescope_plugin_pyne_workbench.plugin import _localized_contract_error
 
 
 CHART = {
@@ -91,8 +94,40 @@ def test_sandbox_ui_owns_zh_cn_and_english_copy() -> None:
     assert 'data-i18n="statusWaiting"' in html
     assert '"zh-CN": {' in javascript
     assert "en: {" in javascript
+    assert "ko: {" in javascript
+    assert "Pyne 작업대" in javascript
     assert "applyLocale(payload.locale)" in javascript
     assert 'setStatus("statusRejected")' in javascript
+
+
+def test_plugin_owned_korean_errors_follow_ko_and_ko_kr() -> None:
+    plugin = _plugin()
+    with pytest.raises(PlatformContractError, match="호출할 수 없음"):
+        plugin.invoke(
+            InvokeRequest(
+                "not-a-command",
+                {},
+                RequestContext("not-a-command", True, 1, "trace-ko", locale="ko-KR"),
+            )
+        )
+    error = PlatformContractError("INVALID_CONTRACT", "workbench phase is invalid")
+    assert _localized_contract_error(error, "ko").message == "작업대 단계가 유효하지 않음"
+    assert _localized_contract_error(error, "ko-KR").message == "작업대 단계가 유효하지 않음"
+    english = PlatformContractError("INVALID_CONTRACT", "workbench phase is invalid")
+    assert _localized_contract_error(english, "en") is english
+
+
+def test_manifest_owns_korean_contribution_copy() -> None:
+    manifest = pyne_workbench_manifest()
+    localized = [item for item in manifest.contributions if item.localizations]
+    assert localized
+    for item in localized:
+        assert "ko" in item.localizations, item.id
+        korean = item.localizations["ko"]
+        assert korean["title"]
+        chinese = item.localizations["zh-CN"]
+        if "schema" in chinese:
+            assert set(korean["schema"]["properties"]) == set(chinese["schema"]["properties"])
 
 
 def test_batch_command_reads_chart_bars_and_publishes_render_v2() -> None:

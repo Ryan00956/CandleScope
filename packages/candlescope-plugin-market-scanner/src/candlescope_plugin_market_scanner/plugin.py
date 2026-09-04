@@ -27,6 +27,14 @@ _CONTRACT_LOCALIZATIONS = {
         "market scanner phase is invalid": "市场扫描器阶段无效",
         "capabilityUnavailable": "{permission} 能力不可用",
     },
+    "ko": {
+        "market scanner accepts only an empty scan command": "시장 스캐너는 빈 인자 스캔 명령만 허용",
+        "market scanner completion token is stale": "시장 스캐너 완료 토큰이 만료됨",
+        "Host returned invalid scanner settings": "호스트가 반환한 스캐너 설정이 유효하지 않음",
+        "Host returned an invalid symbol page": "호스트가 반환한 종목 페이지가 유효하지 않음",
+        "market scanner phase is invalid": "시장 스캐너 단계가 유효하지 않음",
+        "capabilityUnavailable": "{permission} 기능을 사용할 수 없음",
+    },
 }
 
 

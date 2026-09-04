@@ -253,7 +253,7 @@ const PT_BR_PRODUCT_TOKENS = new Set([
 const PT_BR_IDENTICAL_SPELLINGS = new Set([
   "local", "software", "visual", "manual", "volume", "interface", "layout",
   "zoom", "editor", "python", "desktop", "web", "total", "normal", "original",
-  "capital", "auto", "error", "item", "status", "type", "mode", "model", "data",
+  "capital", "auto", "error", "item", "status", "type", "mode", "model",
   "regular", "final", "terminal", "stack", "proxy", "amplitude", "ticker",
   "backend", "frontend", "runtime", "script", "offline", "loopback", "fallback",
   "polling", "footprint", "strategy", "use", "universal", "chip", "flag",
@@ -321,7 +321,6 @@ function stripProtocol(text: string): string {
     .replace(/\bHong Kong\b/g, " ")
     .replace(/\bHeikin Ashi\b/g, " ")
     .replace(/\bmark-to-market\b/gi, " ")
-    .replace(/\bopen interest\b/gi, " ")
     .replace(/\buvicorn\b[^\n]*/gi, " ")
     .replace(/\b[A-Z][A-Z0-9_]{1,64}\b/g, " ")
     .replace(/\b[A-Z][a-zA-Z0-9]*[A-Z][a-zA-Z0-9]*\b/g, " ")

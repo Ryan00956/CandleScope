@@ -1,19 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { compile } from "monaco-editor/editor/standalone/common/monarch/monarchCompile.js";
+
 import {
   configurePineHostCapabilities,
   registerPineLanguageSupport,
 } from "../src/editor/pineLanguage.ts";
-
-function compile(languageId, definition) {
-  if (typeof languageId !== "string" || !definition || typeof definition !== "object") {
-    throw new Error("invalid monarch definition");
-  }
-  if (!definition.tokenizer || !Array.isArray(definition.tokenizer.root)) {
-    throw new Error("monarch tokenizer.root is required");
-  }
-}
 
 test("Pine language registration compiles its Monarch tokenizer", () => {
   const registeredLanguages = [];

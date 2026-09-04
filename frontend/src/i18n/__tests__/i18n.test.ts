@@ -246,6 +246,7 @@ const PT_BR_PRODUCT_TOKENS = new Set([
   "heikin", "ashi", "long", "short", "platform", "fibonacci", "donchian",
   "train", "test", "high", "low", "close", "open", "time", "percentage",
   "uvicorn", "aggtrade", "pro", "reverse", "windows", "bollinger",
+  "socks5", "ta4j",
 ]);
 
 /** Spellings that are valid Brazilian Portuguese, not leftover English. */
@@ -275,15 +276,16 @@ const PT_BR_IDENTICAL_SPELLINGS = new Set([
   "revisions", "bundles", "deltas", "resize", "tester", "explanation",
   "runtimes", "server", "drawdown", "oversold", "overbought", "embargo",
   "sampler", "lease", "budget", "timeline", "projection", "cap", "socks",
-  "soak", "shadow", "streaming", "apis", "scripts", "bps", "bar", "dry",
+  "soak", "shadow", "streaming", "apis", "scripts", "bps", "dry",
   "virtual", "dock", "proxies", "touch", "historical", "year", "month",
   "combine", "letter", "drawings", "export", "exact", "closed", "display",
   "way", "runs", "full", "report", "try", "zero", "complete", "untitled",
   "top", "base", "off", "pause", "created", "read", "only", "fail", "smaller",
   "follow", "dead", "awaiting", "min", "mib", "debug", "canvas", "blob",
   "unix", "zip", "null", "sharpe", "qty", "liq", "sim", "fee", "max",
-  "stop", "limit", "target", "batch", "flags", "inputs", "level", "fold",
+  "stop", "limit", "target", "batch", "flags", "inputs", "fold",
   "studies", "switch", "marketplace", "decide", "prepare", "spread",
+  "ms", "px", "id", "vs",
 ]);
 
 function isAllowedEnglishClone(message: string): boolean {
@@ -329,16 +331,23 @@ function stripProtocol(text: string): string {
 }
 
 function rawTokens(text: string): string[] {
-  return stripProtocol(text).split(/[^A-Za-zÀ-ÿ]+/u).filter(Boolean);
+  return stripProtocol(text).split(/[^A-Za-zÀ-ÿ0-9]+/u).filter((token) => !/^\d+$/.test(token));
 }
+
+const PT_TWO_LETTER = new Set([
+  "de", "do", "da", "em", "no", "na", "os", "as", "um", "se", "ao", "ou",
+  "eu", "tu", "me", "te", "há", "já", "só", "à",
+]);
 
 function leftoverSourceTokens(english: string, portuguese: string): string[] {
   const portugueseTokens = rawTokens(portuguese);
   const portugueseLower = new Set(portugueseTokens.map((token) => token.toLowerCase()));
   const leftover = new Set<string>();
   for (const token of rawTokens(english)) {
-    if (token.length <= 2) continue;
     const lower = token.toLowerCase();
+    if (lower.length < 2) continue;
+    if (lower.length === 2 && PT_TWO_LETTER.has(lower)) continue;
+    if (/^\d+[smhdwmy]$/i.test(lower) || /^v\d+$/i.test(lower)) continue;
     if (
       !portugueseLower.has(lower)
       || PT_BR_IDENTICAL_SPELLINGS.has(lower)

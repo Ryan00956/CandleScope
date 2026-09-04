@@ -32,6 +32,8 @@ def test_plugin_error_localizations_accept_additional_languages_and_preserve_fal
         "Capacité indisponible : market.bars.read"
     )
     assert _localized_contract_error(error, "zh-cn").message == "市场扫描器阶段无效"
+    assert _localized_contract_error(error, "ru").message == "Недопустимая фаза сканера рынка"
+    assert _localized_contract_error(error, "ru-RU").message == "Недопустимая фаза сканера рынка"
 
 
 def _context(locale: str = "en") -> RequestContext:
@@ -51,6 +53,8 @@ def test_packaged_manifest_owns_entrypoint_and_localized_enum_labels() -> None:
     settings = next(item for item in manifest.contributions if item.id == "settings")
     interval = settings.localizations["zh-CN"]["schema"]["properties"]["interval"]
     assert interval["enumLabels"] == ["1 分钟", "5 分钟", "1 小时"]
+    ru_interval = settings.localizations["ru"]["schema"]["properties"]["interval"]
+    assert ru_interval["enumLabels"] == ["1 минута", "5 минут", "1 час"]
 
 
 def test_scan_preserves_invocation_locale_on_host_calls() -> None:
@@ -77,3 +81,10 @@ def test_plugin_owned_validation_error_follows_request_locale() -> None:
     )
     with pytest.raises(PlatformContractError, match="只接受空参数"):
         plugin.invoke(request)
+    russian = InvokeRequest(
+        contribution_id="scan",
+        input={"unexpected": True},
+        request_context=_context("ru"),
+    )
+    with pytest.raises(PlatformContractError, match="без параметров"):
+        plugin.invoke(russian)

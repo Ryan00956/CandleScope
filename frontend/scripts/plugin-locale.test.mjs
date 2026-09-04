@@ -41,6 +41,8 @@ test("Pyne sandbox follows locale lifecycle updates and falls back to its own En
   for (const [requested, expected, label] of [
     ["zh-CN", "zh-CN", "Pyne 工作台"],
     ["EN-us", "en", "Pyne Workbench"],
+    ["ru", "ru", "Верстак Pyne"],
+    ["ru-RU", "ru", "Верстак Pyne"],
     ["fr-CA", "en", "Pyne Workbench"],
   ]) {
     channel.onmessage({ data: {

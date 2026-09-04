@@ -5,7 +5,7 @@ chrome. It is app-wide infrastructure, not a business feature.
 
 ## Public Contract
 
-- Default locale is `zh-CN`. Supported locales are `zh-CN` and `en`.
+- Default locale is `zh-CN`. Supported locales are `zh-CN`, `en`, and `ru`.
 - `registry.ts` is the single registration point for catalogs, native labels,
   aliases and optional date/number format locales. `LocaleId`, the settings
   options, locale normalization and catalog checks are derived from it.

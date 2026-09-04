@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -48,6 +49,12 @@ test("settings category labels follow the active locale", () => {
     assert.equal(t(SETTINGS_CATEGORIES[0].labelKey), "Appearance");
     assert.equal(t("settings.saveAndClose"), "Save and close");
   });
+  withLocale("ru", () => {
+    assert.match(t(SETTINGS_CATEGORIES[0].labelKey), /\p{Script=Cyrillic}/u);
+    assert.doesNotMatch(t(SETTINGS_CATEGORIES[0].labelKey), /\p{Script=Han}/u);
+    assert.match(t("settings.saveAndClose"), /\p{Script=Cyrillic}/u);
+    assert.doesNotMatch(t("settings.saveAndClose"), /\p{Script=Han}/u);
+  });
 });
 
 test("status bar chrome switches between Chinese and English", () => {
@@ -77,6 +84,13 @@ test("status bar chrome switches between Chinese and English", () => {
   assert.match(en, /Live \(WebSocket\)/);
   assert.match(en, /Binance Spot/);
   assert.doesNotMatch(en, /已连接/);
+
+  const ru = withLocale("ru", () => renderToStaticMarkup(<StatusBar status={status} />));
+  assert.match(ru, /Binance/);
+  assert.match(ru, /\p{Script=Cyrillic}/u);
+  assert.doesNotMatch(ru, /\p{Script=Han}/u);
+  assert.doesNotMatch(ru, /Connected to/);
+  assert.doesNotMatch(ru, /已连接/);
 });
 
 test("right-rail chrome follows the active locale", () => {
@@ -117,6 +131,23 @@ test("right-rail chrome follows the active locale", () => {
   assert.match(en, /Show sidebar/);
   assert.match(en, /Watchlist/);
   assert.doesNotMatch(en, /市场侧栏/);
+
+  const ru = withLocale("ru", () => renderToStaticMarkup(
+    <MarketRightRailFrame
+      source="live"
+      views={viewsFor("ru")}
+      openViewIds={[]}
+      panelCollapsed
+      onToggleView={() => undefined}
+      onTogglePanelCollapsed={() => undefined}
+      renderView={() => null}
+      layout={{ width: 360 }}
+    />,
+  ));
+  assert.match(ru, /\p{Script=Cyrillic}/u);
+  assert.doesNotMatch(ru, /\p{Script=Han}/u);
+  assert.doesNotMatch(ru, /Market sidebar/);
+  assert.doesNotMatch(ru, /市场侧栏/);
 });
 
 test("appearance panel exposes a language picker that lists both locales", () => {
@@ -127,6 +158,7 @@ test("appearance panel exposes a language picker that lists both locales", () =>
   assert.match(html, /界面语言/);
   assert.match(html, /简体中文/);
   assert.match(html, /English/);
+  assert.match(html, /Русский/);
 
   const en = withLocale("en", () => renderToStaticMarkup(
     <ChartAppearancePanel
@@ -136,4 +168,35 @@ test("appearance panel exposes a language picker that lists both locales", () =>
   ));
   assert.match(en, /Interface language/);
   assert.doesNotMatch(en, /界面语言/);
+
+  withLocale("ru", () => {
+    const ru = renderToStaticMarkup(
+      <ChartAppearancePanel
+        settings={{ ...DEFAULT_SETTINGS, locale: "ru" }}
+        onUpdate={() => undefined}
+      />,
+    );
+    assert.match(ru, /data-settings-locale="true"/);
+    assert.match(ru, /Русский/);
+    assert.match(t("settings.language.title"), /\p{Script=Cyrillic}/u);
+    assert.doesNotMatch(t("settings.language.title"), /\p{Script=Han}/u);
+    assert.doesNotMatch(ru, /界面语言/);
+    assert.match(t("settings.language.description"), /\p{Script=Cyrillic}/u);
+    assert.ok(t("settings.language.description").length > t("settings.language.description", undefined, "en").length);
+  });
+});
+
+test("Russian layout CSS keeps long chrome wrapping and a Cyrillic-capable font stack", () => {
+  const css = fs.readFileSync(new URL("../../index.css", import.meta.url), "utf8");
+  const settingsCss = fs.readFileSync(
+    new URL("../../features/settings/SettingsModalStyles.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(css, /Segoe UI/);
+  assert.match(css, /Noto Sans/);
+  assert.match(css, /html\[lang="ru"\] \.market-rail-accordion-trigger strong/);
+  const main = fs.readFileSync(new URL("../../main.tsx", import.meta.url), "utf8");
+  assert.match(main, /@fontsource\/inter\/cyrillic-400\.css/);
+  assert.match(settingsCss, /html\[lang="ru"\] \.st-group-title/);
+  assert.match(settingsCss, /overflow-wrap: break-word/);
 });

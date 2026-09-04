@@ -210,6 +210,14 @@ export default function SettingsModalStyles(props: SettingsModalStylesProps) {
   margin-bottom: 14px;
 }
 
+html[lang="ru"] .st-group-title,
+html[lang="ru"] .st-group-desc,
+html[lang="ru"] .st-theme-label,
+html[lang="ru"] .st-select,
+html[lang="ru"] .st-preset-btn {
+  overflow-wrap: break-word;
+}
+
 /* ── Theme cards ────────────────────────────────────────── */
 .st-theme-grid {
   display: grid;

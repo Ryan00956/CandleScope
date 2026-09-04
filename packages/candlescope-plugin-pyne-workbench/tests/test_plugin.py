@@ -91,6 +91,8 @@ def test_sandbox_ui_owns_zh_cn_and_english_copy() -> None:
     assert 'data-i18n="statusWaiting"' in html
     assert '"zh-CN": {' in javascript
     assert "en: {" in javascript
+    assert "ru: {" in javascript
+    assert "Верстак Pyne" in javascript
     assert "applyLocale(payload.locale)" in javascript
     assert 'setStatus("statusRejected")' in javascript
 

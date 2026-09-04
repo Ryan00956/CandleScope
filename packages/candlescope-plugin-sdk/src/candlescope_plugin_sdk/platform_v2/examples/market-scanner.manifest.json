@@ -32,6 +32,9 @@
       "localizations": {
         "zh-CN": {
           "title": "扫描已授权市场"
+        },
+        "ru": {
+          "title": "Сканировать разрешённые рынки"
         }
       },
         "requiresUserAction": true,
@@ -63,6 +66,18 @@
               "interval": {"title": "周期"},
               "lookbackBars": {"title": "回看 K 线数"},
               "minimumMovePct": {"title": "最小涨跌幅百分比"}
+            }
+          }
+        },
+        "ru": {
+          "title": "Настройки сканера рынка",
+          "schema": {
+            "properties": {
+              "quoteAsset": {"title": "Котируемый актив"},
+              "symbolsLimit": {"title": "Число инструментов"},
+              "interval": {"title": "Интервал"},
+              "lookbackBars": {"title": "Свечей назад"},
+              "minimumMovePct": {"title": "Мин. изменение, %"}
             }
           }
         }
@@ -134,6 +149,16 @@
             "time": "收盘时间"
           },
           "emptyState": "运行扫描器后将在此显示结果"
+        },
+        "ru": {
+          "title": "Результаты сканера рынка",
+          "fields": {
+            "symbol": "Инструмент",
+            "changePct": "Изменение",
+            "close": "Закрытие",
+            "time": "Время закрытия"
+          },
+          "emptyState": "Результаты появятся здесь после запуска сканера"
         }
       },
         "slot": "sidePanel",
@@ -186,6 +211,14 @@
             "interval": "周期"
           },
           "emptyState": "扫描器空闲"
+        },
+        "ru": {
+          "title": "Сводка сканера рынка",
+          "fields": {
+            "scannedSymbols": "Просканировано",
+            "interval": "Интервал"
+          },
+          "emptyState": "Сканер простаивает"
         }
       },
         "slot": "statusArea",
@@ -220,6 +253,9 @@
       "localizations": {
         "zh-CN": {
           "title": "市场扫描信号"
+        },
+        "ru": {
+          "title": "Сигналы сканера рынка"
         }
       },
         "target": "main-chart",

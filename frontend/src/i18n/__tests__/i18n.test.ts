@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { en } from "../catalogs/en.js";
-import { ptBR } from "../catalogs/pt-BR.js";
 import { zhCN } from "../catalogs/zh-CN.js";
 import {
   DEFAULT_LOCALE,

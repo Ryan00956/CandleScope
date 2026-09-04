@@ -43,6 +43,8 @@ from app.data_engine.interval_policy import (
 )
 from app.data_engine.interval_resolution import (
     IntervalPurpose,
+    IntervalResolutionError,
+    IntervalResolutionErrorCode,
     IntervalResolver,
     IntervalRouteKind,
 )
@@ -304,8 +306,13 @@ class QueryEngine:
 
         if route.kind is IntervalRouteKind.DERIVED and not _materialized_only:
             if not identity.is_legacy_default_for(exchange):
-                raise ValueError(
-                    "derived intervals do not yet support non-default series identity"
+                raise IntervalResolutionError(
+                    IntervalResolutionErrorCode.SERIES_IDENTITY_UNSUPPORTED,
+                    "Derived intervals do not yet support non-default series identity",
+                    exchange=exchange,
+                    market_type=market_type,
+                    interval=interval,
+                    purpose=IntervalPurpose.HISTORY,
                 )
             result = self.custom_intervals.query_from_base(
                 symbol=symbol,
@@ -681,8 +688,13 @@ class QueryEngine:
         identity = resolve_kline_series_identity(exchange, series_identity)
         if route.kind is IntervalRouteKind.DERIVED and not _materialized_only:
             if not identity.is_legacy_default_for(exchange):
-                raise ValueError(
-                    "derived intervals do not yet support non-default series identity"
+                raise IntervalResolutionError(
+                    IntervalResolutionErrorCode.SERIES_IDENTITY_UNSUPPORTED,
+                    "Derived intervals do not yet support non-default series identity",
+                    exchange=exchange,
+                    market_type=market_type,
+                    interval=interval,
+                    purpose=IntervalPurpose.HISTORY,
                 )
             result = self.custom_intervals.query_before(
                 symbol,

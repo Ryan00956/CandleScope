@@ -227,6 +227,22 @@ def test_price_key_helpers_normalize_exchange_market_and_symbol() -> None:
         "BTC-USDT",
     )
     assert normalize_price_key("okx:spot:eth-usdt") == ("okx", "spot", "ETH-USDT")
+    assert normalize_price_key("swap:btc-usdt") == ("okx", "swap", "BTC-USDT")
+    assert normalize_price_key("twelvedata:stock:AAPL:NASDAQ") == (
+        "twelvedata",
+        "stock",
+        "AAPL:NASDAQ",
+    )
+    assert normalize_price_key(
+        "AAPL:NASDAQ",
+        exchange="twelvedata",
+        market_type="stock",
+    ) == ("twelvedata", "stock", "AAPL:NASDAQ")
+    assert normalize_price_key(
+        "SPOT:NYSE",
+        exchange="twelvedata",
+        market_type="stock",
+    ) == ("twelvedata", "stock", "SPOT:NYSE")
     assert price_key("BTCUSDT", exchange="binance", market_type="spot") == "spot:BTCUSDT"
     assert price_key("BTC-USDT", exchange="okx", market_type="spot") == "okx:spot:BTC-USDT"
     assert PriceSnapshot(
@@ -241,6 +257,18 @@ def test_price_key_helpers_normalize_exchange_market_and_symbol() -> None:
         volume=0,
         quote_volume=0,
     ).series_key == SeriesKey("BTCUSDT", "price")
+    assert PriceSnapshot(
+        symbol="AAPL:NASDAQ",
+        exchange="twelvedata",
+        market_type="stock",
+        price=1,
+        open=1,
+        high=1,
+        low=1,
+        change_pct=0,
+        volume=0,
+        quote_volume=0,
+    ).key == "twelvedata:stock:AAPL:NASDAQ"
 
 
 def test_ingestion_factory_price_callback_receives_delivery_events() -> None:
@@ -597,6 +625,27 @@ def test_subscription_service_full_price_none_lifecycle(tmp_path) -> None:
             and item["priority"] == "weak"
             for item in dm.storage_intents
         )
+
+    asyncio.run(_run())
+
+
+def test_subscription_service_preserves_provider_symbol_suffix(tmp_path) -> None:
+    async def _run() -> None:
+        dm = _RecordingSubscriptionDataManager()
+        service = SubscriptionService(tmp_path / "subs.db")
+        service.set_data_manager(dm)
+
+        result = await service.set_tier(
+            "twelvedata:stock:AAPL:NASDAQ",
+            SubscriptionTier.PRICE_ONLY,
+        )
+
+        assert result == {
+            "symbol": "twelvedata:stock:AAPL:NASDAQ",
+            "tier": "price",
+            "changed": True,
+        }
+        assert dm.price_started == [("twelvedata", "stock", "AAPL:NASDAQ")]
 
     asyncio.run(_run())
 

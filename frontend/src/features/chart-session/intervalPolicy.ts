@@ -5,6 +5,10 @@ import {
   intervalsSemanticallyEquivalent,
   parseIntervalSeconds,
 } from "../../utils/intervals.js";
+import {
+  isLegacyKlineSeriesIdentity,
+  type KlineSeriesIdentityInput,
+} from "../market-data/klineSeriesIdentity.js";
 import type {
   CustomIntervalRecord,
   ExchangeCatalog,
@@ -51,6 +55,22 @@ export function getEffectiveCustomIntervalRecords(
   return customIntervalRecords.filter((record) => !nativeValues.has(intervalSemanticSignature(record.value)));
 }
 
+export function canResolveIntervalForSeriesIdentity(
+  exchange: ExchangeId,
+  interval: IntervalString,
+  nativeIntervalValues: readonly IntervalString[],
+  seriesIdentity: KlineSeriesIdentityInput | null | undefined,
+): boolean {
+  // Derived history is currently keyed only by the legacy exchange identity.
+  // Keep semantic vendor/venue/session series on provider-native intervals so
+  // an apparently composable period cannot cross those identity boundaries.
+  if (nativeIntervalValues.some((nativeInterval) => (
+    intervalsSemanticallyEquivalent(nativeInterval, interval)
+  ))) return true;
+  return isLegacyKlineSeriesIdentity(exchange, seriesIdentity)
+    && canResolveIntervalFromNativeValues(interval, nativeIntervalValues);
+}
+
 export interface ResolveSupportedIntervalOptions {
   exchange: ExchangeId;
   marketType?: MarketType;
@@ -59,6 +79,7 @@ export interface ResolveSupportedIntervalOptions {
   savedCustomIntervals: readonly IntervalString[];
   nativeIntervals: readonly NativeInterval[];
   isNativeIntervalSupported: NativeIntervalSupport;
+  seriesIdentity?: KlineSeriesIdentityInput | null;
 }
 
 export function resolveSupportedInterval({
@@ -69,6 +90,7 @@ export function resolveSupportedInterval({
   savedCustomIntervals,
   nativeIntervals,
   isNativeIntervalSupported,
+  seriesIdentity,
 }: ResolveSupportedIntervalOptions): IntervalString {
   const native = nativeIntervals.find((item) => intervalsSemanticallyEquivalent(item.value, interval));
   if (native) return native.value;
@@ -78,9 +100,11 @@ export function resolveSupportedInterval({
   const custom = savedCustomIntervals.find((item) => intervalsSemanticallyEquivalent(item, interval));
   if (
     custom
-    && canResolveIntervalFromNativeValues(
+    && canResolveIntervalForSeriesIdentity(
+      exchange,
       custom,
       nativeIntervals.map((item) => item.value),
+      seriesIdentity,
     )
   ) return canonicalizeIntervalValue(custom) || custom;
   if (nativeIntervals.length === 0) {

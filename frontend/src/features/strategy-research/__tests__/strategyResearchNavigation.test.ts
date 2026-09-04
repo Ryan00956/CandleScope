@@ -14,6 +14,11 @@ import {
 import { strategyResearchAdvancedCellId } from "../strategyResearchAdvanced.js";
 import { researchReturnHref } from "../../backtest/research/backtestResearchModel.js";
 import { StrategyResearchScriptPanel } from "../StrategyResearchScriptPanel.js";
+import {
+  createMemoryStrategyDraftAdapter,
+  pendingStrategyDraftSave,
+  StrategyDraftStore,
+} from "../../backtest/chart-tester/StrategyDraftStore.js";
 
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -107,6 +112,7 @@ test("ordinary script panel exposes advanced research without internal identity 
       cellScope: "strategy-research",
       session: { exchange: "local", marketType: "spot", symbol: "BTC-USDT", interval: "15m" },
       sourceKind: "IMPORTED_DATASET",
+      draftId: null,
       barOnly: true,
       runStatus: "READY",
       needsData: false,
@@ -119,6 +125,35 @@ test("ordinary script panel exposes advanced research without internal identity 
   );
   assert.match(html, /strategy-research-open-advanced/);
   assert.doesNotMatch(html.toLowerCase(), /dataset id|data epoch|snapshot hash/);
+});
+
+test("ordinary research persists edited source for remount and advanced draft lookup", async () => {
+  const adapter = createMemoryStrategyDraftAdapter();
+  const mountedStore = new StrategyDraftStore(adapter, () => 10);
+  const initial = await mountedStore.save({
+    id: "draft-research1",
+    displayName: "Strategy",
+    language: "pyne",
+    source: "template()",
+    cursor: { line: 1, column: 1 },
+  });
+  const pending = pendingStrategyDraftSave({
+    draft: initial,
+    source: "edited()",
+    cursor: { line: 2, column: 3 },
+  });
+  assert.ok(pending);
+  await mountedStore.save(pending);
+
+  const remountedStore = new StrategyDraftStore(adapter);
+  const restored = await remountedStore.load(initial.id);
+  assert.equal(restored.record?.source, "edited()");
+  assert.deepEqual(restored.record?.cursor, { line: 2, column: 3 });
+
+  const panelSource = readFileSync(path.resolve(here, "../StrategyResearchScriptPanel.tsx"), "utf8");
+  assert.match(panelSource, /draftStore\.load\(draftId\)/);
+  assert.match(panelSource, /await flushPendingDraft\(\)[\s\S]*onOpenAdvanced\(\)/);
+  assert.match(panelSource, /beforeunload/);
 });
 
 test("unified app lazily hosts advanced research and does not import the advanced runtime", () => {

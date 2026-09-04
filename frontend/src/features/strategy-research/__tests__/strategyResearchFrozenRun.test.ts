@@ -83,6 +83,7 @@ test("imported session is local/spot and never requires the user to type dataset
       cellScope: "strategy-research",
       session,
       sourceKind: "IMPORTED_DATASET",
+      draftId: null,
       barOnly: true,
       runStatus: "READY",
       needsData: false,

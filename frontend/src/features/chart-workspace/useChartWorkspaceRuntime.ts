@@ -64,6 +64,7 @@ import {
   closeChartWorkspaceDocument,
   createEmptyChartWorkspaceLayoutHistory,
   recordChartWorkspaceLayoutEdit,
+  removeChartWorkspaceWindowLayoutHistory,
   redoChartWorkspaceLayoutEdit,
   resetChartWorkspaceDocumentLayout,
   setChartWorkspaceDocumentLayout,
@@ -211,6 +212,11 @@ interface WorkspaceRuntimeState {
   layoutHistoryByWorkspace: Partial<Record<ChartWorkspaceId, ChartWorkspaceLayoutHistory>>;
 }
 
+export interface ScopedChartWorkspaceLayoutEdit {
+  scopedDocument: ChartWorkspaceDocument;
+  result: ChartWorkspaceEditResult;
+}
+
 type ChartWorkspaceLibraryUpdate = ChartWorkspaceLibrarySnapshot
   | ((current: ChartWorkspaceLibrarySnapshot) => ChartWorkspaceLibrarySnapshot);
 
@@ -275,6 +281,19 @@ function sameLinkSettings(left: ChartLinkGroupSettings, right: ChartLinkGroupSet
 function activeWorkspace(snapshot: ChartWorkspaceLibrarySnapshot) {
   return snapshot.workspaces.find((workspace) => workspace.id === snapshot.activeWorkspaceId)
     ?? snapshot.workspaces[0]!;
+}
+
+export function runScopedChartWorkspaceLayoutEdit(
+  document: ChartWorkspaceDocument,
+  windowId: ChartWindowId | undefined,
+  updater: (document: ChartWorkspaceDocument) => ChartWorkspaceEditResult,
+): ScopedChartWorkspaceLayoutEdit | null {
+  const scopedDocument = windowId && document.windows[windowId]
+    ? { ...document, activeWindowId: windowId }
+    : document;
+  if (activeChartWorkspaceWindow(scopedDocument).layoutLocked) return null;
+  const result = updater(scopedDocument);
+  return result.document === scopedDocument ? null : { scopedDocument, result };
 }
 
 export function useChartWorkspaceRuntime(
@@ -480,7 +499,7 @@ export function useChartWorkspaceRuntime(
         ? { ...workspace.document, activeWindowId: services.windowId }
         : workspace.document;
       const candidate = updater(scopedDocument);
-      if (candidate === workspace.document) return current;
+      if (candidate === scopedDocument) return current;
       const document = advanceChartWorkspaceRevision(workspace.document, candidate);
       const updated = { ...workspace, document, updatedAt };
       return {
@@ -498,12 +517,13 @@ export function useChartWorkspaceRuntime(
     const updatedAt = services.now();
     setRuntimeState((currentState) => {
       const workspace = activeWorkspace(currentState.library);
-      const scopedDocument = services.windowId && workspace.document.windows[services.windowId]
-        ? { ...workspace.document, activeWindowId: services.windowId }
-        : workspace.document;
-      if (activeChartWorkspaceWindow(scopedDocument).layoutLocked) return currentState;
-      const result = updater(scopedDocument);
-      if (result.document === workspace.document) return currentState;
+      const scopedEdit = runScopedChartWorkspaceLayoutEdit(
+        workspace.document,
+        services.windowId,
+        updater,
+      );
+      if (!scopedEdit) return currentState;
+      const { scopedDocument, result } = scopedEdit;
       const committedResult = {
         ...result,
         document: advanceChartWorkspaceRevision(workspace.document, result.document),
@@ -524,6 +544,7 @@ export function useChartWorkspaceRuntime(
             history,
             workspace.document,
             committedResult,
+            scopedDocument.activeWindowId,
           ),
         },
       };
@@ -983,8 +1004,34 @@ export function useChartWorkspaceRuntime(
 
   const closeWindow = useCallback((windowId: ChartWindowId) => {
     if (!CHART_WORKSPACE_FEATURE_FLAGS.multiWindowEnabled) return;
-    updateActiveDocument((current) => closeChartWorkspaceWindowCandidate(current, windowId));
-  }, [updateActiveDocument]);
+    const updatedAt = services.now();
+    setRuntimeState((currentState) => {
+      const workspace = activeWorkspace(currentState.library);
+      const scopedDocument = services.windowId && workspace.document.windows[services.windowId]
+        ? { ...workspace.document, activeWindowId: services.windowId }
+        : workspace.document;
+      const candidate = closeChartWorkspaceWindowCandidate(scopedDocument, windowId);
+      if (candidate === scopedDocument) return currentState;
+      const document = advanceChartWorkspaceRevision(workspace.document, candidate);
+      const history = currentState.layoutHistoryByWorkspace[workspace.id];
+      return {
+        library: {
+          ...currentState.library,
+          workspaces: currentState.library.workspaces.map((currentWorkspace) => (
+            currentWorkspace.id === workspace.id
+              ? { ...workspace, document, updatedAt }
+              : currentWorkspace
+          )),
+        },
+        layoutHistoryByWorkspace: history
+          ? {
+            ...currentState.layoutHistoryByWorkspace,
+            [workspace.id]: removeChartWorkspaceWindowLayoutHistory(history, windowId),
+          }
+          : currentState.layoutHistoryByWorkspace,
+      };
+    });
+  }, [services]);
 
   const updateWindowPlacement = useCallback((
     windowId: ChartWindowId,

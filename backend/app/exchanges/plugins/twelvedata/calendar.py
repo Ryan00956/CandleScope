@@ -84,6 +84,16 @@ class TwelveDataUsEquityCalendar(SessionCalendar):
     def bucket_end_ms(self, open_ms: int, interval: str) -> int:
         if self._uses_provider_dates(interval):
             return self._provider_dates.bucket_end_ms(open_ms, interval)
+        open_date = datetime.fromtimestamp(
+            int(open_ms) / 1000,
+            tz=timezone.utc,
+        ).astimezone(_NEW_YORK).date()
+        if open_date < _SCHEDULE_START or open_date > _SCHEDULE_END:
+            raise ValueError(
+                "Twelve Data US-equity intraday calendar is available only "
+                f"from {_SCHEDULE_START.isoformat()} through "
+                f"{_SCHEDULE_END.isoformat()}"
+            )
         return super().bucket_end_ms(open_ms, interval)
 
 

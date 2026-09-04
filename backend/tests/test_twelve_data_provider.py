@@ -461,6 +461,74 @@ def test_us_equity_intraday_calendar_handles_holiday_dst_and_early_close() -> No
             _ms("1999-12-31T15:30:00"),
             "1h",
         )
+    with pytest.raises(ValueError, match="intraday calendar is available only"):
+        calendar.bucket_end_ms(_ms("1999-12-31T14:30:00"), "8h")
+
+
+@pytest.mark.parametrize(
+    ("interval", "open_time"),
+    [("1h", "2024-11-29T17:30:00Z"), ("8h", "2024-11-29T14:30:00Z")],
+)
+def test_us_equity_normalizer_closes_short_final_bar_at_early_close(
+    interval: str,
+    open_time: str,
+) -> None:
+    descriptor = StreamDescriptor(
+        "AAPL:NASDAQ",
+        StreamType.KLINE,
+        interval=interval,
+        exchange="twelvedata",
+        market_type="stock",
+    )
+    event = TwelveDataNormalizer(
+        IngestionConfig(twelve_data_api_key="key"),
+        descriptor,
+    ).parse(RawMessage(
+        payload={
+            "datetime": open_time,
+            "open": "100",
+            "high": "101",
+            "low": "99",
+            "close": "100.5",
+            "volume": "123",
+        },
+        source=DataSource.HTTP_BACKFILL,
+        stream_type=StreamType.KLINE,
+        received_at_ms=_ms("2024-11-29T18:00:01"),
+    ))
+
+    assert event is not None
+    assert event.data["close_time"] == _ms("2024-11-29T18:00:00") - 1
+    assert event.data["is_closed"] is True
+
+
+def test_us_equity_normalizer_preserves_rows_outside_calendar_horizon() -> None:
+    descriptor = StreamDescriptor(
+        "AAPL:NASDAQ",
+        StreamType.KLINE,
+        interval="8h",
+        exchange="twelvedata",
+        market_type="stock",
+    )
+    event = TwelveDataNormalizer(
+        IngestionConfig(twelve_data_api_key="key"),
+        descriptor,
+    ).parse(RawMessage(
+        payload={
+            "datetime": "1999-12-31T14:30:00Z",
+            "open": "100",
+            "high": "101",
+            "low": "99",
+            "close": "100.5",
+            "volume": "123",
+        },
+        source=DataSource.HTTP_BACKFILL,
+        stream_type=StreamType.KLINE,
+        received_at_ms=_ms("2000-01-01T00:00:00"),
+    ))
+
+    assert event is not None
+    assert event.data["close_time"] == _ms("1999-12-31T22:30:00") - 1
 
 
 def test_ticker_normalizer_seeds_quote_then_applies_ws_price() -> None:

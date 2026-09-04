@@ -3,12 +3,22 @@ from __future__ import annotations
 import logging
 import math
 from datetime import datetime, timezone
+from functools import lru_cache
+
 from app.data_engine.ingestion.config import IngestionConfig
 from app.data_engine.ingestion.models import MarketEvent, RawMessage, StreamDescriptor, StreamType
 from app.data_engine.interval_policy import parse_interval_spec
 
+from .adapter import EXCHANGE_DATE_CALENDAR_ID
+from .calendar import TwelveDataUsEquityCalendar
+
 
 logger = logging.getLogger("ingestion.normalizers.twelvedata")
+
+
+@lru_cache(maxsize=1)
+def _us_equity_calendar() -> TwelveDataUsEquityCalendar:
+    return TwelveDataUsEquityCalendar(calendar_id=EXCHANGE_DATE_CALENDAR_ID)
 
 
 def _parse_open_time_ms(value: object) -> int:
@@ -56,8 +66,15 @@ class TwelveDataNormalizer:
             if spec is None:
                 raise ValueError(f"unsupported interval: {interval!r}")
             open_time = _parse_open_time_ms(row.get("datetime"))
-            close_time = spec.next_ms(open_time) - 1
             market_type = str(self._descriptor.market_type or "").strip().lower()
+            close_time = spec.next_ms(open_time) - 1
+            if market_type in {"stock", "etf"}:
+                try:
+                    close_time = _us_equity_calendar().bucket_end_ms(open_time, interval) - 1
+                except ValueError:
+                    # The XNYS schedule is intentionally finite. Preserve the
+                    # provider's older/newer history with its nominal edge.
+                    pass
             volume_value = row.get("volume")
             volume_available = volume_value not in (None, "")
             if market_type in {"stock", "etf"} and not volume_available:

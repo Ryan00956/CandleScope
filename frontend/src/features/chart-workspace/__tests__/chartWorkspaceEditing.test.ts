@@ -8,6 +8,7 @@ import {
   createEmptyChartWorkspaceLayoutHistory,
   createChartWorkspaceLayoutUndoEntry,
   recordChartWorkspaceLayoutEdit,
+  removeChartWorkspaceWindowLayoutHistory,
   redoChartWorkspaceLayoutEdit,
   resetChartWorkspaceDocumentLayout,
   setChartWorkspaceDocumentLayout,
@@ -16,14 +17,25 @@ import {
   undoChartWorkspaceLayoutEdit,
   type ChartWorkspaceEditOptions,
 } from "../chartWorkspaceEditing.js";
-import { activeChartWorkspaceWindow, chartWorkspaceCell, replaceChartWorkspaceWindow } from "../chartWorkspaceDocument.js";
+import {
+  activeChartWorkspaceWindow,
+  chartWorkspaceCell,
+  replaceChartWorkspaceWindow,
+} from "../chartWorkspaceDocument.js";
 import { visibleCellIds } from "../chartWorkspaceLayout.js";
-import { createDefaultChartWorkspace } from "../chartWorkspaceStorage.js";
+import {
+  createDefaultChartWorkspace,
+  normalizeChartWorkspaceWithDiagnostics,
+} from "../chartWorkspaceStorage.js";
 import {
   DEFAULT_CHART_LINK_GROUP_ID,
   type ChartCellId,
   type ChartWorkspaceDocument,
 } from "../chartWorkspaceTypes.js";
+import {
+  closeChartWorkspaceWindowCandidate,
+  createChartWorkspaceWindowCandidate,
+} from "../chartWorkspaceWindows.js";
 
 const windowOf = (document: ChartWorkspaceDocument) => activeChartWorkspaceWindow(document);
 const cellOf = (document: ChartWorkspaceDocument, id: ChartCellId) => chartWorkspaceCell(document, id);
@@ -265,6 +277,180 @@ test("16-cell preset, split rejection, undo, and redo preserve the complete layo
     maxCellsPerWindow: 4,
   });
   assert.equal(disabled.document, before);
+});
+
+test("expanding a secondary window creates an independent cell and remains persistable", () => {
+  const original = createDefaultChartWorkspace();
+  const singleCellDocument: ChartWorkspaceDocument = {
+    ...original,
+    cells: { "cell-1": original.cells["cell-1"]! },
+  };
+  const withSecondaryWindow = createChartWorkspaceWindowCandidate(singleCellDocument, {
+    createWindowId: () => "window-2",
+    createCellId: () => "cell-window-2-primary",
+  });
+  const expanded = setChartWorkspaceDocumentLayout(withSecondaryWindow, "split-vertical", {
+    windowId: "window-2",
+    allowDynamicCellIds: true,
+    maxCellsPerWindow: 16,
+    maxCellsPerApp: 64,
+    createCellId: () => "cell-window-2-secondary",
+  });
+
+  const mainCellIds = visibleCellIds(expanded.document.windows["main-window"]!.layoutTree);
+  const secondaryCellIds = visibleCellIds(expanded.document.windows["window-2"]!.layoutTree);
+  assert.deepEqual(mainCellIds, ["cell-1"]);
+  assert.deepEqual(secondaryCellIds, [
+    "cell-window-2-primary",
+    "cell-window-2-secondary",
+  ]);
+  assert.equal(secondaryCellIds.some((cellId) => mainCellIds.includes(cellId)), false);
+
+  const normalized = normalizeChartWorkspaceWithDiagnostics(expanded.document);
+  assert.equal(normalized.usedFallback, false);
+  assert.deepEqual(normalized.diagnostics, []);
+  assert.deepEqual(Object.keys(normalized.document.windows), ["main-window", "window-2"]);
+});
+
+test("legacy split never reuses or overwrites a cell visible in another window", () => {
+  const original = createDefaultChartWorkspace();
+  const withSecondaryWindow = createChartWorkspaceWindowCandidate(original, {
+    createWindowId: () => "window-2",
+    createCellId: () => "cell-window-2-primary",
+  });
+  const mainCellBefore = withSecondaryWindow.cells["cell-1"]!;
+  const split = splitChartWorkspaceDocument(
+    withSecondaryWindow,
+    "cell-window-2-primary",
+    "columns",
+    "copy",
+    { windowId: "window-2", allowDynamicCellIds: false },
+  );
+
+  assert.deepEqual(
+    visibleCellIds(split.document.windows["main-window"]!.layoutTree),
+    ["cell-1"],
+  );
+  assert.deepEqual(
+    visibleCellIds(split.document.windows["window-2"]!.layoutTree),
+    ["cell-window-2-primary", "cell-2"],
+  );
+  assert.strictEqual(split.document.cells["cell-1"], mainCellBefore);
+});
+
+test("layout history records and restores the explicitly edited secondary window", () => {
+  const original = createDefaultChartWorkspace();
+  const withSecondaryWindow = createChartWorkspaceWindowCandidate(original, {
+    createWindowId: () => "window-2",
+    createCellId: () => "cell-window-2-primary",
+  });
+  const unscopedDocument = { ...withSecondaryWindow, activeWindowId: "main-window" };
+  const mainLayoutBefore = unscopedDocument.windows["main-window"]!.layoutTree;
+  const scopedDocument = { ...unscopedDocument, activeWindowId: "window-2" };
+  const edit = setChartWorkspaceDocumentLayout(scopedDocument, "split-vertical", {
+    windowId: "window-2",
+    allowDynamicCellIds: true,
+    maxCellsPerWindow: 16,
+    maxCellsPerApp: 64,
+  });
+  const history = recordChartWorkspaceLayoutEdit(
+    createEmptyChartWorkspaceLayoutHistory(),
+    unscopedDocument,
+    edit,
+    "window-2",
+  );
+
+  assert.equal(history.past[0]?.window.id, "window-2");
+  assert.equal(visibleCellIds(edit.document.windows["window-2"]!.layoutTree).length, 2);
+  const undo = undoChartWorkspaceLayoutEdit(
+    { ...edit.document, activeWindowId: "main-window" },
+    history,
+  );
+  assert.ok(undo);
+  assert.strictEqual(undo.document.windows["main-window"]!.layoutTree, mainLayoutBefore);
+  assert.deepEqual(
+    visibleCellIds(undo.document.windows["window-2"]!.layoutTree),
+    ["cell-window-2-primary"],
+  );
+});
+
+test("layout history enforces the lock on the edited window rather than the active window", () => {
+  const original = createDefaultChartWorkspace();
+  const withSecondaryWindow = createChartWorkspaceWindowCandidate(original, {
+    createWindowId: () => "window-2",
+    createCellId: () => "cell-window-2-primary",
+  });
+  const before = { ...withSecondaryWindow, activeWindowId: "main-window" };
+  const edit = splitChartWorkspaceDocument(
+    before,
+    "cell-window-2-primary",
+    "columns",
+    "copy",
+    {
+      windowId: "window-2",
+      allowDynamicCellIds: true,
+      maxCellsPerWindow: 16,
+      createCellId: () => "cell-window-2-secondary",
+    },
+  );
+  const history = recordChartWorkspaceLayoutEdit(
+    createEmptyChartWorkspaceLayoutHistory(),
+    before,
+    edit,
+    "window-2",
+  );
+  const activeWindowLocked = replaceChartWorkspaceWindow(
+    { ...edit.document, activeWindowId: "main-window" },
+    { ...edit.document.windows["main-window"]!, layoutLocked: true },
+  );
+
+  const undo = undoChartWorkspaceLayoutEdit(activeWindowLocked, history);
+  assert.ok(undo);
+  assert.deepEqual(
+    visibleCellIds(undo.document.windows["window-2"]!.layoutTree),
+    ["cell-window-2-primary"],
+  );
+
+  const editedWindowLocked = replaceChartWorkspaceWindow(
+    { ...edit.document, activeWindowId: "main-window" },
+    { ...edit.document.windows["window-2"]!, layoutLocked: true },
+  );
+  assert.equal(undoChartWorkspaceLayoutEdit(editedWindowLocked, history), null);
+});
+
+test("layout history cannot resurrect a closed secondary window", () => {
+  const original = createDefaultChartWorkspace();
+  const withSecondaryWindow = createChartWorkspaceWindowCandidate(original, {
+    createWindowId: () => "window-2",
+    createCellId: () => "cell-window-2-primary",
+  });
+  const before = { ...withSecondaryWindow, activeWindowId: "main-window" };
+  const edit = splitChartWorkspaceDocument(
+    before,
+    "cell-window-2-primary",
+    "columns",
+    "copy",
+    {
+      windowId: "window-2",
+      allowDynamicCellIds: true,
+      maxCellsPerWindow: 16,
+      createCellId: () => "cell-window-2-secondary",
+    },
+  );
+  const history = recordChartWorkspaceLayoutEdit(
+    createEmptyChartWorkspaceLayoutHistory(),
+    before,
+    edit,
+    "window-2",
+  );
+  const closed = closeChartWorkspaceWindowCandidate(edit.document, "window-2");
+
+  assert.equal(undoChartWorkspaceLayoutEdit(closed, history), null);
+  assert.equal(closed.windows["window-2"], undefined);
+  assert.deepEqual(removeChartWorkspaceWindowLayoutHistory(history, "window-2"), {
+    past: [],
+    future: [],
+  });
 });
 
 test("dynamic undo and redo restore the same ID and its complete edited snapshot", () => {

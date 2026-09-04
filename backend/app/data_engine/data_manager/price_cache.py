@@ -11,6 +11,25 @@ from .models import SeriesKey
 from .subscriptions import format_subscription_key, parse_subscription_key
 
 
+_LEGACY_MARKET_PREFIXES = frozenset({
+    "commodity",
+    "etf",
+    "forex",
+    "future",
+    "futures",
+    "index",
+    "margin",
+    "option",
+    "options",
+    "perpetual",
+    "spot",
+    "stock",
+    "swap",
+    "swap.linear",
+    "usdm",
+})
+
+
 def normalize_price_key(
     symbol: str,
     exchange: str = "binance",
@@ -18,10 +37,16 @@ def normalize_price_key(
 ) -> tuple[str, str, str]:
     """Normalize a price identifier to (exchange, market_type, symbol)."""
     raw_symbol = str(symbol or "").strip()
-    if ":" in raw_symbol:
-        return parse_subscription_key(raw_symbol)
     normalized_exchange = (exchange or "binance").strip().lower()
     normalized_market = (market_type or "spot").strip().lower()
+    prefix, separator, _remainder = raw_symbol.partition(":")
+    if raw_symbol.count(":") >= 2 or (
+        separator
+        and normalized_exchange == "binance"
+        and normalized_market == "spot"
+        and prefix.strip().lower() in _LEGACY_MARKET_PREFIXES
+    ):
+        return parse_subscription_key(raw_symbol)
     normalized_symbol = normalize_exchange_symbol(
         raw_symbol,
         exchange=normalized_exchange,

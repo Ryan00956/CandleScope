@@ -110,7 +110,8 @@ function allocateCellId(
   );
   if (visibleCellIds(window.layoutTree).length >= maxCellsPerWindow) return null;
   if (!options.allowDynamicCellIds) {
-    const visible = new Set(visibleCellIds(window.layoutTree));
+    const visible = new Set(Object.values(document.windows)
+      .flatMap((candidate) => visibleCellIds(candidate.layoutTree)));
     return ["cell-1", "cell-2", "cell-3", "cell-4"]
       .find((cellId) => !visible.has(cellId)) ?? null;
   }
@@ -144,7 +145,12 @@ export function setChartWorkspaceDocumentLayout(
   const currentCellIds = visibleCellIds(window.layoutTree);
   const targetCellIds = currentCellIds.slice(0, targetCount);
   const occupied = new Set(Object.keys(document.cells));
-  const reusable = Object.keys(document.cells).filter((cellId) => !currentCellIds.includes(cellId));
+  const referencedByOtherWindows = new Set(Object.values(document.windows)
+    .filter((candidate) => candidate.id !== window.id)
+    .flatMap((candidate) => visibleCellIds(candidate.layoutTree)));
+  const reusable = Object.keys(document.cells).filter((cellId) => (
+    !currentCellIds.includes(cellId) && !referencedByOtherWindows.has(cellId)
+  ));
   while (targetCellIds.length < targetCount && reusable.length > 0) {
     targetCellIds.push(reusable.shift()!);
   }
@@ -334,15 +340,27 @@ export function recordChartWorkspaceLayoutEdit(
   history: ChartWorkspaceLayoutHistory,
   before: ChartWorkspaceDocument,
   result: ChartWorkspaceEditResult,
+  windowId: ChartWindowId = before.activeWindowId,
 ): ChartWorkspaceLayoutHistory {
   if (result.document === before) return history;
   return {
     past: boundedHistory([
       ...history.past,
-      createChartWorkspaceLayoutUndoEntry(before, result.restoreCellIds),
+      createChartWorkspaceLayoutUndoEntry(before, result.restoreCellIds, windowId),
     ]),
     future: [],
   };
+}
+
+export function removeChartWorkspaceWindowLayoutHistory(
+  history: ChartWorkspaceLayoutHistory,
+  windowId: ChartWindowId,
+): ChartWorkspaceLayoutHistory {
+  const past = history.past.filter((entry) => entry.window.id !== windowId);
+  const future = history.future.filter((entry) => entry.window.id !== windowId);
+  return past.length === history.past.length && future.length === history.future.length
+    ? history
+    : { past, future };
 }
 
 function traverseChartWorkspaceLayoutHistory(
@@ -350,11 +368,12 @@ function traverseChartWorkspaceLayoutHistory(
   history: ChartWorkspaceLayoutHistory,
   direction: "undo" | "redo",
 ): ChartWorkspaceLayoutHistoryStep | null {
-  const window = chartWorkspaceWindow(document);
-  if (window.layoutLocked) return null;
   const source = direction === "undo" ? history.past : history.future;
   const entry = source.at(-1);
   if (!entry) return null;
+  const window = document.windows[entry.window.id];
+  if (!window) return null;
+  if (window.layoutLocked) return null;
   const inverse = createChartWorkspaceLayoutUndoEntry(
     document,
     restoredCellIds(entry),

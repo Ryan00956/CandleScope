@@ -19,6 +19,7 @@ import {
   preferredLibrarySelectedId,
 } from "../importedDatasetSource.js";
 import { parseStrategyResearchLaunch } from "../strategyResearchLaunch.js";
+import { StrategyResearchRuntime } from "../StrategyResearchRuntime.js";
 
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -62,6 +63,41 @@ test("library selection follows the restored source instead of the first dataset
     dataset_id: restored.dataset_id,
     data_epoch: `sha256:${"d".repeat(64)}`,
   })), null);
+});
+
+test("activating a revision refreshes the library before advancing source epoch and stales the old result", () => {
+  const current = manifest();
+  const activated = manifest({ data_epoch: `sha256:${"d".repeat(64)}` });
+  const runtime = new StrategyResearchRuntime({ restoreWorkspace: false, libraryEnabled: true });
+  runtime.dispatch({ type: "source/select", source: importedDatasetSourceFromManifest(current) });
+  runtime.dispatch({ type: "result/setRun", runId: "bt_previous" });
+  runtime.dispatch({
+    type: "source/revisionChanged",
+    source: importedDatasetSourceFromManifest(activated),
+  });
+
+  assert.equal(
+    runtime.state.source.source?.kind === "IMPORTED_DATASET"
+      ? runtime.state.source.source.dataEpoch
+      : null,
+    activated.data_epoch,
+  );
+  assert.equal(runtime.state.result.runId, "bt_previous");
+  assert.equal(runtime.state.result.stale, true);
+  assert.equal(runtime.state.result.staleReason, "DATA_REVISION_CHANGED");
+  assert.equal(importedManifestForSource(runtime.state.source.source, activated), activated);
+
+  const managementSource = readFileSync(
+    path.resolve(here, "../../research-data/ResearchDatasetManagement.tsx"),
+    "utf8",
+  );
+  const refreshIndex = managementSource.indexOf("await input.onChanged(input.manifest.dataset_id)");
+  const sourceIndex = managementSource.indexOf("input.onRevisionActivated?.(activated)");
+  assert.ok(refreshIndex >= 0 && sourceIndex > refreshIndex);
+  const appSource = readFileSync(path.resolve(here, "../StrategyResearchApp.tsx"), "utf8");
+  assert.match(appSource, /current\.datasetId !== manifest\.dataset_id[\s\S]*setLibrarySelectedId\(current\.datasetId\)/);
+  assert.match(appSource, /dispatchImportedSource\(dispatch, current, manifest\)/);
+  assert.match(appSource, /onRevisionActivated=\{handleRevisionActivated\}/);
 });
 
 test("imported source identity is dataset_id + data_epoch and never invents a snapshot hash", () => {

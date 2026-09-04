@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
+from threading import Event
 
 import pytest
 
@@ -167,6 +169,107 @@ def test_query_resamples_complete_integer_multiple_intervals(tmp_path: Path) -> 
     assert "not an integer multiple" in str(error.value)
 
 
+@pytest.mark.parametrize(
+    ("query_interval", "expected_times", "expected_closes"),
+    [
+        (
+            "1m",
+            [1_704_067_200, 1_704_067_260, 1_704_067_320, 1_704_067_380],
+            [11.0, 12.0, 13.0, 14.0],
+        ),
+        ("2m", [1_704_067_200, 1_704_067_320], [12.0, 14.0]),
+    ],
+)
+def test_query_pins_one_revision_during_concurrent_activation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    query_interval: str,
+    expected_times: list[int],
+    expected_closes: list[float],
+) -> None:
+    service = LocalDatasetService(tmp_path / "local-data")
+    dataset_id = "local-0123456789abcdef0123456789abcdef"
+    first = service.import_csv(
+        _write_csv(
+            tmp_path / "first.csv",
+            "time,open,high,low,close,volume\n"
+            "1704067200000,10,12,9,11,1\n"
+            "1704067260000,11,13,10,12,2\n"
+            "1704067320000,12,14,11,13,3\n"
+            "1704067380000,13,15,12,14,4\n",
+        ),
+        LocalImportOptions(
+            name="Revision one",
+            symbol="BTCUSDT",
+            interval="1m",
+            timestamp_unit="ms",
+            dataset_id=dataset_id,
+        ),
+    )
+    second = service.import_csv(
+        _write_csv(
+            tmp_path / "second.csv",
+            "time,open,high,low,close,volume\n"
+            "1704067200000,100,102,99,101,10\n"
+            "1704067260000,101,103,100,102,20\n"
+            "1704067440000,104,106,103,105,30\n"
+            "1704067500000,105,107,104,106,40\n",
+        ),
+        LocalImportOptions(
+            name="Revision two",
+            symbol="BTCUSDT",
+            interval="1m",
+            timestamp_unit="ms",
+            dataset_id=dataset_id,
+        ),
+    )
+    service.activate_revision(
+        dataset_id,
+        data_epoch=first["data_epoch"],
+        expected_current_epoch=second["data_epoch"],
+    )
+
+    revision_pinned = Event()
+    continue_query = Event()
+    original_active_revision = service._active_revision
+
+    def pause_after_pinning(
+        requested_dataset_id: str,
+    ) -> tuple[dict[str, object], Path]:
+        resolved = original_active_revision(requested_dataset_id)
+        if not revision_pinned.is_set():
+            revision_pinned.set()
+            assert continue_query.wait(timeout=5)
+        return resolved
+
+    monkeypatch.setattr(service, "_active_revision", pause_after_pinning)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            service.query,
+            dataset_id,
+            interval=query_interval,
+            limit=10,
+        )
+        assert revision_pinned.wait(timeout=5)
+        try:
+            service.activate_revision(
+                dataset_id,
+                data_epoch=second["data_epoch"],
+                expected_current_epoch=first["data_epoch"],
+            )
+        finally:
+            continue_query.set()
+        page = future.result(timeout=5)
+
+    assert page["data_epoch"] == first["data_epoch"]
+    assert page["availability_revision"] == first["data_epoch"]
+    assert page["excluded_ranges"] == []
+    assert page["verified_contiguous"] is True
+    assert [row["time"] for row in page["data"]] == expected_times
+    assert [row["close"] for row in page["data"]] == expected_closes
+    assert service.get_manifest(dataset_id)["data_epoch"] == second["data_epoch"]
+
+
 def test_resampling_omits_incomplete_gap_buckets(tmp_path: Path) -> None:
     service = LocalDatasetService(tmp_path / "local-data")
     manifest = service.import_csv(
@@ -293,6 +396,10 @@ def test_import_preserves_missing_volume_as_unavailable(tmp_path: Path) -> None:
     page = service.query(manifest["dataset_id"], interval="1d", limit=10)
     assert page["volume_available"] is False
     assert [row["volume"] for row in page["data"]] == [None, None]
+    derived = service.query(manifest["dataset_id"], interval="2d", limit=10)
+    assert derived["derived"] is True
+    assert derived["volume_available"] is False
+    assert [row["volume"] for row in derived["data"]] == [None]
     revision = manifest["data_epoch"].removeprefix("sha256:")
     quality = json.loads(
         (

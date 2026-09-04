@@ -201,6 +201,16 @@ export default function StrategyResearchApp({
     dispatchImportedSource(dispatch, runtime.state.source.source, dataset);
   }, [dispatch, library.datasets, runtime]);
 
+  const handleRevisionActivated = useCallback((manifest: LocalDatasetManifest) => {
+    const current = runtime.state.source.source;
+    if (current?.kind !== "IMPORTED_DATASET") return;
+    if (current.datasetId !== manifest.dataset_id) {
+      setLibrarySelectedId(current.datasetId);
+      return;
+    }
+    dispatchImportedSource(dispatch, current, manifest);
+  }, [dispatch, runtime, setLibrarySelectedId]);
+
   const importedManifest = importedManifestForSource(source, library.selected);
 
   const { intervalScope, selectedInterval, handleIntervalSelect } = useLocalIntervalSelection(
@@ -328,6 +338,7 @@ export default function StrategyResearchApp({
         events={analysisEvents}
         onSelectKind={onSelectKind}
         onSelectDataset={onSelectDataset}
+        onRevisionActivated={handleRevisionActivated}
         onImport={async (input) => {
           const dataset = await library.handleImport(input);
           if (dataset) dispatchImportedSource(dispatch, runtime.state.source.source, dataset);
@@ -343,6 +354,7 @@ export default function StrategyResearchApp({
         cellScope="strategy-research"
         session={researchRun.session}
         sourceKind={source?.kind ?? null}
+        draftId={state.script.draftId}
         barOnly={researchRun.barOnly}
         runStatus={researchRun.runStatus}
         needsData={researchRun.needsData}

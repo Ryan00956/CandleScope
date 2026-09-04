@@ -787,7 +787,7 @@ def _resolve_range_market_type(req: IndicatorRangeRequest) -> str:
 def _trusted_origin(request: Request | None) -> bool:
     if request is None:
         return False
-    return is_trusted_operator_origin(origin_from(request.headers))
+    return is_trusted_operator_origin(origin_from(getattr(request, "headers", None)))
 
 
 def _resolve_range_script(req: IndicatorRangeRequest) -> tuple[str, str, str | None]:

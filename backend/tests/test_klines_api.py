@@ -2451,6 +2451,47 @@ def test_query_endpoints_map_interval_capability_errors_to_client_error() -> Non
         assert response.json()["detail"]["code"] == "no_exact_base"
 
 
+def test_query_endpoints_reject_derived_nonlegacy_identity_as_client_error() -> None:
+    client = _client(DataManager())
+    common = {
+        "symbol": "AAPL:NASDAQ",
+        "interval": "7m",
+        "exchange": "twelvedata",
+        "market_type": "stock",
+        "provider_id": "twelvedata",
+        "venue": "XNAS",
+        "asset_class": "stock",
+        "series_variant": "ohlcv",
+        "price_adjustment": "raw",
+        "session_variant": "regular",
+        "volume_semantics": "shares",
+    }
+    cases = [
+        ("/api/v1/klines/latest", {**common, "limit": 1}),
+        ("/api/v1/klines/history", {**common, "days": 1, "max_wait_ms": 0}),
+        ("/api/v1/klines/range", {
+            **common,
+            "start_ms": 1_700_000_000_000,
+            "end_ms": 1_700_000_419_999,
+            "repair": "none",
+        }),
+        ("/api/v1/klines/history/before", {
+            **common,
+            "before": 1_700_000_000,
+            "bars": 1,
+            "max_wait_ms": 0,
+        }),
+    ]
+
+    for path, params in cases:
+        response = client.get(path, params=params)
+        assert response.status_code == 400, (path, response.text)
+        detail = response.json()["detail"]
+        assert detail["code"] == "series_identity_unsupported"
+        assert detail["interval"] == "7m"
+        assert detail["exchange"] == "twelvedata"
+
+
 def test_resolve_endpoint_is_exchange_aware_and_canonical() -> None:
     client = _client(DataManager())
 

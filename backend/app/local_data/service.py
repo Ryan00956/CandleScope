@@ -1170,11 +1170,16 @@ class LocalDatasetService:
         try:
             current = json.loads(current_path.read_text(encoding="utf-8"))
             revision = current["revision"]
+            data_epoch = current["data_epoch"]
         except (OSError, KeyError, json.JSONDecodeError) as exc:
             raise LocalDatasetError(
                 "Dataset not found", code="dataset_not_found"
             ) from exc
-        if not isinstance(revision, str) or EPOCH_RE.fullmatch(revision) is None:
+        if (
+            not isinstance(revision, str)
+            or EPOCH_RE.fullmatch(revision) is None
+            or data_epoch != f"sha256:{revision}"
+        ):
             raise LocalDatasetError("Invalid dataset revision", code="dataset_corrupt")
         path = self.root / dataset_id / revision
         if not path.is_dir():
@@ -1183,10 +1188,12 @@ class LocalDatasetService:
             )
         return path
 
-    def get_manifest(self, dataset_id: str) -> dict[str, Any]:
+    def _active_revision(self, dataset_id: str) -> tuple[dict[str, Any], Path]:
+        """Resolve the active manifest and its immutable directory exactly once."""
+        revision_dir = self._revision_dir(dataset_id)
         try:
             manifest = json.loads(
-                (self._revision_dir(dataset_id) / "manifest.json").read_text(
+                (revision_dir / "manifest.json").read_text(
                     encoding="utf-8"
                 )
             )
@@ -1194,7 +1201,19 @@ class LocalDatasetService:
             raise LocalDatasetError(
                 "Dataset manifest is unreadable", code="dataset_corrupt"
             ) from exc
+        if (
+            not isinstance(manifest, dict)
+            or manifest.get("dataset_id") != dataset_id
+            or manifest.get("data_epoch") != f"sha256:{revision_dir.name}"
+        ):
+            raise LocalDatasetError(
+                "Dataset manifest identity is invalid", code="dataset_corrupt"
+            )
         manifest.setdefault("volume_available", True)
+        return manifest, revision_dir
+
+    def get_manifest(self, dataset_id: str) -> dict[str, Any]:
+        manifest, _revision_dir = self._active_revision(dataset_id)
         metadata = self._read_library_metadata(dataset_id, manifest)
         manifest["name"] = metadata["name"]
         manifest["archived"] = metadata["archived"]
@@ -1701,13 +1720,14 @@ class LocalDatasetService:
         start_ms: int | None = None,
         end_ms: int | None = None,
     ) -> dict[str, Any]:
-        manifest = self.get_manifest(dataset_id)
+        manifest, revision_dir = self._active_revision(dataset_id)
         plan = self.resolve_interval(manifest, interval)
         limit = max(1, min(int(limit), 5_000))
         if plan.derived:
             return self._query_derived(
                 dataset_id,
                 manifest=manifest,
+                revision_dir=revision_dir,
                 plan=plan,
                 limit=limit,
                 before_ms=before_ms,
@@ -1726,7 +1746,7 @@ class LocalDatasetService:
             clauses.append("open_time_ms <= ?")
             parameters.append(int(end_ms))
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        db_path = self._revision_dir(dataset_id) / "bars.sqlite"
+        db_path = revision_dir / "bars.sqlite"
         uri = f"file:{db_path.as_posix()}?mode=ro"
         connection = sqlite3.connect(uri, uri=True)
         try:
@@ -1781,13 +1801,13 @@ class LocalDatasetService:
         dataset_id: str,
         *,
         manifest: dict[str, Any],
+        revision_dir: Path,
         plan: LocalResamplePlan,
         limit: int,
         before_ms: int | None,
         start_ms: int | None,
         end_ms: int | None,
     ) -> dict[str, Any]:
-        revision_dir = self._revision_dir(dataset_id)
         selected = self._read_derived_rows(
             revision_dir,
             plan=plan,
@@ -1820,6 +1840,7 @@ class LocalDatasetService:
             "source_interval": plan.source.canonical,
             "derived": True,
             "aggregation_factor": plan.factor,
+            "volume_available": manifest["volume_available"],
             "data": rows,
             "count": len(rows),
             "all_rows_final": all(row["is_closed"] for row in rows),

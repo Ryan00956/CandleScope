@@ -124,7 +124,9 @@ def _infer_exchange_from_symbol(symbol: str, fallback: str = "binance") -> str:
 
 def parse_subscription_key(key: str) -> tuple[str, str, str]:
     """Parse a subscription key to (exchange, market_type, normalized_symbol)."""
-    parts = [part.strip() for part in key.split(":") if part.strip()]
+    # Split only the routing prefix. Provider-native symbols may themselves
+    # contain a colon (for example Twelve Data's ``AAPL:NASDAQ``).
+    parts = [part.strip() for part in key.split(":", 2) if part.strip()]
     if len(parts) >= 3:
         exchange = parts[0].lower()
         market_type = parts[1].lower()

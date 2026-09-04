@@ -29,11 +29,25 @@ import { formatResearchDate, researchLibraryErrorMessage } from "./researchDataF
 import { ResearchDatasetQuality } from "./ResearchDatasetQuality.js";
 import { ResearchDatasetRevisions } from "./ResearchDatasetRevisions.js";
 
+async function activateResearchDatasetRevision(input: {
+  manifest: LocalDatasetManifest;
+  dataEpoch: string;
+  onChanged(preferredId?: string): Promise<void>;
+  onRevisionActivated?(manifest: LocalDatasetManifest): void;
+  activate?(manifest: LocalDatasetManifest, dataEpoch: string): Promise<LocalDatasetManifest>;
+}): Promise<LocalDatasetManifest> {
+  const activated = await (input.activate ?? activateLocalRevision)(input.manifest, input.dataEpoch);
+  await input.onChanged(input.manifest.dataset_id);
+  input.onRevisionActivated?.(activated);
+  return activated;
+}
+
 export function ResearchDatasetManagement({
   manifest,
   settings,
   events,
   onChanged,
+  onRevisionActivated,
   onSettingsImported,
   onError,
 }: {
@@ -41,6 +55,7 @@ export function ResearchDatasetManagement({
   settings: ChartSettings;
   events: readonly LocalAnalysisEvent[];
   onChanged(preferredId?: string): Promise<void>;
+  onRevisionActivated?(manifest: LocalDatasetManifest): void;
   onSettingsImported(settings: ChartSettings): void;
   onError(message: string): void;
 }) {
@@ -124,8 +139,12 @@ export function ResearchDatasetManagement({
               setComparison(await compareLocalRevisions(manifest.dataset_id, dataEpoch, manifest.data_epoch));
             })}
             onActivate={(dataEpoch) => void run("switching", async () => {
-              await activateLocalRevision(manifest, dataEpoch);
-              await onChanged(manifest.dataset_id);
+              await activateResearchDatasetRevision({
+                manifest,
+                dataEpoch,
+                onChanged,
+                ...(onRevisionActivated === undefined ? {} : { onRevisionActivated }),
+              });
             })}
           />
           <button type="button" className="local-project-export" disabled={busy !== null} onClick={() => void run("exporting", async () => {

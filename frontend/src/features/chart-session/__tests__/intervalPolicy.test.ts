@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  canResolveIntervalForSeriesIdentity,
   getEffectiveCustomIntervalRecords,
   getFallbackIntervalAfterCustomClear,
   getFallbackIntervalAfterCustomRemove,
@@ -15,6 +16,15 @@ const nativeIntervals = [
   { value: "1h", seconds: 3600 },
   { value: "1d", seconds: 86400 },
 ];
+const twelveDataNasdaqIdentity = {
+  providerId: "twelvedata",
+  venue: "xnas",
+  assetClass: "equity",
+  seriesVariant: "native",
+  priceAdjustment: "raw",
+  sessionVariant: "regular",
+  volumeSemantics: "shares",
+};
 
 test("exchange capability readiness distinguishes loading, explicit fallback, and ready-empty catalogs", () => {
   assert.equal(isExchangeIntervalCapabilityAvailable("loading", {}, "binance", nativeIntervals), false);
@@ -79,6 +89,50 @@ test("supported interval resolution preserves custom/native values and otherwise
     nativeIntervals: [],
     isNativeIntervalSupported: () => false,
   }), "45m", "an unavailable market must not invent a native 1h route");
+});
+
+test("non-default series identities allow native intervals but reject derived custom intervals", () => {
+  const nativeValues = nativeIntervals.map((item) => item.value);
+  const isNative = (_exchange: string, interval: string) => nativeValues.includes(interval);
+
+  assert.equal(canResolveIntervalForSeriesIdentity(
+    "twelvedata",
+    "1m",
+    nativeValues,
+    twelveDataNasdaqIdentity,
+  ), true);
+  assert.equal(canResolveIntervalForSeriesIdentity(
+    "twelvedata",
+    "7m",
+    nativeValues,
+    twelveDataNasdaqIdentity,
+  ), false);
+  assert.equal(canResolveIntervalForSeriesIdentity(
+    "binance",
+    "7m",
+    nativeValues,
+    undefined,
+  ), true);
+  assert.equal(resolveSupportedInterval({
+    exchange: "twelvedata",
+    marketType: "stock",
+    interval: "7m",
+    exchangeCatalog: {},
+    savedCustomIntervals: ["7m"],
+    nativeIntervals,
+    isNativeIntervalSupported: isNative,
+    seriesIdentity: twelveDataNasdaqIdentity,
+  }), "1h");
+  assert.equal(resolveSupportedInterval({
+    exchange: "twelvedata",
+    marketType: "stock",
+    interval: "1m",
+    exchangeCatalog: {},
+    savedCustomIntervals: ["7m"],
+    nativeIntervals,
+    isNativeIntervalSupported: isNative,
+    seriesIdentity: twelveDataNasdaqIdentity,
+  }), "1m");
 });
 
 test("custom interval removal prefers recent custom then nearest native interval", () => {

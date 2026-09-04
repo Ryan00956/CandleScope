@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import io
-import json
 import zipfile
 from pathlib import Path
 
@@ -95,10 +94,14 @@ def test_freeze_is_independent_of_user_directory(tmp_path: Path) -> None:
     assert stored["bundle_hash"] == created["bundle_hash"]
 
 
-def test_python_bundle_api_is_default_off(tmp_path: Path) -> None:
+def test_python_bundle_api_is_default_off(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from app.api.v1.backtests import _python_strategy_enabled, _require_python_strategy
     from app.backtest.errors import BacktestError
 
+    monkeypatch.setenv("BACKTEST_PYTHON_STRATEGY_ENABLED", "0")
     assert _python_strategy_enabled() is False
     with pytest.raises(BacktestError, match="default-off"):
         _require_python_strategy()

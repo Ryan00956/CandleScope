@@ -38,6 +38,7 @@ class IntervalResolutionErrorCode(str, Enum):
     PURPOSE_UNSUPPORTED = "purpose_unsupported"
     NO_NATIVE_INTERVALS = "no_native_intervals"
     NO_EXACT_BASE = "no_exact_base"
+    SERIES_IDENTITY_UNSUPPORTED = "series_identity_unsupported"
 
 
 class IntervalResolutionError(ValueError):

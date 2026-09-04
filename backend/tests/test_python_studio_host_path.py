@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -119,10 +118,10 @@ def test_python_trusted_smoke_requires_confirmation(tmp_path: Path, monkeypatch)
     service.shutdown()
 
 
-def test_python_bundle_apis_remain_default_off() -> None:
+def test_python_bundle_apis_remain_default_off(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.api.v1.backtests import _python_strategy_enabled, _require_python_strategy
 
-    assert os.environ.get("BACKTEST_PYTHON_STRATEGY_ENABLED", "0") != "1"
+    monkeypatch.setenv("BACKTEST_PYTHON_STRATEGY_ENABLED", "0")
     assert _python_strategy_enabled() is False
     with pytest.raises(BacktestError, match="default-off"):
         _require_python_strategy()

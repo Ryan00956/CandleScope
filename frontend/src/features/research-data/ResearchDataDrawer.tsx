@@ -9,6 +9,7 @@ import { ResearchDatasetManagement } from "./ResearchDatasetManagement.js";
 import type { ResearchDataLibraryController, ResearchImportSubmitInput } from "./useResearchDataLibrary.js";
 import type { ChartSettings } from "../settings/chartAppearanceSettings.js";
 import type { LocalAnalysisEvent } from "../local-data/localAnalysisTypes.js";
+import type { LocalDatasetManifest } from "../local-data/localDataTypes.js";
 
 export function ResearchDataDrawer(props: {
   open: boolean;
@@ -22,6 +23,7 @@ export function ResearchDataDrawer(props: {
   analysis?: ReactNode;
   onSelectKind(kind: ResearchSourceKind): void;
   onSelectDataset?(datasetId: string): void;
+  onRevisionActivated?(manifest: LocalDatasetManifest): void;
   onImport?(input: ResearchImportSubmitInput): Promise<unknown>;
   onClose(): void;
 }) {
@@ -40,6 +42,7 @@ function ResearchDataDrawerBody({
   analysis = null,
   onSelectKind,
   onSelectDataset,
+  onRevisionActivated,
   onImport,
   onClose,
 }: {
@@ -54,6 +57,7 @@ function ResearchDataDrawerBody({
   analysis?: ReactNode;
   onSelectKind(kind: ResearchSourceKind): void;
   onSelectDataset?(datasetId: string): void;
+  onRevisionActivated?(manifest: LocalDatasetManifest): void;
   onImport?(input: ResearchImportSubmitInput): Promise<unknown>;
   onClose(): void;
 }) {
@@ -109,6 +113,7 @@ function ResearchDataDrawerBody({
               settings={settings}
               events={events}
               onChanged={library.refresh}
+              {...(onRevisionActivated === undefined ? {} : { onRevisionActivated })}
               onSettingsImported={() => undefined}
               onError={library.setError}
             />

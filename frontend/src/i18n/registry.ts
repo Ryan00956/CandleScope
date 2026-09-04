@@ -1,4 +1,5 @@
 import { en } from "./catalogs/en.js";
+import { ptBR } from "./catalogs/pt-BR.js";
 import { zhCN } from "./catalogs/zh-CN.js";
 import type { MessageCatalog } from "./messageCatalog.js";
 
@@ -23,6 +24,13 @@ export const LOCALE_REGISTRY = {
     dateTimeLocale: "en-GB",
     numberLocale: "en-US",
     messages: en,
+  },
+  "pt-BR": {
+    nativeLabel: "Português (Brasil)",
+    dateTimeLocale: "pt-BR",
+    numberLocale: "pt-BR",
+    direction: "ltr",
+    messages: ptBR,
   },
 } as const satisfies Readonly<Record<string, LocaleDefinition>>;
 

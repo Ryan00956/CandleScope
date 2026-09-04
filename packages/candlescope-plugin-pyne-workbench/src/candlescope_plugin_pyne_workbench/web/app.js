@@ -39,6 +39,21 @@
       mainChart: "Main chart",
       theme: "Theme",
     },
+    "pt-BR": {
+      title: "Pyne Workbench",
+      statusWaiting: "Aguardando conexão do CandleScope",
+      statusRejected: "Protocolo de conexão rejeitado",
+      statusConnected: "Conectado · execute os comandos no painel do plugin",
+      statusDisposed: "Encerrado",
+      howTo: "Como usar",
+      stepOpenChart: "Abra o gráfico principal ao vivo dentro do escopo suportado.",
+      stepRunCommand: "Execute “Executar Pyne no gráfico atual” nos comandos do plugin.",
+      stepDebug: "Para depurar barra a barra, inicie uma sessão e depois envie ou visualize as barras.",
+      boundaryTitle: "Limites atuais",
+      boundaryBody: "Scripts e dados usam apenas chamadas de capacidade do Host. Os gráficos são convertidos para o Render IR v2 limitado; candle, table e linefill que não podem ser mapeados sem perda permanecem no resumo nativo do Pyne.",
+      mainChart: "Gráfico principal",
+      theme: "Tema",
+    },
   };
   let locale = "zh-CN";
 

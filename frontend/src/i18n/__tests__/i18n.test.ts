@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { en } from "../catalogs/en.js";
+import { ptBR } from "../catalogs/pt-BR.js";
 import { zhCN } from "../catalogs/zh-CN.js";
 import {
   DEFAULT_LOCALE,
@@ -46,6 +47,22 @@ test("locale normalization keeps the product default and accepts English aliases
   assert.equal(normalizeLocale("fr"), DEFAULT_LOCALE);
 });
 
+test("pt-BR is recognized from BCP 47 case variants and is not aliased from bare pt", () => {
+  assert.equal(normalizeLocale("pt-BR"), "pt-BR");
+  assert.equal(normalizeLocale("pt-br"), "pt-BR");
+  assert.equal(normalizeLocale("PT-BR"), "pt-BR");
+  assert.equal(normalizeLocale("pt-BR-u-nu-latn"), "pt-BR");
+  assert.equal(normalizeLocale(" pt-BR "), "pt-BR");
+  assert.equal(normalizeLocale("pt"), DEFAULT_LOCALE);
+  assert.equal(normalizeLocale("pt-PT"), DEFAULT_LOCALE);
+  assert.equal(isLocaleId("pt-BR"), true);
+  assert.equal(isLocaleId("pt"), false);
+  assert.equal(isLocaleId("pt-PT"), false);
+  assert.ok(LOCALE_OPTIONS.some((option) => (
+    option.id === "pt-BR" && option.nativeLabel === "Português (Brasil)"
+  )));
+});
+
 test("every registered locale exposes all host keys and a language-picker option", () => {
   for (const locale of LOCALES) {
     assert.equal(isLocaleId(locale), true);
@@ -82,6 +99,12 @@ test("format profiles preserve existing English dates and numbers and follow run
   withLocale("zh-CN", () => {
     assert.equal(getDateTimeLocale(), "zh-CN");
     assert.equal(getNumberLocale(), "zh-CN");
+  });
+  withLocale("pt-BR", () => {
+    assert.equal(getDateTimeLocale(), "pt-BR");
+    assert.equal(getNumberLocale(), "pt-BR");
+    assert.match(new Intl.NumberFormat(getNumberLocale()).format(1234567.89), /1\.234\.567,89/);
+    assert.equal(new Intl.NumberFormat(getNumberLocale()).format(1.5).includes(","), true);
   });
 });
 
@@ -123,6 +146,14 @@ test("t interpolates and switches with the locale store", () => {
       "4 hours continuous",
     );
   });
+  withLocale("pt-BR", () => {
+    assert.equal(t("shell.replay"), "Replay");
+    assert.equal(t("status.connectedTo", { exchange: "Binance" }), "Conectado a Binance");
+    assert.match(
+      t("settings.exchange.verification.durationHours", { hours: 4 }),
+      /4 horas/,
+    );
+  });
 });
 
 test("plural forms keep Chinese invariant and distinguish English one/other", () => {
@@ -135,6 +166,70 @@ test("plural forms keep Chinese invariant and distinguish English one/other", ()
     assert.equal(tPlural("status.barCount", 2), "2 bars");
     assert.equal(tPlural("status.exchangeLimitationCount", 1), "1 exchange limitation");
     assert.equal(tPlural("status.exchangeLimitationCount", 3), "3 exchange limitations");
+  });
+});
+
+const PT_BR_PLURAL_BASES = [
+  "status.barCount",
+  "status.exchangeLimitationCount",
+  "workbench.intervalCount",
+  "pane.flow.missing",
+  "pane.flow.gaps",
+] as const;
+
+test("pt-BR catalog covers every Intl.PluralRules category and selects them at runtime", () => {
+  const categories = new Intl.PluralRules("pt-BR").resolvedOptions().pluralCategories;
+  assert.deepEqual([...categories].sort(), ["many", "one", "other"]);
+  const samples: Record<string, number> = { one: 1, many: 1_000_000, other: 2 };
+  assert.equal(new Intl.PluralRules("pt-BR").select(0), "one");
+  assert.equal(new Intl.PluralRules("pt-BR").select(1.5), "one");
+  assert.equal(new Intl.PluralRules("pt-BR").select(1_000_000), "many");
+  withLocale("pt-BR", () => {
+    const messages = localeDefinition("pt-BR").messages as Readonly<Record<string, string | undefined>>;
+    for (const base of PT_BR_PLURAL_BASES) {
+      for (const category of categories) {
+        const key = category === "other" ? base : `${base}.${category}`;
+        const message = messages[key];
+        assert.equal(typeof message, "string", `missing pt-BR plural form ${key}`);
+        if (typeof message !== "string") continue;
+        assert.match(message, /\{count\}/);
+        assert.doesNotMatch(message, /ecrã|ficheiro|utilizador|percentagem/);
+      }
+      for (const [category, count] of Object.entries(samples)) {
+        const rendered = tPlural(base, count);
+        assert.match(rendered, new RegExp(String(count)));
+        assert.doesNotMatch(rendered, /ecrã|ficheiro|utilizador|percentagem/);
+        if (category === "one") assert.notEqual(rendered, tPlural(base, samples.other!));
+      }
+    }
+  });
+});
+
+test("pt-BR host chrome uses Brazilian trading copy rather than English clones or European Portuguese", () => {
+  withLocale("pt-BR", () => {
+    assert.equal(t("shell.replay"), "Replay");
+    assert.equal(t("orderBook.title"), "Livro de ofertas");
+    assert.equal(t("settings.saveAndClose"), "Salvar e fechar");
+    assert.equal(t("settings.language.title"), "Idioma da interface");
+    assert.equal(t("status.connectedTo", { exchange: "Binance" }), "Conectado a Binance");
+    assert.equal(t("settings.exchange.channel.fundingRate"), "Taxa de financiamento");
+    assert.match(t("replay.wb.noPosHint"), /posição|lucro e prejuízo|margem/i);
+    assert.match(t("backtest.title"), /backtest/i);
+    assert.equal(translateMarketType("spot"), "Spot");
+    assert.equal(translateWsStatus("live"), "Ao vivo (WebSocket)");
+    for (const key of [
+      "shell.settings", "rail.watchlist", "rail.orderBook", "plugin.title",
+      "watchlist.title", "interval.title", "alert.center", "export.title",
+    ] as const) {
+      const value = t(key);
+      assert.notEqual(value, en[key], `${key} must not copy English`);
+      assert.doesNotMatch(value, /\p{Script=Han}/u);
+      assert.doesNotMatch(value, /ecrã|ficheiro|utilizador|percentagem/i);
+    }
+    for (const [key, message] of Object.entries(ptBR)) {
+      assert.doesNotMatch(message, /ecrã|ficheiro|utilizador|percentagem/i, key);
+      assert.doesNotMatch(message, /\p{Script=Han}/u, key);
+    }
   });
 });
 
@@ -218,5 +313,29 @@ test("hydrateLocale updates the store and is idempotent for the same value", () 
     assert.equal(hydrateLocale("zh-CN"), "zh-CN");
   } finally {
     setLocale(previous);
+  }
+});
+
+test("hydrateLocale writes pt-BR document lang and ltr direction for case variants", () => {
+  const previousDocument = (globalThis as { document?: { documentElement: { lang: string; dir: string } } }).document;
+  const documentElement = { lang: "", dir: "" };
+  (globalThis as { document: { documentElement: { lang: string; dir: string } } }).document = { documentElement };
+  const previous = getLocale();
+  try {
+    assert.equal(hydrateLocale("pt-br"), "pt-BR");
+    assert.equal(getLocale(), "pt-BR");
+    assert.equal(documentElement.lang, "pt-BR");
+    assert.equal(documentElement.dir, "ltr");
+    assert.equal(hydrateLocale("PT-BR"), "pt-BR");
+    assert.equal(documentElement.lang, "pt-BR");
+    assert.equal(setLocale("pt-PT"), DEFAULT_LOCALE);
+    assert.equal(documentElement.lang, DEFAULT_LOCALE);
+  } finally {
+    setLocale(previous);
+    if (previousDocument === undefined) {
+      delete (globalThis as { document?: unknown }).document;
+    } else {
+      (globalThis as { document: unknown }).document = previousDocument;
+    }
   }
 });

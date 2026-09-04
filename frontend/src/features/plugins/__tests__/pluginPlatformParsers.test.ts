@@ -15,6 +15,7 @@ import {
   parsePluginTrustReview,
   parsePluginV1CompatibilityPreview,
 } from "../pluginPlatformParsers.js";
+import { normalizeLocale } from "../../../i18n/index.js";
 import { buildPluginRegistries } from "../pluginRegistries.js";
 
 function plugin(id = "acme.scanner", available = true) {
@@ -774,6 +775,15 @@ test("plugin-owned localizations are validated and resolved by the Host locale",
           },
         },
       },
+      "pt-BR": {
+        title: "Escanear",
+        schema: {
+          title: "Parâmetros da varredura",
+          properties: {
+            interval: { title: "Intervalo", enumLabels: ["1 minuto", "5 minutos"] },
+          },
+        },
+      },
     },
   });
   Object.assign(value.plugins[0]!.contributions[1]!, {
@@ -783,12 +793,18 @@ test("plugin-owned localizations are validated and resolved by the Host locale",
         fields: { symbol: "标的" },
         emptyState: "暂无结果",
       },
+      "pt-BR": {
+        title: "Resultados",
+        fields: { symbol: "Ativo" },
+        emptyState: "Execute o scanner para preencher os resultados",
+      },
     },
   });
 
   const parsed = parsePluginCatalog(value);
   const zh = buildPluginRegistries(parsed, "zh-CN");
   const en = buildPluginRegistries(parsed, "en");
+  const pt = buildPluginRegistries(parsed, "pt-BR");
   assert.equal(zh.commandPalette[0]?.title, "扫描");
   assert.equal(zh.commandPalette[0]?.configuration.inputSchema?.title, "扫描参数");
   assert.deepEqual(
@@ -802,6 +818,20 @@ test("plugin-owned localizations are validated and resolved by the Host locale",
   assert.equal(zhView.configuration.emptyState, "暂无结果");
   assert.equal(en.commandPalette[0]?.title, "Scan");
   assert.equal(en.sidePanel[0]?.title, "Results");
+  assert.equal(pt.commandPalette[0]?.title, "Escanear");
+  assert.equal(pt.commandPalette[0]?.configuration.inputSchema?.title, "Parâmetros da varredura");
+  assert.deepEqual(
+    pt.commandPalette[0]?.configuration.inputSchema?.properties?.interval?.enumLabels,
+    ["1 minuto", "5 minutos"],
+  );
+  const ptView = pt.sidePanel[0];
+  if (!ptView || ptView.configuration.renderer === "sandbox") assert.fail("localized pt-BR view missing");
+  assert.equal(ptView.configuration.fields[0]?.label, "Ativo");
+  assert.equal(ptView.configuration.emptyState, "Execute o scanner para preencher os resultados");
+  assert.equal(buildPluginRegistries(parsed, normalizeLocale("pt-br")).commandPalette[0]?.title, "Escanear");
+  assert.equal(buildPluginRegistries(parsed, normalizeLocale("PT-BR")).sidePanel[0]?.title, "Resultados");
+  assert.equal(buildPluginRegistries(parsed, normalizeLocale("pt")).commandPalette[0]?.title, "扫描");
+  assert.equal(buildPluginRegistries(parsed, normalizeLocale("pt-PT")).sidePanel[0]?.title, "结果");
 
   const unknownField = structuredClone(value);
   const viewLocalization = (unknownField.plugins[0]!.contributions[1] as unknown as {

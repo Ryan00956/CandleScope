@@ -28,8 +28,24 @@ CHART = {
 BARS = {
     "data": [
         {"time": 60, "open": 10, "high": 11, "low": 9, "close": 10, "volume": 1, "is_closed": True},
-        {"time": 120, "open": 10, "high": 12, "low": 9, "close": 11, "volume": 2, "is_closed": True},
-        {"time": 180, "open": 11, "high": 13, "low": 10, "close": 12, "volume": 3, "is_closed": True},
+        {
+            "time": 120,
+            "open": 10,
+            "high": 12,
+            "low": 9,
+            "close": 11,
+            "volume": 2,
+            "is_closed": True,
+        },
+        {
+            "time": 180,
+            "open": 11,
+            "high": 13,
+            "low": 10,
+            "close": 12,
+            "volume": 3,
+            "is_closed": True,
+        },
     ],
     "coverage": {"allRowsFinal": True},
 }
@@ -76,6 +92,11 @@ def test_manifest_is_independent_v2_plugin_with_bounded_capabilities() -> None:
         "strategy-provider/1",
     }
     assert "pyne-workbench" in {item.id for item in manifest.backend_entrypoints}
+    run = next(item for item in manifest.contributions if item.id == "run")
+    assert run.localizations["pt-BR"]["title"] == "Executar Pyne no gráfico atual"
+    assert run.localizations["pt-BR"]["schema"]["properties"]["source"]["title"] == (
+        "Código-fonte Pyne"
+    )
     assert [item.id for item in manifest.permissions.required] == [
         "chart.context.read",
         "market.bars.read",
@@ -91,8 +112,15 @@ def test_sandbox_ui_owns_zh_cn_and_english_copy() -> None:
     assert 'data-i18n="statusWaiting"' in html
     assert '"zh-CN": {' in javascript
     assert "en: {" in javascript
+    assert '"pt-BR": {' in javascript
+    assert "Aguardando conexão do CandleScope" in javascript
+    assert "Executar Pyne no gráfico atual" in javascript
     assert "applyLocale(payload.locale)" in javascript
     assert 'setStatus("statusRejected")' in javascript
+    assert "ecrã" not in javascript
+    assert "ficheiro" not in javascript
+    assert "utilizador" not in javascript
+    assert "percentagem" not in javascript
 
 
 def test_batch_command_reads_chart_bars_and_publishes_render_v2() -> None:
@@ -122,8 +150,7 @@ def test_batch_command_brokers_exact_request_data_before_publish() -> None:
         "run",
         {
             "source": (
-                'requested = request.security("BTCUSDT", "5m", close)\n'
-                'plot(requested, "Requested")'
+                'requested = request.security("BTCUSDT", "5m", close)\nplot(requested, "Requested")'
             ),
             "lookbackBars": 3,
         },

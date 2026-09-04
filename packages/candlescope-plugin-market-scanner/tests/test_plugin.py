@@ -20,10 +20,14 @@ from candlescope_plugin_market_scanner.plugin import (
 def test_plugin_error_localizations_accept_additional_languages_and_preserve_fallback(monkeypatch):
     error = PlatformContractError("invalid_request", "market scanner phase is invalid", "phase")
     assert _localized_contract_error(error, "ja") is error
-    monkeypatch.setitem(_CONTRACT_LOCALIZATIONS, "fr", {
-        "market scanner phase is invalid": "Phase invalide",
-        "capabilityUnavailable": "Capacité indisponible : {permission}",
-    })
+    monkeypatch.setitem(
+        _CONTRACT_LOCALIZATIONS,
+        "fr",
+        {
+            "market scanner phase is invalid": "Phase invalide",
+            "capabilityUnavailable": "Capacité indisponible : {permission}",
+        },
+    )
     translated = _localized_contract_error(error, "fr-CA")
     assert translated.message == "Phase invalide"
     assert (translated.code, translated.path) == (error.code, error.path)
@@ -32,6 +36,20 @@ def test_plugin_error_localizations_accept_additional_languages_and_preserve_fal
         "Capacité indisponible : market.bars.read"
     )
     assert _localized_contract_error(error, "zh-cn").message == "市场扫描器阶段无效"
+    assert _localized_contract_error(error, "pt-BR").message == (
+        "A fase do scanner de mercado é inválida"
+    )
+    assert _localized_contract_error(error, "pt-br").message == (
+        "A fase do scanner de mercado é inválida"
+    )
+    assert _localized_contract_error(error, "pt") is error
+    assert _localized_contract_error(error, "pt-PT") is error
+    capability_pt = PlatformContractError(
+        "unavailable", "market.bars.read capability is unavailable"
+    )
+    assert _localized_contract_error(capability_pt, "pt-BR").message == (
+        "A capacidade market.bars.read não está disponível"
+    )
 
 
 def _context(locale: str = "en") -> RequestContext:
@@ -51,6 +69,16 @@ def test_packaged_manifest_owns_entrypoint_and_localized_enum_labels() -> None:
     settings = next(item for item in manifest.contributions if item.id == "settings")
     interval = settings.localizations["zh-CN"]["schema"]["properties"]["interval"]
     assert interval["enumLabels"] == ["1 分钟", "5 分钟", "1 小时"]
+    pt_interval = settings.localizations["pt-BR"]["schema"]["properties"]["interval"]
+    assert pt_interval["enumLabels"] == ["1 minuto", "5 minutos", "1 hora"]
+    assert settings.localizations["pt-BR"]["title"] == "Configurações do scanner de mercado"
+    results = next(item for item in manifest.contributions if item.id == "results")
+    assert results.localizations["pt-BR"]["fields"]["symbol"] == "Ativo"
+    assert results.localizations["pt-BR"]["emptyState"] == (
+        "Execute o scanner para preencher os resultados"
+    )
+    summary = next(item for item in manifest.contributions if item.id == "summary")
+    assert summary.localizations["pt-BR"]["emptyState"] == "Scanner ocioso"
 
 
 def test_scan_preserves_invocation_locale_on_host_calls() -> None:

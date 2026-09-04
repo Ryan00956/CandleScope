@@ -48,6 +48,11 @@ test("settings category labels follow the active locale", () => {
     assert.equal(t(SETTINGS_CATEGORIES[0].labelKey), "Appearance");
     assert.equal(t("settings.saveAndClose"), "Save and close");
   });
+  withLocale("pt-BR", () => {
+    assert.equal(t(SETTINGS_CATEGORIES[0].labelKey), "Aparência");
+    assert.equal(t("settings.saveAndClose"), "Salvar e fechar");
+    assert.doesNotMatch(t("settings.saveAndClose"), /ecrã|ficheiro|utilizador|percentagem/);
+  });
 });
 
 test("status bar chrome switches between Chinese and English", () => {
@@ -77,6 +82,13 @@ test("status bar chrome switches between Chinese and English", () => {
   assert.match(en, /Live \(WebSocket\)/);
   assert.match(en, /Binance Spot/);
   assert.doesNotMatch(en, /已连接/);
+
+  const pt = withLocale("pt-BR", () => renderToStaticMarkup(<StatusBar status={status} />));
+  assert.match(pt, /Conectado a Binance/);
+  assert.match(pt, /2 barras/);
+  assert.match(pt, /Ao vivo \(WebSocket\)/);
+  assert.match(pt, /Binance Spot/);
+  assert.doesNotMatch(pt, /Connected to|已连接|ecrã|ficheiro|utilizador|percentagem/);
 });
 
 test("right-rail chrome follows the active locale", () => {
@@ -117,6 +129,23 @@ test("right-rail chrome follows the active locale", () => {
   assert.match(en, /Show sidebar/);
   assert.match(en, /Watchlist/);
   assert.doesNotMatch(en, /市场侧栏/);
+
+  const pt = withLocale("pt-BR", () => renderToStaticMarkup(
+    <MarketRightRailFrame
+      source="live"
+      views={viewsFor("pt-BR")}
+      openViewIds={[]}
+      panelCollapsed
+      onToggleView={() => undefined}
+      onTogglePanelCollapsed={() => undefined}
+      renderView={() => null}
+      layout={{ width: 360 }}
+    />,
+  ));
+  assert.match(pt, /aria-label="Barra lateral do mercado"/);
+  assert.match(pt, /Mostrar barra lateral/);
+  assert.match(pt, /Lista de observação/);
+  assert.doesNotMatch(pt, /Market sidebar|市场侧栏|ecrã|ficheiro|Watchlist/);
 });
 
 test("appearance panel exposes a language picker that lists both locales", () => {
@@ -127,6 +156,7 @@ test("appearance panel exposes a language picker that lists both locales", () =>
   assert.match(html, /界面语言/);
   assert.match(html, /简体中文/);
   assert.match(html, /English/);
+  assert.match(html, /Português \(Brasil\)/);
 
   const en = withLocale("en", () => renderToStaticMarkup(
     <ChartAppearancePanel
@@ -136,4 +166,15 @@ test("appearance panel exposes a language picker that lists both locales", () =>
   ));
   assert.match(en, /Interface language/);
   assert.doesNotMatch(en, /界面语言/);
+
+  const pt = withLocale("pt-BR", () => renderToStaticMarkup(
+    <ChartAppearancePanel
+      settings={{ ...DEFAULT_SETTINGS, locale: "pt-BR" }}
+      onUpdate={() => undefined}
+    />,
+  ));
+  assert.match(pt, /Idioma da interface/);
+  assert.match(pt, /Português \(Brasil\)/);
+  assert.match(pt, /value="pt-BR"/);
+  assert.doesNotMatch(pt, /界面语言|Interface language|ecrã|ficheiro|utilizador|percentagem/);
 });

@@ -42,6 +42,11 @@ test("Pyne sandbox follows locale lifecycle updates and falls back to its own En
     ["zh-CN", "zh-CN", "Pyne 工作台"],
     ["EN-us", "en", "Pyne Workbench"],
     ["fr-CA", "en", "Pyne Workbench"],
+    ["pt-BR", "pt-BR", "Pyne Workbench"],
+    ["pt-br", "pt-BR", "Pyne Workbench"],
+    ["PT-BR", "pt-BR", "Pyne Workbench"],
+    ["pt", "en", "Pyne Workbench"],
+    ["pt-PT", "en", "Pyne Workbench"],
   ]) {
     channel.onmessage({ data: {
       protocol: "candlescope.ui-bridge/1", type: "host.lifecycle",

@@ -103,6 +103,9 @@ test("blank split keeps market context while clearing links, indicators, and pri
   assert.deepEqual(blank.indicators, []);
   assert.deepEqual(blank.priceScale, { invertScale: false, priceScaleMode: 0 });
   assert.equal(blank.strategyAttachment, null);
+  assert.notEqual(blank.drawingLayerSet, cellOf(document, "cell-1").drawingLayerSet);
+  assert.equal(blank.chartSettings.chartType, "candlestick");
+  assert.equal(Object.keys(blank.chartSettings).length, 12);
 });
 
 test("close collapses parent splits without deleting the hidden cell state", () => {

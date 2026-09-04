@@ -141,6 +141,29 @@ class TradeSimulationKernel:
         )
         return self.position_qty + pending
 
+    def _opening_reserve_qty(self, order: SimulatedOrder) -> Decimal:
+        if order.reduce_only:
+            return Decimal("0")
+        if order.type == "MARKET":
+            return max(
+                Decimal("0"),
+                abs(self.projected_position_qty) - abs(self.position_qty),
+            )
+        same_side_pending = sum(
+            (
+                candidate.qty for candidate in self.orders
+                if candidate.status in {"OPEN", "PARTIAL"}
+                and not candidate.reduce_only
+                and candidate.side == order.side
+            ), Decimal("0"),
+        )
+        direction = Decimal("1") if order.side == "BUY" else Decimal("-1")
+        after = self.position_qty + direction * same_side_pending
+        prior = after - direction * order.qty
+        if order.side == "BUY":
+            return max(Decimal("0"), max(after, Decimal("0")) - max(prior, Decimal("0")))
+        return max(Decimal("0"), max(-after, Decimal("0")) - max(-prior, Decimal("0")))
+
     def snapshot(self) -> dict[str, Any]:
         return {
             **(
@@ -674,15 +697,7 @@ class TradeSimulationKernel:
             try:
                 self.account.reserve_order_margin(
                     order_id=order.order_id,
-                    qty=(
-                        Decimal("0")
-                        if order.reduce_only
-                        else max(
-                            Decimal("0"),
-                            abs(self.projected_position_qty)
-                            - abs(self.account.position_qty),
-                        )
-                    ),
+                    qty=self._opening_reserve_qty(order),
                     reference_price=self.account.mark,
                     estimated_fee=self.account.mark
                     * order.qty
@@ -747,7 +762,12 @@ class TradeSimulationKernel:
                 assert order.limit_price is not None
                 fill_qty = min(order.qty, remaining)
                 self._fill(
-                    order, event.sequence, order.limit_price, fill_qty, "PRINT_THROUGH"
+                    order,
+                    event.sequence,
+                    order.limit_price,
+                    fill_qty,
+                    "PRINT_THROUGH",
+                    maker=_print_makes_order_maker(order, event),
                 )
                 remaining -= fill_qty
             elif order.type == "STOP" and _print_triggers_stop(order, price):
@@ -757,8 +777,10 @@ class TradeSimulationKernel:
                 self._fill(order, event.sequence, fill_price, fill_qty, "STOP_PRINT")
                 remaining -= fill_qty
             elif order.type == "STOP_LIMIT":
+                activated_now = False
                 if not order.activated and _print_triggers_stop(order, price):
                     order.activated = True
+                    activated_now = True
                 if order.activated and _print_crosses_limit(order, price):
                     assert order.limit_price is not None
                     fill_qty = min(order.qty, remaining)
@@ -768,6 +790,10 @@ class TradeSimulationKernel:
                         order.limit_price,
                         fill_qty,
                         "PRINT_THROUGH",
+                        maker=(
+                            not activated_now
+                            and _print_makes_order_maker(order, event)
+                        ),
                     )
                     remaining -= fill_qty
         if self.execution_model_revision == EXECUTION_REALISM_V2:
@@ -788,6 +814,8 @@ class TradeSimulationKernel:
         price: Decimal,
         qty: Decimal,
         reason: str,
+        *,
+        maker: bool = False,
     ) -> None:
         fill_qty = min(qty, order.qty)
         reduce_only_complete = False
@@ -811,7 +839,10 @@ class TradeSimulationKernel:
             reduce_only_complete = fill_qty >= reducible
         fee_bps = (
             self.maker_fee_bps
-            if order.type in {"LIMIT", "STOP_LIMIT"}
+            if maker or (
+                order.type in {"LIMIT", "STOP_LIMIT"}
+                and reason != "PRINT_THROUGH"
+            )
             else self.taker_fee_bps
         )
         fee = price * fill_qty * fee_bps / Decimal("10000")
@@ -1003,6 +1034,14 @@ def _print_triggers_stop(order: SimulatedOrder, price: Decimal) -> bool:
     if order.side == "SELL":
         return price <= order.stop_price
     return price >= order.stop_price
+
+
+def _print_makes_order_maker(order: SimulatedOrder, event: MarketEvent) -> bool:
+    """Use tape aggressor truth; unknown aggression remains conservatively taker."""
+    buyer_is_maker = event.payload.get("is_buyer_maker")
+    if type(buyer_is_maker) is not bool:
+        return False
+    return buyer_is_maker if order.side == "BUY" else not buyer_is_maker
 
 
 def _wire_order(order: SimulatedOrder) -> dict[str, object]:

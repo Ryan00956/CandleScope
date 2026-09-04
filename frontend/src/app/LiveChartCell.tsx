@@ -33,6 +33,7 @@ import type {
 } from "../features/chart-workspace/chartWorkspaceTypes.js";
 import { chartLinkGroupDisplayName } from "../features/chart-workspace/chartWorkspaceI18n.js";
 import { chartCellStorageScope } from "../features/chart-workspace/chartWorkspaceLibrary.js";
+import { chartCellDrawingScopeBaseFromCell } from "../features/chart-workspace/chartWorkspaceDrawingLink.js";
 import type { ChartLinkCoordinator } from "../features/chart-workspace/chartLinkCoordinator.js";
 import {
   recordMultiChartCellCommit,
@@ -117,6 +118,7 @@ export interface WorkspacePortalHosts {
 }
 
 export interface ActiveChartEnvironment {
+  session: ChartSession;
   subscriptionContext: WatchlistSubscriptionContext;
   marketDataReady: boolean;
   cacheDiagnostics: () => Record<string, unknown>;
@@ -174,7 +176,6 @@ function LiveChartCell({
   windowId,
   cell,
   linkGroup,
-  linkedDrawingScopeBase,
   layoutRole,
   active,
   maximized,
@@ -394,7 +395,12 @@ function LiveChartCell({
     dataMeta: sourceMarketData.view.meta,
     seriesStore: sourceMarketData.view.seriesStore,
   });
-  const drawingScopeBase = linkedDrawingScopeBase;
+  const drawingScopeBase = chartCellDrawingScopeBaseFromCell(
+    workspaceId,
+    cell,
+    linkGroup,
+    chartSession.view,
+  );
   const drawings = useDrawingRuntime({
     chartSurfaceActions: chartSurface.actions,
     drawingScopeBase,
@@ -417,21 +423,13 @@ function LiveChartCell({
     globalSettings.setSettings(next);
   }, [cell.id, globalSettings, onChartSettingsChange]);
 
-  const [priceScale, setPriceScale] = useState(cell.priceScale);
+  const priceScale = cell.priceScale;
   const setInvertScale = useCallback((invertScale: boolean) => {
-    setPriceScale((current) => {
-      const next = { ...current, invertScale };
-      onPriceScaleChange(cell.id, next);
-      return next;
-    });
-  }, [cell.id, onPriceScaleChange]);
+    onPriceScaleChange(cell.id, { ...cell.priceScale, invertScale });
+  }, [cell.id, cell.priceScale, onPriceScaleChange]);
   const setPriceScaleMode = useCallback((priceScaleMode: number) => {
-    setPriceScale((current) => {
-      const next = { ...current, priceScaleMode };
-      onPriceScaleChange(cell.id, next);
-      return next;
-    });
-  }, [cell.id, onPriceScaleChange]);
+    onPriceScaleChange(cell.id, { ...cell.priceScale, priceScaleMode });
+  }, [cell.id, cell.priceScale, onPriceScaleChange]);
 
   const indicatorPersistence = useMemo<ActiveIndicatorPersistence>(() => ({
     controlled: true,
@@ -714,6 +712,7 @@ function LiveChartCell({
   useEffect(() => {
     if (!active) return;
     onActiveEnvironmentChange(cell.id, {
+      session: liveSourceSession,
       subscriptionContext: {
         exchangeCatalog: chartSession.view.exchangeCatalog,
         exchangeCatalogStatus: chartSession.status.exchangeCatalogStatus,
@@ -730,6 +729,7 @@ function LiveChartCell({
     chartSession.status.marketDataReady,
     chartSession.view.customIntervalRecords,
     chartSession.view.exchangeCatalog,
+    liveSourceSession,
     sourceMarketData.status.cacheDiagnostics,
     sourceMarketData.status.trimCacheEntries,
     onActiveEnvironmentChange,
@@ -863,7 +863,7 @@ function LiveChartCell({
             <ChartStrategyTesterCellBridge
               workspaceId={workspaceId}
               cellId={cell.id}
-              session={cell.session}
+              session={liveSourceSession}
               attachment={cell.strategyAttachment}
               active={active}
               panelOpen={strategyPanelOpen}

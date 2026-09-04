@@ -67,14 +67,18 @@ export function ResearchDatasetManagement({
   const [draftName, setDraftName] = useState(manifest?.name ?? "");
   const [busy, setBusy] = useState<string | null>(null);
   const packageInputRef = useRef<HTMLInputElement | null>(null);
+  const reloadGenerationRef = useRef(0);
 
   const reloadMetadata = useCallback(async () => {
+    const generation = reloadGenerationRef.current + 1;
+    reloadGenerationRef.current = generation;
     const [loadedTrash, allDatasets, loadedRevisions, loadedDetails] = await Promise.all([
       listLocalTrash(),
       listLocalDatasets(undefined, true),
       manifest === null ? Promise.resolve([]) : listLocalRevisions(manifest.dataset_id),
       manifest === null ? Promise.resolve(null) : fetchLocalRevisionDetails(manifest),
     ]);
+    if (reloadGenerationRef.current !== generation) return;
     setTrash(loadedTrash);
     setArchived(allDatasets.filter((dataset) => dataset.archived === true));
     setRevisions(loadedRevisions);

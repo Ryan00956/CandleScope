@@ -768,6 +768,7 @@ def clone_run(
             parameter=payload.parameter,
             value=payload.value,
             idempotency_key=x_idempotency_key,
+            trusted=is_trusted_operator_origin(origin_from(request.headers)),
         )
     except BacktestError as exc:
         return _error(exc)

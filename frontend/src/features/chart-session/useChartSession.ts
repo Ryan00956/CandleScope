@@ -27,6 +27,7 @@ import {
   buildChartSessionKey,
   CHART_SESSION_TRANSITION_TYPES,
   createChartSessionTransition,
+  decideControlledSessionApply,
 } from "./chartSessionTransition.js";
 import { buildChartDatasetKey } from "./chartDatasetKey.js";
 import { buildRealtimeTrackedIntervals } from "./trackedIntervalsPolicy.js";
@@ -265,13 +266,15 @@ export function useChartSession({
 
   useEffect(() => {
     if (!controlledSession || !controlledInterval || !controlledSessionKey) return;
-    // A local toolbar action renders before its onSessionChange echo reaches
-    // the workspace document. Only react to a genuinely new external key, or
-    // the stale controlled value would immediately undo the user's action.
-    if (lastControlledSessionKeyRef.current === controlledSessionKey) return;
+    const decision = decideControlledSessionApply(
+      controlledSessionKey,
+      sessionKey,
+      lastControlledSessionKeyRef.current,
+    );
+    if (decision === "hold") return;
     lastControlledSessionKeyRef.current = controlledSessionKey;
+    if (decision === "ack") return;
     const nextSession = { ...controlledSession, interval: controlledInterval };
-    if (controlledSessionKey === sessionKey) return;
     const identityChanged = nextSession.exchange !== exchange
       || nextSession.marketType !== marketType
       || nextSession.symbol !== symbol;
@@ -579,6 +582,7 @@ export function useChartSession({
         marketType,
         exchangeCatalog,
         isNativeIntervalSupported,
+        seriesIdentity,
       }));
     }
     showIntervalNotice({
@@ -587,7 +591,7 @@ export function useChartSession({
       actionLabel: t("interval.undo"),
       duration: 6500,
     });
-  }, [customIntervalRecords, exchange, exchangeCatalog, interval, marketType, nativeIntervals, removeCustomInterval, selectInterval, showIntervalNotice]);
+  }, [customIntervalRecords, exchange, exchangeCatalog, interval, marketType, nativeIntervals, removeCustomInterval, selectInterval, seriesIdentity, showIntervalNotice]);
 
   const restoreCustomIntervalAction = useCallback((): void => {
     const restored = restoreCustomInterval(lastRemovedIntervalRef.current);

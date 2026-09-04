@@ -40,11 +40,17 @@ def normalize_price_key(
     normalized_exchange = (exchange or "binance").strip().lower()
     normalized_market = (market_type or "spot").strip().lower()
     prefix, separator, _remainder = raw_symbol.partition(":")
+    encoded_prefix = prefix.strip().lower()
     if raw_symbol.count(":") >= 2 or (
         separator
-        and normalized_exchange == "binance"
-        and normalized_market == "spot"
-        and prefix.strip().lower() in _LEGACY_MARKET_PREFIXES
+        and encoded_prefix in _LEGACY_MARKET_PREFIXES
+        and (
+            encoded_prefix == normalized_market
+            or (
+                normalized_exchange == "binance"
+                and normalized_market == "spot"
+            )
+        )
     ):
         return parse_subscription_key(raw_symbol)
     normalized_symbol = normalize_exchange_symbol(

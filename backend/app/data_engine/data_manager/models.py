@@ -76,6 +76,25 @@ class SeriesKey:
     session_variant: str = DEFAULT_SESSION_VARIANT
     volume_semantics: str = DEFAULT_VOLUME_SEMANTICS
 
+    @classmethod
+    def create(
+        cls,
+        symbol: str,
+        interval: str,
+        *,
+        exchange: str = "binance",
+        market_type: str = "spot",
+        identity: KlineSeriesIdentity | None = None,
+    ) -> "SeriesKey":
+        resolved = identity or KlineSeriesIdentity.for_exchange(exchange)
+        return cls(
+            symbol,
+            interval,
+            exchange=exchange,
+            market_type=market_type,
+            **resolved.to_dict(),
+        )
+
     def __post_init__(self) -> None:
         # Normalize symbol to uppercase
         object.__setattr__(self, "symbol", self.symbol.upper().strip())

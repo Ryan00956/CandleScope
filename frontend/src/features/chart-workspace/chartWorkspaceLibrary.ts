@@ -218,6 +218,52 @@ export function cloneChartWorkspaceDocument(
   return normalizeChartWorkspace(cloneSerializable(document));
 }
 
+export function mergeLoadedChartWorkspaceLibrary(
+  current: ChartWorkspaceLibrarySnapshot,
+  loaded: ChartWorkspaceLibrarySnapshot,
+  base?: ChartWorkspaceLibrarySnapshot,
+): ChartWorkspaceLibrarySnapshot {
+  const currentById = new Map(current.workspaces.map((workspace) => [workspace.id, workspace]));
+  const baseById = new Map(base?.workspaces.map((workspace) => [workspace.id, workspace]) ?? []);
+  const seen = new Set<ChartWorkspaceId>();
+  let keptLocal = false;
+  const workspaces = loaded.workspaces.flatMap((loadedWorkspace) => {
+    seen.add(loadedWorkspace.id);
+    const local = currentById.get(loadedWorkspace.id);
+    const prior = baseById.get(loadedWorkspace.id);
+    if (base && prior && !local) {
+      keptLocal = true;
+      return [];
+    }
+    const locallyChanged = local && (
+      base
+        ? !prior || local.document.revision > prior.document.revision
+        : local.document.revision > loadedWorkspace.document.revision
+    );
+    if (locallyChanged) {
+      keptLocal = true;
+      return [local];
+    }
+    return [loadedWorkspace];
+  });
+  for (const local of current.workspaces) {
+    if (!seen.has(local.id)) {
+      const prior = baseById.get(local.id);
+      if (!base || !prior || local.document.revision > prior.document.revision) {
+        keptLocal = true;
+        workspaces.push(local);
+      }
+    }
+  }
+  const localActiveChanged = !base || current.activeWorkspaceId !== base.activeWorkspaceId;
+  const activeWorkspaceId = localActiveChanged
+    && workspaces.some((workspace) => workspace.id === current.activeWorkspaceId)
+    ? current.activeWorkspaceId
+    : loaded.activeWorkspaceId;
+  if (!keptLocal && activeWorkspaceId === loaded.activeWorkspaceId) return loaded;
+  return { ...loaded, workspaces, activeWorkspaceId };
+}
+
 export function createChartWorkspaceId(): ChartWorkspaceId {
   try {
     if (typeof globalThis.crypto?.randomUUID === "function") {

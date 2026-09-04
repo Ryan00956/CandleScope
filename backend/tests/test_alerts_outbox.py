@@ -11,6 +11,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+import app.alerts.webhook as webhook_module
 from app.alerts.facade import AlertFacade
 from app.alerts.outbox import AlertOutboxStore, AlertOutboxWorker
 from app.alerts.webhook import WebhookDeliveryResult, WebhookSender, WebhookSettings
@@ -497,5 +498,33 @@ def test_webhook_sender_rejects_private_resolution_before_http(tmp_path: Path) -
         assert result.retryable is False
         assert result.detail == "destination_not_public"
         assert called is False
+
+    asyncio.run(_run())
+
+
+def test_pinned_webhook_transport_preserves_retry_after(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _run() -> None:
+        async def resolver(_host: str, _port: int) -> list[str]:
+            return ["93.184.216.34"]
+
+        monkeypatch.setattr(
+            webhook_module,
+            "_pinned_post",
+            lambda *_args: (429, {"retry-after": "7"}),
+        )
+        sender = WebhookSender(_settings(tmp_path), resolver=resolver)
+        result = await sender.send({
+            "deliveryId": "delivery-retry-after",
+            "destination": "https://hooks.example.com/candlescope",
+            "payload": {},
+        })
+
+        assert result.delivered is False
+        assert result.retryable is True
+        assert result.status_code == 429
+        assert result.retry_after_ms == 7_000
 
     asyncio.run(_run())

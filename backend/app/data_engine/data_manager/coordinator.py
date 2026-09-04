@@ -42,6 +42,7 @@ import asyncio
 import inspect
 import logging
 import time
+from dataclasses import replace
 from typing import Any, Callable, Awaitable, Protocol, runtime_checkable
 
 from app.core.executors import run_storage
@@ -50,6 +51,11 @@ from app.data_engine.interval_resolution import (
     IntervalPurpose,
     IntervalResolver,
     IntervalRouteKind,
+)
+from app.data_engine.series_identity import (
+    identity_from_mapping,
+    identity_from_metadata,
+    resolve_kline_series_identity,
 )
 
 from ..ingestion.models import GapMarker, MarketEvent
@@ -227,6 +233,7 @@ class StreamCoordinator:
         interval: str,
         exchange: str = "binance",
         market_type: str = "spot",
+        series_identity: object | None = None,
     ) -> StreamInfo:
         """Ensure a data stream is active for (market_type, symbol, interval).
 
@@ -255,11 +262,17 @@ class StreamCoordinator:
             interval=interval,
             purpose=IntervalPurpose.REALTIME,
         )
-        key = SeriesKey(
+        identity = (
+            identity_from_mapping(route.exchange, series_identity)
+            if isinstance(series_identity, dict)
+            else resolve_kline_series_identity(route.exchange, series_identity)
+        )
+        key = SeriesKey.create(
             symbol,
             route.canonical_interval,
             exchange=route.exchange,
             market_type=route.market_type,
+            identity=identity,
         )
 
         # Already running?
@@ -311,10 +324,22 @@ class StreamCoordinator:
         interval: str,
         exchange: str = "binance",
         market_type: str = "spot",
+        series_identity: object | None = None,
     ) -> None:
         """Stop a running data stream."""
         market_type = self._normalize_market_type(market_type)
-        key = SeriesKey(symbol, interval, exchange=exchange, market_type=market_type)
+        identity = (
+            identity_from_mapping(exchange, series_identity)
+            if isinstance(series_identity, dict)
+            else resolve_kline_series_identity(exchange, series_identity)
+        )
+        key = SeriesKey.create(
+            symbol,
+            interval,
+            exchange=exchange,
+            market_type=market_type,
+            identity=identity,
+        )
         entry = self._streams.pop(key, None)
         if entry is None:
             return
@@ -363,6 +388,7 @@ class StreamCoordinator:
                 key.interval,
                 exchange=key.exchange,
                 market_type=key.market_type,
+                series_identity=key.identity,
             )
 
     # ── Public: Prewarm ──────────────────────────────────────
@@ -471,6 +497,7 @@ class StreamCoordinator:
                     key.interval,
                     exchange=key.exchange,
                     market_type=key.market_type,
+                    series_identity=key.identity,
                 )
                 reaped.append(str(key))
 
@@ -484,10 +511,18 @@ class StreamCoordinator:
         interval: str,
         exchange: str = "binance",
         market_type: str = "spot",
+        series_identity: object | None = None,
     ) -> StreamInfo | None:
         """Get info about a specific stream."""
         market_type = self._normalize_market_type(market_type)
-        key = SeriesKey(symbol, interval, exchange=exchange, market_type=market_type)
+        identity = (
+            identity_from_mapping(exchange, series_identity)
+            if isinstance(series_identity, dict)
+            else resolve_kline_series_identity(exchange, series_identity)
+        )
+        key = SeriesKey.create(
+            symbol, interval, exchange=exchange, market_type=market_type, identity=identity,
+        )
         entry = self._streams.get(key)
         return entry.info if entry else None
 
@@ -501,10 +536,18 @@ class StreamCoordinator:
         interval: str,
         exchange: str = "binance",
         market_type: str = "spot",
+        series_identity: object | None = None,
     ) -> bool:
         """Return True if a stream entry exists, regardless of status."""
         market_type = self._normalize_market_type(market_type)
-        key = SeriesKey(symbol, interval, exchange=exchange, market_type=market_type)
+        identity = (
+            identity_from_mapping(exchange, series_identity)
+            if isinstance(series_identity, dict)
+            else resolve_kline_series_identity(exchange, series_identity)
+        )
+        key = SeriesKey.create(
+            symbol, interval, exchange=exchange, market_type=market_type, identity=identity,
+        )
         return key in self._streams
 
     def mark_bar_received(self, key: SeriesKey) -> None:
@@ -521,10 +564,18 @@ class StreamCoordinator:
         interval: str,
         exchange: str = "binance",
         market_type: str = "spot",
+        series_identity: object | None = None,
     ) -> bool:
         """Check if a stream is currently active."""
         market_type = self._normalize_market_type(market_type)
-        key = SeriesKey(symbol, interval, exchange=exchange, market_type=market_type)
+        identity = (
+            identity_from_mapping(exchange, series_identity)
+            if isinstance(series_identity, dict)
+            else resolve_kline_series_identity(exchange, series_identity)
+        )
+        key = SeriesKey.create(
+            symbol, interval, exchange=exchange, market_type=market_type, identity=identity,
+        )
         entry = self._streams.get(key)
         return entry is not None and entry.info.status == StreamStatus.ACTIVE
 
@@ -651,6 +702,7 @@ class StreamCoordinator:
                 base_interval,
                 exchange=key.exchange,
                 market_type=key.market_type,
+                series_identity=key.identity,
             )
             base_key = base_info.key
 
@@ -752,7 +804,23 @@ class StreamCoordinator:
                     BarAggregator emits BarEvents, then AggregatorBridge converts
                     those into cache/storage/EventBus updates.
                     """
-                    await self._bar_aggregator.on_market_event(market_event)
+                    routed_event = market_event
+                    event_identity = identity_from_metadata(key.exchange, market_event.data)
+                    if event_identity is not None and event_identity != key.identity:
+                        logger.error(
+                            "Dropped stream event with mismatched series identity for %s",
+                            key,
+                        )
+                        return
+                    if event_identity is None and not key.identity.is_legacy_default_for(key.exchange):
+                        routed_event = replace(
+                            market_event,
+                            data={
+                                **market_event.data,
+                                "series_identity": key.identity.to_dict(),
+                            },
+                        )
+                    await self._bar_aggregator.on_market_event(routed_event)
 
                 async def on_gap(gap: GapMarker) -> None:
                     if self._gap_handler is not None:

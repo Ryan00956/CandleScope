@@ -50,6 +50,7 @@ from app.data_engine.data_manager.stream_policy import StreamEnsurePlanner
 from app.data_engine.data_manager.subscriptions import SubscriptionService, SubscriptionTier
 from app.data_engine.ingestion.models import DataSource, MarketEvent, StreamType
 from app.data_engine.history import AlwaysOpenCalendar, SessionCalendar
+from app.data_engine.series_identity import KlineSeriesIdentity
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -604,6 +605,113 @@ def test_stream_policy_plans_okx_base_stream_without_facade_logic() -> None:
 
     assert [key.interval for key in plan.aggregation_targets] == ["1h", "1m"]
     assert [key.interval for key in plan.prerequisite_streams] == ["1m"]
+
+
+def test_data_manager_preserves_nonlegacy_identity_through_realtime_lifecycle() -> None:
+    async def _run() -> None:
+        callbacks = []
+
+        class _Handle:
+            stopped = 0
+
+            async def stop(self) -> None:
+                self.stopped += 1
+
+        class _Factory:
+            handle = _Handle()
+
+            async def start(
+                self,
+                symbol,
+                interval,
+                on_market_event,
+                exchange="binance",
+                market_type="spot",
+                on_gap=None,
+            ):
+                callbacks.append(on_market_event)
+                return self.handle
+
+        identity = KlineSeriesIdentity.for_exchange(
+            "okx",
+            provider_id="vendor-x",
+            venue="okx",
+            series_variant="mark",
+        )
+        dm = DataManager()
+        factory = _Factory()
+        dm.set_ingestion_factory(factory)
+
+        await dm.ensure_stream(
+            "BTC-USDT",
+            "1m",
+            exchange="okx",
+            market_type="spot",
+            series_identity=identity,
+            consumer_id="test:series-identity",
+        )
+        bucket = dm.bar_aggregator.compute_bucket(
+            "1m",
+            int(time.time() * 1000),
+            exchange="okx",
+            series_identity=identity,
+        )
+        assert bucket is not None
+        await callbacks[0](MarketEvent(
+            event_type=StreamType.KLINE,
+            symbol="BTC-USDT",
+            exchange="okx",
+            event_time_ms=bucket,
+            received_at_ms=bucket,
+            source=DataSource.MOCK,
+            market_type="spot",
+            data={
+                "interval": "1m",
+                "open_time": bucket,
+                "close_time": bucket + 59_999,
+                "open": 100,
+                "high": 101,
+                "low": 99,
+                "close": 100,
+                "volume": 1,
+                "is_closed": False,
+            },
+        ))
+
+        assert dm.bar_aggregator.get_bucket_state(
+            "BTC-USDT",
+            "1m",
+            bucket,
+            exchange="okx",
+            market_type="spot",
+            series_identity=identity,
+        ) is not None
+        assert dm.bar_aggregator.get_bucket_state(
+            "BTC-USDT",
+            "1m",
+            bucket,
+            exchange="okx",
+            market_type="spot",
+        ) is None
+
+        await dm.release_stream(
+            "BTC-USDT",
+            "1m",
+            exchange="okx",
+            market_type="spot",
+            series_identity=identity,
+            consumer_id="test:series-identity",
+        )
+        assert dm.get_stream_info(
+            "BTC-USDT",
+            "1m",
+            exchange="okx",
+            market_type="spot",
+            series_identity=identity,
+        ) is None
+        assert factory.handle.stopped == 1
+
+    asyncio.run(_run())
 
 
 def test_data_manager_failed_start_rolls_back_all_targets_before_best_effort_stops() -> None:

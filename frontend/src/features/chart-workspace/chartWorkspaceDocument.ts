@@ -87,6 +87,16 @@ export function replaceChartWorkspaceWindow(
     };
 }
 
+export function restoreChartWorkspaceActiveWindowId(
+  original: ChartWorkspaceDocument,
+  candidate: ChartWorkspaceDocument,
+): ChartWorkspaceDocument {
+  if (candidate === original || candidate.activeWindowId === original.activeWindowId) {
+    return candidate;
+  }
+  return { ...candidate, activeWindowId: original.activeWindowId };
+}
+
 export function advanceChartWorkspaceRevision(
   current: ChartWorkspaceDocument,
   candidate: ChartWorkspaceDocument,
@@ -96,6 +106,16 @@ export function advanceChartWorkspaceRevision(
     throw new ChartWorkspaceRevisionConflictError(0, current.revision);
   }
   return { ...candidate, revision: current.revision + 1 };
+}
+
+export function commitChartWorkspaceDocument(
+  original: ChartWorkspaceDocument,
+  candidate: ChartWorkspaceDocument,
+): ChartWorkspaceDocument {
+  return advanceChartWorkspaceRevision(
+    original,
+    restoreChartWorkspaceActiveWindowId(original, candidate),
+  );
 }
 
 export function compareAndSwapChartWorkspaceDocument(

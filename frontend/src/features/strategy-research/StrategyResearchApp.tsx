@@ -339,6 +339,7 @@ export default function StrategyResearchApp({
         onSelectKind={onSelectKind}
         onSelectDataset={onSelectDataset}
         onRevisionActivated={handleRevisionActivated}
+        onSettingsImported={setSettings}
         onImport={async (input) => {
           const dataset = await library.handleImport(input);
           if (dataset) dispatchImportedSource(dispatch, runtime.state.source.source, dataset);

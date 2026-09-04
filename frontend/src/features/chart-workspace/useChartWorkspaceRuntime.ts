@@ -17,6 +17,7 @@ import {
   createChartWorkspaceId,
   createChartWorkspaceRecord,
   createTemplateChartWorkspaceDocument,
+  mergeLoadedChartWorkspaceLibrary,
   normalizeChartWorkspaceLibrary,
   normalizeChartWorkspaceName,
   nextChartWorkspaceTemplateBuiltinName,
@@ -93,6 +94,7 @@ import {
   advanceChartWorkspaceRevision,
   chartWorkspaceCell,
   chartWorkspaceWindow,
+  commitChartWorkspaceDocument,
   replaceChartWorkspaceWindow,
   updateChartWorkspaceCellStrategyAttachment,
 } from "./chartWorkspaceDocument.js";
@@ -344,6 +346,7 @@ export function useChartWorkspaceRuntime(
   const saveSequenceRef = useRef(0);
   const mountedRef = useRef(true);
   const busSequenceRef = useRef(-1);
+  const busSnapshotRef = useRef<ChartWorkspaceLibrarySnapshot | null>(null);
   const loadedPersistenceModeRef = useRef<ChartWorkspacePersistenceMode | null>(null);
 
   useLayoutEffect(() => {
@@ -365,11 +368,17 @@ export function useChartWorkspaceRuntime(
       // replace the optimistic document with the stale authoritative snapshot.
       if (cancelled || !state.ready || !state.snapshot || state.sequence <= busSequenceRef.current) return;
       busSequenceRef.current = state.sequence;
-      const snapshot = normalizeChartWorkspaceLibrary(
+      const loadedSnapshot = normalizeChartWorkspaceLibrary(
         state.snapshot,
         activeWorkspace(state.snapshot),
         services.now(),
       );
+      const snapshot = mergeLoadedChartWorkspaceLibrary(
+        libraryRef.current,
+        loadedSnapshot,
+        busSnapshotRef.current ?? undefined,
+      );
+      busSnapshotRef.current = loadedSnapshot;
       setLibrary(snapshot);
       setReady(true);
       setPersistence((current) => ({
@@ -392,7 +401,7 @@ export function useChartWorkspaceRuntime(
         applyBusState(state);
         return;
       }
-      setLibrary(snapshot);
+      setLibrary(mergeLoadedChartWorkspaceLibrary(libraryRef.current, snapshot));
       setReady(true);
       setPersistence({
         saveState: "saved",
@@ -425,6 +434,7 @@ export function useChartWorkspaceRuntime(
         const result = await services.workspaceBus.commit(snapshot);
         if (!result.ok) throw new Error(result.message || "WorkspaceBus revision conflict");
         busSequenceRef.current = Math.max(busSequenceRef.current, result.sequence);
+        busSnapshotRef.current = result.snapshot ?? snapshot;
         persistenceMode = services.workspaceBus.isWriter()
           ? await services.repository.saveLibrary(result.snapshot ?? snapshot)
           : "workspace-bus";
@@ -500,7 +510,7 @@ export function useChartWorkspaceRuntime(
         : workspace.document;
       const candidate = updater(scopedDocument);
       if (candidate === scopedDocument) return current;
-      const document = advanceChartWorkspaceRevision(workspace.document, candidate);
+      const document = commitChartWorkspaceDocument(workspace.document, candidate);
       const updated = { ...workspace, document, updatedAt };
       return {
         ...current,
@@ -526,7 +536,7 @@ export function useChartWorkspaceRuntime(
       const { scopedDocument, result } = scopedEdit;
       const committedResult = {
         ...result,
-        document: advanceChartWorkspaceRevision(workspace.document, result.document),
+        document: commitChartWorkspaceDocument(workspace.document, result.document),
       };
       const updated = { ...workspace, document: committedResult.document, updatedAt };
       const history = currentState.layoutHistoryByWorkspace[workspace.id]
@@ -1012,7 +1022,7 @@ export function useChartWorkspaceRuntime(
         : workspace.document;
       const candidate = closeChartWorkspaceWindowCandidate(scopedDocument, windowId);
       if (candidate === scopedDocument) return currentState;
-      const document = advanceChartWorkspaceRevision(workspace.document, candidate);
+      const document = commitChartWorkspaceDocument(workspace.document, candidate);
       const history = currentState.layoutHistoryByWorkspace[workspace.id];
       return {
         library: {

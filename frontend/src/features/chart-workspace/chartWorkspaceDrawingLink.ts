@@ -1,7 +1,10 @@
 import { chartCellStorageScope } from "./chartWorkspaceLibrary.js";
 import { chartWorkspaceCell } from "./chartWorkspaceDocument.js";
+import type { ChartSession } from "../chart-session/chartSessionTypes.js";
 import type {
   ChartCellId,
+  ChartCellState,
+  ChartLinkGroup,
   ChartWorkspaceDocument,
   ChartWorkspaceId,
 } from "./chartWorkspaceTypes.js";
@@ -38,32 +41,51 @@ function scopeSegment(value: string): string {
  * encoded in this base match. A temporary market mismatch therefore cannot
  * expose or mutate another market's layer.
  */
-export function chartCellDrawingScopeBase(
+export function chartCellDrawingScopeBaseFromCell(
   workspaceId: ChartWorkspaceId,
-  document: ChartWorkspaceDocument,
-  cellId: ChartCellId,
+  cell: ChartCellState,
+  group: ChartLinkGroup | null,
+  session: ChartSession,
 ): string {
-  const cell = chartWorkspaceCell(document, cellId);
-  const groupId = cell.linkGroupId;
-  const group = groupId === null ? null : document.linkGroups[groupId];
   if (!group || !group.peerPolicy.drawings) {
-    return [
+    const parts = [
       "workspace",
-      chartCellStorageScope(workspaceId, cellId),
-      cell.session.exchange,
-      cell.session.marketType,
-      cell.session.symbol,
-    ].join(":");
+      chartCellStorageScope(workspaceId, cell.id),
+      session.exchange,
+      session.marketType,
+      session.symbol,
+    ];
+    // Keep the original default-layer scope readable while making alternate
+    // layers genuinely independent for unlinked cells as well.
+    if (cell.drawingLayerSet !== "1") parts.push(`layer-${cell.drawingLayerSet}`);
+    return parts.join(":");
   }
   return [
     "workspace-link",
     scopeSegment(workspaceId),
-    groupId,
+    cell.linkGroupId,
     `layer-${cell.drawingLayerSet}`,
-    cell.session.exchange,
-    cell.session.marketType,
-    cell.session.symbol,
+    session.exchange,
+    session.marketType,
+    session.symbol,
   ].join(":");
+}
+
+export function chartCellDrawingScopeBase(
+  workspaceId: ChartWorkspaceId,
+  document: ChartWorkspaceDocument,
+  cellId: ChartCellId,
+  session?: ChartSession,
+): string {
+  const cell = chartWorkspaceCell(document, cellId);
+  const groupId = cell.linkGroupId;
+  const group = groupId === null ? null : document.linkGroups[groupId] ?? null;
+  return chartCellDrawingScopeBaseFromCell(
+    workspaceId,
+    cell,
+    group,
+    session ?? cell.session,
+  );
 }
 
 export function summarizeChartDrawingLink(

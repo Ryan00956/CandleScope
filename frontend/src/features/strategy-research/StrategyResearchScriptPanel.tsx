@@ -124,30 +124,35 @@ export function StrategyResearchScriptPanel({
   useEffect(() => {
     const generation = restoreGenerationRef.current + 1;
     restoreGenerationRef.current = generation;
+    const previousPending = pendingSaveRef.current;
+    const previousOperation = pendingSavePromiseRef.current;
     if (draftId === null) {
       restorePromiseRef.current = null;
       setDraft(null);
       setSource("");
       setCursor(null);
       setOpenEditor(false);
+      void flushStrategyResearchDraft(previousPending, saveDraft, previousOperation).catch(() => undefined);
       return undefined;
     }
     let cancelled = false;
-    const restore = draftStore.load(draftId).then((view) => {
-      if (cancelled || restoreGenerationRef.current !== generation) return;
-      if (view.record === null) {
-        setDraft(null);
-        setSource("");
-        setCursor(null);
-        setOpenEditor(false);
-        onDraftId(null);
-        return;
-      }
-      setDraft(view.record);
-      setSource(view.record.source);
-      setCursor(view.record.cursor);
-      setOpenEditor(true);
-    });
+    const restore = flushStrategyResearchDraft(previousPending, saveDraft, previousOperation)
+      .then(() => draftStore.load(draftId))
+      .then((view) => {
+        if (cancelled || restoreGenerationRef.current !== generation) return;
+        if (view.record === null) {
+          setDraft(null);
+          setSource("");
+          setCursor(null);
+          setOpenEditor(false);
+          onDraftId(null);
+          return;
+        }
+        setDraft(view.record);
+        setSource(view.record.source);
+        setCursor(view.record.cursor);
+        setOpenEditor(true);
+      });
     restorePromiseRef.current = restore;
     void restore.catch(() => undefined);
     const unsubscribe = draftStore.subscribe((id, view) => {
@@ -157,7 +162,13 @@ export function StrategyResearchScriptPanel({
         || id !== draftId
         || view.record === null
       ) return;
+      const pending = pendingSaveRef.current;
+      const dirty = pendingStrategyDraftSave(pending) !== null;
       setDraft(view.record);
+      if (!dirty) {
+        setSource(view.record.source);
+        setCursor(view.record.cursor);
+      }
     });
     return () => {
       cancelled = true;
@@ -165,7 +176,7 @@ export function StrategyResearchScriptPanel({
       if (restoreGenerationRef.current === generation) restoreGenerationRef.current += 1;
       if (restorePromiseRef.current === restore) restorePromiseRef.current = null;
     };
-  }, [draftId, draftStore, onDraftId]);
+  }, [draftId, draftStore, onDraftId, saveDraft]);
 
   useEffect(() => {
     const input = pendingStrategyDraftSave({ draft, source, cursor });

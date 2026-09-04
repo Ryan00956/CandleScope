@@ -99,7 +99,11 @@ from app.data_engine.market_data.ports import (
     OrderBookPort,
     PublicTradePort,
 )
-from app.data_engine.series_identity import KlineSeriesIdentity
+from app.data_engine.series_identity import (
+    KlineSeriesIdentity,
+    identity_from_mapping,
+    resolve_kline_series_identity,
+)
 from app.exchanges import supports_history_identity
 
 from .aggregator_bridge import AggregatorBridge
@@ -159,6 +163,15 @@ from ..bar_aggregator import (
 )
 
 logger = logging.getLogger("data_manager")
+
+
+def _stream_identity_kwargs(key: SeriesKey) -> dict[str, KlineSeriesIdentity]:
+    """Keep legacy coordinator ports compatible while preserving real identities."""
+    return (
+        {}
+        if key.identity.is_legacy_default_for(key.exchange)
+        else {"series_identity": key.identity}
+    )
 
 _CACHE_ACCESS_FLUSH_SECONDS = 0.25
 _CACHE_ACCESS_BATCH_SIZE = 256
@@ -678,6 +691,9 @@ class DataManager:
             end_ms = int(getattr(gap, "gap_end", 0) or 0) - interval_ms
             if start_ms <= 0 or end_ms <= 0 or start_ms > end_ms:
                 return
+            metadata = None
+            if not key.identity.is_legacy_default_for(key.exchange):
+                metadata = {"series_identity": key.identity.to_dict()}
             self._call_backfill_trigger(
                 key.symbol,
                 key.interval,
@@ -687,6 +703,7 @@ class DataManager:
                 key.market_type,
                 reason="tail_gap",
                 requester="ingestion_gap",
+                metadata=metadata,
             )
 
         self.coordinator.set_gap_handler(_handle_ingestion_gap)
@@ -1680,6 +1697,7 @@ class DataManager:
         exchange: str = "binance",
         market_type: str = "spot",
         *,
+        series_identity: Any = None,
         focus_scope: str = "foreground",
         subscription_tier: str | None = None,
         consumer_id: str | None = None,
@@ -1695,12 +1713,14 @@ class DataManager:
             interval,
             exchange=exchange,
             market_type=market_type,
+            series_identity=series_identity,
         )
         had_stream = self.coordinator.has_stream(
             plan.requested.symbol,
             plan.requested.interval,
             exchange=plan.requested.exchange,
             market_type=plan.requested.market_type,
+            **_stream_identity_kwargs(plan.requested),
         )
 
         lease_keys = self._stream_plan_lease_keys(plan)
@@ -1730,6 +1750,7 @@ class DataManager:
                     target.interval,
                     exchange=target.exchange,
                     market_type=target.market_type,
+                    series_identity=target.identity,
                 )
 
             for stream in plan.prerequisite_streams:
@@ -1738,6 +1759,7 @@ class DataManager:
                     stream.interval,
                     exchange=stream.exchange,
                     market_type=stream.market_type,
+                    **_stream_identity_kwargs(stream),
                 )
                 self._require_active_stream(
                     prerequisite_info,
@@ -1749,6 +1771,7 @@ class DataManager:
                 plan.requested.interval,
                 exchange=plan.requested.exchange,
                 market_type=plan.requested.market_type,
+                **_stream_identity_kwargs(plan.requested),
             )
             self._require_active_stream(info, role="requested")
 
@@ -1760,6 +1783,7 @@ class DataManager:
                 had_stream=had_stream,
                 focus_scope=focus_scope,
                 subscription_tier=subscription_tier,
+                series_identity=plan.requested.identity,
             )
         except Exception:
             empty_keys = self._release_stream_leases(
@@ -1779,6 +1803,7 @@ class DataManager:
                     key.interval,
                     exchange=key.exchange,
                     market_type=key.market_type,
+                    series_identity=key.identity,
                 )
             for key in empty_keys:
                 try:
@@ -1787,6 +1812,7 @@ class DataManager:
                         key.interval,
                         exchange=key.exchange,
                         market_type=key.market_type,
+                        **_stream_identity_kwargs(key),
                     )
                 except Exception:
                     logger.exception("Failed to stop rolled-back stream %s", key)
@@ -1811,6 +1837,7 @@ class DataManager:
         exchange: str = "binance",
         market_type: str = "spot",
         *,
+        series_identity: Any = None,
         consumer_id: str | None = None,
         focus_scope: str = "foreground",
         subscription_tier: str | None = None,
@@ -1839,6 +1866,7 @@ class DataManager:
             interval,
             exchange=exchange,
             market_type=market_type,
+            series_identity=series_identity,
         )
         consumer = self._stream_consumer_id(
             consumer_id,
@@ -1862,6 +1890,7 @@ class DataManager:
                 key.interval,
                 exchange=key.exchange,
                 market_type=key.market_type,
+                series_identity=key.identity,
             )
         for key in empty_keys:
             await self.coordinator.stop_stream(
@@ -1869,6 +1898,7 @@ class DataManager:
                 key.interval,
                 exchange=key.exchange,
                 market_type=key.market_type,
+                **_stream_identity_kwargs(key),
             )
 
     async def stop_stream(
@@ -1877,20 +1907,41 @@ class DataManager:
         interval: str,
         exchange: str = "binance",
         market_type: str = "spot",
+        *,
+        series_identity: Any = None,
     ) -> None:
         """Stop a running data stream."""
         market_type = self._normalize_market_type(market_type)
         with self._storage_gc_guard:
-            removed = self._stream_leases.pop(
-                SeriesKey(symbol, interval, exchange=exchange, market_type=market_type),
-                None,
+            identity = (
+                identity_from_mapping(exchange, series_identity)
+                if isinstance(series_identity, dict)
+                else resolve_kline_series_identity(exchange, series_identity)
             )
+            key = SeriesKey.create(
+                symbol,
+                interval,
+                exchange=exchange,
+                market_type=market_type,
+                identity=identity,
+            )
+            removed = self._stream_leases.pop(key, None)
             if removed is not None:
                 self._mark_storage_gc_protection_changed()
         self.bar_aggregator.remove_target(
-            symbol, interval, exchange=exchange, market_type=market_type,
+            symbol,
+            interval,
+            exchange=exchange,
+            market_type=market_type,
+            series_identity=key.identity,
         )
-        await self.coordinator.stop_stream(symbol, interval, exchange=exchange, market_type=market_type)
+        await self.coordinator.stop_stream(
+            symbol,
+            interval,
+            exchange=exchange,
+            market_type=market_type,
+            **_stream_identity_kwargs(key),
+        )
 
     def _stream_consumer_id(
         self,
@@ -2210,10 +2261,30 @@ class DataManager:
         interval: str,
         exchange: str = "binance",
         market_type: str = "spot",
+        *,
+        series_identity: Any = None,
     ) -> StreamInfo | None:
         """Get info about a specific stream."""
         market_type = self._normalize_market_type(market_type)
-        return self.coordinator.get_stream_info(symbol, interval, exchange=exchange, market_type=market_type)
+        identity = (
+            identity_from_mapping(exchange, series_identity)
+            if isinstance(series_identity, dict)
+            else resolve_kline_series_identity(exchange, series_identity)
+        )
+        key = SeriesKey.create(
+            symbol,
+            interval,
+            exchange=exchange,
+            market_type=market_type,
+            identity=identity,
+        )
+        return self.coordinator.get_stream_info(
+            symbol,
+            interval,
+            exchange=exchange,
+            market_type=market_type,
+            **_stream_identity_kwargs(key),
+        )
 
     def get_all_streams(self) -> list[StreamInfo]:
         """Get info about all active streams."""

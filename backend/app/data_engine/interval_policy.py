@@ -544,9 +544,16 @@ def aggregate_kline_rows(
 
         expected_opens: list[int] = []
         component_open_ms = bucket_open_ms
+        source_spec = parse_interval_spec(source_interval)
         while component_open_ms < bucket_end_ms:
             expected_opens.append(component_open_ms)
-            component_open_ms += source_ms
+            if source_spec is not None:
+                next_open_ms = source_spec.next_ms(component_open_ms)
+                if next_open_ms <= component_open_ms:
+                    break
+                component_open_ms = next_open_ms
+            else:
+                component_open_ms += source_ms
         # A source interval that crosses a target boundary cannot prove an
         # exact target candle.  This is expected for some exotic interval
         # pairs; callers can still fall back to authoritative history.

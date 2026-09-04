@@ -228,6 +228,11 @@ def test_price_key_helpers_normalize_exchange_market_and_symbol() -> None:
     )
     assert normalize_price_key("okx:spot:eth-usdt") == ("okx", "spot", "ETH-USDT")
     assert normalize_price_key("swap:btc-usdt") == ("okx", "swap", "BTC-USDT")
+    assert normalize_price_key(
+        "futures:ETHUSDT",
+        exchange="binance",
+        market_type="futures",
+    ) == ("binance", "futures", "ETHUSDT")
     assert normalize_price_key("twelvedata:stock:AAPL:NASDAQ") == (
         "twelvedata",
         "stock",

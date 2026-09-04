@@ -14,6 +14,7 @@ from app.simulation.linear_perp_account_v2 import (
 )
 from app.simulation import DualClockSimulationKernel
 from app.simulation.kernel import SimulationKernel
+from app.simulation.trade_kernel import TradeSimulationKernel
 from app.backtest.reports import build_report
 from app.backtest.service import BacktestService
 from app.core.config import load_backtest_settings
@@ -280,6 +281,27 @@ def test_closing_quantity_does_not_freeze_new_exposure_margin() -> None:
         order_id="close", qty=account.opening_quantity(side="SELL", qty=Decimal("2"))
     )
     assert account.frozen_order_margin == 0
+
+
+@pytest.mark.parametrize("kernel", [SimulationKernel(), TradeSimulationKernel()])
+def test_opposite_working_orders_keep_independent_directional_margin(kernel) -> None:
+    kernel.account = ready(balance="10000", leverage="10")
+    kernel._enqueue(
+        {"side": "BUY", "type": "LIMIT", "qty": "10", "limit_price": "90"},
+        current_sequence=0,
+    )
+    kernel._enqueue(
+        {"side": "SELL", "type": "LIMIT", "qty": "10", "limit_price": "110"},
+        current_sequence=0,
+    )
+
+    assert kernel.projected_position_qty == Decimal("0")
+    assert kernel.account.order_margins == {
+        "ord-1": Decimal("100"),
+        "ord-2": Decimal("100"),
+    }
+    kernel.account.release_order_margin("ord-1")
+    assert kernel.account.order_margins == {"ord-2": Decimal("100")}
 
 
 def test_checkpoint_restore_preserves_account_and_ledger_hash() -> None:

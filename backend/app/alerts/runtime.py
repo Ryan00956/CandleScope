@@ -250,10 +250,13 @@ class AlertRuntimeEngine:
         target = self._target(rule)
         window = merge_alert_bar_window(self._bar_windows.get(rule_id, []), event.bar)
         self._bar_windows[rule_id] = window
-        indicator_values = compute_alert_indicator_values(window)
+        closed_window = [
+            bar for bar in window if getattr(bar, "is_closed", True)
+        ]
+        indicator_values = compute_alert_indicator_values(closed_window)
 
         if event.event_type == DataEventType.BAR_AMENDED:
-            frontier = window[-1]
+            frontier = closed_window[-1] if closed_window else window[-1]
             current = {**self._bar_values(frontier), **indicator_values}
             self._previous_values[rule_id] = current
             self._update_diagnostics(
@@ -452,13 +455,17 @@ class AlertRuntimeEngine:
 
         bars = getattr(result, "bars", None)
         if bars:
-            window = list(bars)[-ALERT_INDICATOR_HISTORY_LIMIT:]
+            window = [
+                bar for bar in list(bars)[-ALERT_INDICATOR_HISTORY_LIMIT:]
+                if getattr(bar, "is_closed", True)
+            ][-ALERT_INDICATOR_HISTORY_LIMIT:]
             self._bar_windows[rule_id] = window
             indicators = compute_alert_indicator_values(window)
-            self._previous_values[rule_id] = {
-                **self._bar_values(window[-1]),
-                **indicators,
-            }
+            if window:
+                self._previous_values[rule_id] = {
+                    **self._bar_values(window[-1]),
+                    **indicators,
+                }
         else:
             window = []
             indicators = compute_alert_indicator_values(window)

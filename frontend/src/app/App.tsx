@@ -410,6 +410,7 @@ function LiveWorkspaceApp() {
   const [workspacePanelOpen, setWorkspacePanelOpen] = useState(false);
   const currentActiveEnvironment = activeEnvironment?.workspaceId === workspace.view.activeWorkspaceId
     && activeEnvironment.workspaceRuntimeKey === workspace.view.runtimeKey
+    && activeEnvironment.cellId === workspace.view.activeCellId
     ? activeEnvironment
     : null;
 
@@ -456,7 +457,7 @@ function LiveWorkspaceApp() {
     trimChartDataCacheEntries: currentActiveEnvironment?.value.trimCacheEntries ?? null,
   });
 
-  const activeSession = workspace.view.activeCell.session;
+  const activeSession = currentActiveEnvironment?.value.session ?? workspace.view.activeCell.session;
   const activeSubscriptionContext = currentActiveEnvironment?.value.subscriptionContext;
   useWatchlistFullCacheRuntime({
     enabled: currentActiveEnvironment?.value.marketDataReady === true,

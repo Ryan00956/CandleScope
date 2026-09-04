@@ -307,13 +307,26 @@ export function assignCellLinkGroup(
   const cell = chartWorkspaceCell(document, cellId);
   const normalizedGroupId = groupId && document.linkGroups[groupId] ? groupId : null;
   if (cell.linkGroupId === normalizedGroupId) return document;
-  return {
+  let next: ChartWorkspaceDocument = {
     ...document,
     cells: {
       ...document.cells,
       [cellId]: { ...cell, linkGroupId: normalizedGroupId },
     },
   };
+  if (normalizedGroupId === null) return next;
+  const group = next.linkGroups[normalizedGroupId];
+  if (!group) return next;
+  const peerAnchor = Object.values(next.cells).find((candidate) => (
+    candidate.id !== cellId && candidate.linkGroupId === normalizedGroupId
+  ));
+  const parentAnchor = group.parentId
+    ? Object.values(next.cells).find((candidate) => candidate.linkGroupId === group.parentId)
+    : undefined;
+  const anchor = peerAnchor ?? parentAnchor;
+  if (!anchor) return next;
+  next = applyLinkedSessionUpdate(next, anchor.id, anchor.session);
+  return applyLinkedIndicatorUpdate(next, anchor.id, anchor.indicators);
 }
 
 export function chartLinkGroupDepth(

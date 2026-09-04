@@ -121,6 +121,7 @@ export interface CustomIntervalRemoveFallbackOptions {
   marketType?: MarketType;
   exchangeCatalog?: ExchangeCatalog | null;
   isNativeIntervalSupported: NativeIntervalSupport;
+  seriesIdentity?: KlineSeriesIdentityInput | null;
 }
 
 export function getFallbackIntervalAfterCustomRemove({
@@ -131,6 +132,7 @@ export function getFallbackIntervalAfterCustomRemove({
   marketType,
   exchangeCatalog = null,
   isNativeIntervalSupported,
+  seriesIdentity = null,
 }: CustomIntervalRemoveFallbackOptions): IntervalString {
   const nativeEquivalent = nativeIntervals.find((item) => (
     intervalsSemanticallyEquivalent(item.value, removedInterval)
@@ -144,12 +146,15 @@ export function getFallbackIntervalAfterCustomRemove({
     "history",
   )) return removedInterval;
 
+  const nativeValues = nativeIntervals.map((item) => item.value);
   const recentCustom = customIntervalRecords
     .filter((record) => (
       !intervalsSemanticallyEquivalent(record.value, removedInterval)
-      && canResolveIntervalFromNativeValues(
+      && canResolveIntervalForSeriesIdentity(
+        exchange,
         record.value,
-        nativeIntervals.map((item) => item.value),
+        nativeValues,
+        seriesIdentity,
       )
     ))
     .sort((left, right) => (right.lastUsedAt || 0) - (left.lastUsedAt || 0))[0];

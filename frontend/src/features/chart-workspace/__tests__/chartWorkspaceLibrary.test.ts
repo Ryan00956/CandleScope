@@ -7,6 +7,7 @@ import {
   createChartWorkspaceRecord,
   createDefaultChartWorkspaceRecord,
   createTemplateChartWorkspaceDocument,
+  mergeLoadedChartWorkspaceLibrary,
   mergeWorkspaceRecoveryRecord,
   nextChartWorkspaceTemplateBuiltinName,
   normalizeChartWorkspaceLibrary,
@@ -196,6 +197,57 @@ test("a newer synchronous recovery record wins over an older async snapshot", ()
   }, recovery, recovery.id);
   assert.equal(merged.workspaces[0]!.name, "恢复名称");
   assert.equal(merged.activeWorkspaceId, recovery.id);
+});
+
+test("loaded libraries keep newer in-memory workspace revisions", () => {
+  const stored = createDefaultChartWorkspaceRecord();
+  const local = createChartWorkspaceRecord({
+    id: stored.id,
+    name: stored.name,
+    document: { ...stored.document, revision: stored.document.revision + 3 },
+    createdAt: stored.createdAt,
+    updatedAt: stored.updatedAt + 1,
+  });
+  const merged = mergeLoadedChartWorkspaceLibrary(
+    { activeWorkspaceId: local.id, workspaces: [local] },
+    { activeWorkspaceId: stored.id, workspaces: [stored] },
+  );
+  assert.equal(merged.workspaces[0]!.document.revision, local.document.revision);
+});
+
+test("authoritative bus snapshots delete unchanged local workspaces", () => {
+  const retained = createDefaultChartWorkspaceRecord();
+  const deleted = createChartWorkspaceRecord({ id: "deleted", name: "删除我" });
+  const base = { activeWorkspaceId: deleted.id, workspaces: [retained, deleted] };
+  const loaded = { activeWorkspaceId: retained.id, workspaces: [retained] };
+
+  const merged = mergeLoadedChartWorkspaceLibrary(base, loaded, base);
+
+  assert.deepEqual(merged.workspaces.map((workspace) => workspace.id), [retained.id]);
+  assert.equal(merged.activeWorkspaceId, retained.id);
+});
+
+test("three-way bus merge preserves only genuinely local workspace changes", () => {
+  const stored = createDefaultChartWorkspaceRecord();
+  const local = createChartWorkspaceRecord({
+    id: stored.id,
+    name: stored.name,
+    document: { ...stored.document, revision: stored.document.revision + 1 },
+    createdAt: stored.createdAt,
+    updatedAt: stored.updatedAt + 1,
+  });
+  const created = createChartWorkspaceRecord({ id: "local-new", name: "本地新建" });
+  const remote = createChartWorkspaceRecord({ id: "remote-new", name: "远端新建" });
+
+  const merged = mergeLoadedChartWorkspaceLibrary(
+    { activeWorkspaceId: created.id, workspaces: [local, created] },
+    { activeWorkspaceId: remote.id, workspaces: [stored, remote] },
+    { activeWorkspaceId: stored.id, workspaces: [stored] },
+  );
+
+  assert.equal(merged.workspaces.find((workspace) => workspace.id === stored.id)?.document.revision, local.document.revision);
+  assert.deepEqual(new Set(merged.workspaces.map((workspace) => workspace.id)), new Set([stored.id, created.id, remote.id]));
+  assert.equal(merged.activeWorkspaceId, created.id);
 });
 
 test("cell persistence scopes preserve the migrated default workspace and isolate named workspaces", () => {

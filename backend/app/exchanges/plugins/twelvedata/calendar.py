@@ -8,7 +8,11 @@ import exchange_calendars as xcals
 import pandas as pd
 
 from app.data_engine.history import AlwaysOpenCalendar, SessionCalendar
-from app.data_engine.interval_policy import is_monthly_interval, parse_interval_ms
+from app.data_engine.interval_policy import (
+    compute_bucket_end_ms,
+    is_monthly_interval,
+    parse_interval_ms,
+)
 
 
 _DAY_MS = 86_400_000
@@ -65,19 +69,11 @@ class TwelveDataUsEquityCalendar(SessionCalendar):
     def expected_opens(self, start_ms: int, end_ms: int, interval: str):
         if self._uses_provider_dates(interval):
             return self._provider_dates.expected_opens(start_ms, end_ms, interval)
-        start_date = datetime.fromtimestamp(
-            int(start_ms) / 1000,
-            tz=timezone.utc,
-        ).astimezone(_NEW_YORK).date()
-        end_date = datetime.fromtimestamp(
-            int(end_ms) / 1000,
-            tz=timezone.utc,
-        ).astimezone(_NEW_YORK).date()
-        if start_date < _SCHEDULE_START or end_date > _SCHEDULE_END:
+        clipped = _clip_intraday_range(start_ms, end_ms)
+        if clipped is None or clipped != (int(start_ms), int(end_ms)):
             raise ValueError(
                 "Twelve Data US-equity intraday calendar is available only "
-                f"from {_SCHEDULE_START.isoformat()} through "
-                f"{_SCHEDULE_END.isoformat()}"
+                f"from {_SCHEDULE_START.isoformat()} through {_SCHEDULE_END.isoformat()}"
             )
         return super().expected_opens(start_ms, end_ms, interval)
 
@@ -89,12 +85,29 @@ class TwelveDataUsEquityCalendar(SessionCalendar):
             tz=timezone.utc,
         ).astimezone(_NEW_YORK).date()
         if open_date < _SCHEDULE_START or open_date > _SCHEDULE_END:
-            raise ValueError(
-                "Twelve Data US-equity intraday calendar is available only "
-                f"from {_SCHEDULE_START.isoformat()} through "
-                f"{_SCHEDULE_END.isoformat()}"
-            )
+            width_ms = parse_interval_ms(interval)
+            if width_ms is None:
+                return super().bucket_end_ms(open_ms, interval)
+            return compute_bucket_end_ms(int(open_ms), width_ms, interval=interval)
         return super().bucket_end_ms(open_ms, interval)
+
+    def cash_session_end_ms(self, open_ms: int) -> int | None:
+        """Return the exclusive UTC end of the cash session for a provider date.
+
+        Daily Twelve Data rows are labeled at UTC midnight of the venue
+        calendar date, so the session lookup must use that UTC date rather
+        than the New York civil date of the timestamp.
+        """
+        open_date = datetime.fromtimestamp(
+            int(open_ms) / 1000,
+            tz=timezone.utc,
+        ).date()
+        windows = self._windows_for_date(open_date)
+        if not windows:
+            return None
+        last = windows[-1]
+        end_date = open_date + timedelta(days=1) if last.crosses_midnight else open_date
+        return self._to_utc_ms(end_date, last.end)
 
 
 def _local_time(value: object) -> time:
@@ -145,6 +158,47 @@ def _xnys_overrides() -> tuple[
                     overrides[current] = normalised
         current += timedelta(days=1)
     return overrides, tuple(holidays)
+
+
+def _clip_intraday_range(start_ms: int, end_ms: int) -> tuple[int, int] | None:
+    start_date = datetime.fromtimestamp(
+        int(start_ms) / 1000,
+        tz=timezone.utc,
+    ).astimezone(_NEW_YORK).date()
+    end_date = datetime.fromtimestamp(
+        int(end_ms) / 1000,
+        tz=timezone.utc,
+    ).astimezone(_NEW_YORK).date()
+    if end_date < _SCHEDULE_START or start_date > _SCHEDULE_END:
+        return None
+    clipped_start = int(start_ms)
+    clipped_end = int(end_ms)
+    if start_date < _SCHEDULE_START:
+        clipped_start = int(
+            datetime(
+                _SCHEDULE_START.year,
+                _SCHEDULE_START.month,
+                _SCHEDULE_START.day,
+                tzinfo=_NEW_YORK,
+            ).astimezone(timezone.utc).timestamp()
+            * 1000
+        )
+    if end_date > _SCHEDULE_END:
+        clipped_end = int(
+            datetime(
+                _SCHEDULE_END.year,
+                _SCHEDULE_END.month,
+                _SCHEDULE_END.day,
+                23,
+                59,
+                59,
+                tzinfo=_NEW_YORK,
+            ).astimezone(timezone.utc).timestamp()
+            * 1000
+        )
+    if clipped_start > clipped_end:
+        return None
+    return clipped_start, clipped_end
 
 
 def build_provider_date_calendar(*, calendar_id: str) -> TwelveDataProviderDateCalendar:

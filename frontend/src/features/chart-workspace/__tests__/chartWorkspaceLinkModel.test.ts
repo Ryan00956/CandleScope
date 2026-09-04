@@ -7,6 +7,7 @@ import {
   applyChartLinkSettingsPatch,
   applyLinkedIndicatorUpdate,
   applyLinkedSessionUpdate,
+  assignCellLinkGroup,
   cloneChartLinkSettings,
   resolveChartLinkTargets,
   resolveChartLinkTargetsForChannel,
@@ -137,4 +138,20 @@ test("time-anchor and date-range settings remain mutually exclusive", () => {
   const range = applyChartLinkSettingsPatch(anchor, { dateRange: true });
   assert.equal(range.dateRange, true);
   assert.equal(range.timeAnchor, false);
+});
+
+test("joining a link group adopts the group's current session", () => {
+  const document = createDefaultChartWorkspace();
+  chartWorkspaceCell(document, "cell-1").session = {
+    ...chartWorkspaceCell(document, "cell-1").session,
+    symbol: "ETHUSDT",
+  };
+  chartWorkspaceCell(document, "cell-2").linkGroupId = null;
+  chartWorkspaceCell(document, "cell-2").session = {
+    ...chartWorkspaceCell(document, "cell-2").session,
+    symbol: "BTCUSDT",
+  };
+  const next = assignCellLinkGroup(document, "cell-2", DEFAULT_CHART_LINK_GROUP_ID);
+  assert.equal(chartWorkspaceCell(next, "cell-2").linkGroupId, DEFAULT_CHART_LINK_GROUP_ID);
+  assert.equal(chartWorkspaceCell(next, "cell-2").session.symbol, "ETHUSDT");
 });

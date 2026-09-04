@@ -372,9 +372,13 @@ class ExchangeIngestionFactory:
         for message in messages:
             if history:
                 message.source = DataSource.HTTP_BACKFILL
-            event = normalizer.parse(message)
-            if event is not None:
-                events.append(event)
+            parse_many = getattr(normalizer, "parse_many", None)
+            if callable(parse_many):
+                events.extend(event for event in parse_many(message) if event is not None)
+            else:
+                event = normalizer.parse(message)
+                if event is not None:
+                    events.append(event)
         return events
 
     async def market_rate_limit_admission(

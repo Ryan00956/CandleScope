@@ -199,7 +199,7 @@ class AggregatorBridge:
                 exc,
                 exc_info=True,
             )
-            return None
+            return False
 
     @staticmethod
     def _authoritative_storage_source(

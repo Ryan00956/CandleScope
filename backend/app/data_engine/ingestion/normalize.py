@@ -51,7 +51,7 @@ class NormalizeLayer:
         """Normalize a raw message and forward the resulting MarketEvent."""
         self._metrics.inc("messages_received")
         try:
-            event = self.parse_raw(msg)
+            events = self.parse_all(msg)
         except Exception as exc:
             self._metrics.inc("parse_errors")
             logger.warning(
@@ -61,16 +61,24 @@ class NormalizeLayer:
             )
             return
 
-        if event is None:
+        if not events:
             self._metrics.inc("messages_skipped")
             return
 
-        self._metrics.inc("events_emitted")
-        self._metrics.mark("last_event_at")
-
-        if self._on_event:
-            await self._on_event(event)
+        for event in events:
+            self._metrics.inc("events_emitted")
+            self._metrics.mark("last_event_at")
+            if self._on_event:
+                await self._on_event(event)
 
     def parse_raw(self, msg: RawMessage) -> MarketEvent | None:
         """Parse a raw message into a MarketEvent without triggering callbacks."""
-        return self._normalizer.parse(msg)
+        events = self.parse_all(msg)
+        return events[-1] if events else None
+
+    def parse_all(self, msg: RawMessage) -> list[MarketEvent]:
+        parse_many = getattr(self._normalizer, "parse_many", None)
+        if callable(parse_many):
+            return list(parse_many(msg) or [])
+        event = self._normalizer.parse(msg)
+        return [] if event is None else [event]

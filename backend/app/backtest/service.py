@@ -899,8 +899,16 @@ class BacktestService:
         }
 
     def clone_run_parameter(
-        self, run_id: str, *, parameter: str, value: object, idempotency_key: str
+        self,
+        run_id: str,
+        *,
+        parameter: str,
+        value: object,
+        idempotency_key: str,
+        trusted: bool = False,
     ) -> dict[str, object]:
+        from app.core.operator_origin import effective_python_runtime_mode
+
         origin = self.get_run(run_id)
         config = json.loads(str(origin["config_json"]))
         parameters = dict(config.get("parameters") or {})
@@ -916,6 +924,13 @@ class BacktestService:
         parameters[parameter] = value
         config["parameters"] = parameters
         config.pop("study_id", None)
+        mode, confirmed = effective_python_runtime_mode(
+            config.get("python_runtime_mode"),
+            bool(config.get("python_trusted_confirmed")),
+            trusted=trusted,
+        )
+        config["python_runtime_mode"] = mode
+        config["python_trusted_confirmed"] = confirmed
         return self.create_run(config, idempotency_key=idempotency_key)
 
     def create_review_bridge(

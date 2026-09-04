@@ -10,6 +10,11 @@ from app.data_engine.interval_resolution import (
     IntervalResolver,
     IntervalRouteKind,
 )
+from app.data_engine.series_identity import (
+    KlineSeriesIdentity,
+    identity_from_mapping,
+    resolve_kline_series_identity,
+)
 
 from .models import SeriesKey
 
@@ -41,6 +46,7 @@ class StreamEnsurePlanner:
         *,
         exchange: str = "binance",
         market_type: str = "spot",
+        series_identity: KlineSeriesIdentity | None = None,
     ) -> StreamEnsurePlan:
         route = self._interval_resolver.resolve(
             exchange=exchange,
@@ -48,11 +54,17 @@ class StreamEnsurePlanner:
             interval=interval,
             purpose=IntervalPurpose.REALTIME,
         )
-        requested = SeriesKey(
+        identity = (
+            identity_from_mapping(route.exchange, series_identity)
+            if isinstance(series_identity, dict)
+            else resolve_kline_series_identity(route.exchange, series_identity)
+        )
+        requested = SeriesKey.create(
             symbol,
             route.canonical_interval,
             exchange=route.exchange,
             market_type=route.market_type,
+            identity=identity,
         )
         targets = [requested]
         prerequisites: list[SeriesKey] = []
@@ -61,22 +73,24 @@ class StreamEnsurePlanner:
             base_spec = parse_interval_spec(route.base_interval or "")
             if base_spec is None:  # guarded by resolver
                 raise ValueError(f"invalid resolved realtime base: {route.base_interval!r}")
-            base = SeriesKey(
+            base = SeriesKey.create(
                 symbol,
                 base_spec.canonical,
                 exchange=route.exchange,
                 market_type=route.market_type,
+                identity=identity,
             )
             targets.append(base)
             prerequisites.append(base)
         elif self._needs_policy_base_stream(requested):
             policy = self._realtime_policy(requested.exchange)
             base_spec = parse_interval_spec(policy.base_interval)
-            base = SeriesKey(
+            base = SeriesKey.create(
                 symbol,
                 base_spec.canonical if base_spec is not None else policy.base_interval,
                 exchange=route.exchange,
                 market_type=route.market_type,
+                identity=identity,
             )
             targets.append(base)
             prerequisites.append(base)

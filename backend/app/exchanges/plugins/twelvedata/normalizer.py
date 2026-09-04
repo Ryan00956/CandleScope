@@ -69,12 +69,13 @@ class TwelveDataNormalizer:
             market_type = str(self._descriptor.market_type or "").strip().lower()
             close_time = spec.next_ms(open_time) - 1
             if market_type in {"stock", "etf"}:
-                try:
-                    close_time = _us_equity_calendar().bucket_end_ms(open_time, interval) - 1
-                except ValueError:
-                    # The XNYS schedule is intentionally finite. Preserve the
-                    # provider's older/newer history with its nominal edge.
-                    pass
+                calendar = _us_equity_calendar()
+                if spec.canonical == "1d":
+                    session_end = calendar.cash_session_end_ms(open_time)
+                    if session_end is not None:
+                        close_time = session_end - 1
+                else:
+                    close_time = calendar.bucket_end_ms(open_time, interval) - 1
             volume_value = row.get("volume")
             volume_available = volume_value not in (None, "")
             if market_type in {"stock", "etf"} and not volume_available:

@@ -73,6 +73,7 @@ class AggregatorWarmStartService:
         had_stream: bool,
         focus_scope: str = "foreground",
         subscription_tier: str | None = None,
+        series_identity: Any = None,
     ) -> None:
         """Seed the relevant active bucket after DataManager starts a stream."""
         market_type = self._normalize_market_type(market_type)
@@ -93,6 +94,7 @@ class AggregatorWarmStartService:
                     focus_scope=focus_scope,
                     subscription_tier=subscription_tier,
                     route=route,
+                    series_identity=series_identity,
                 )
             except Exception as exc:
                 logger.warning(
@@ -142,6 +144,7 @@ class AggregatorWarmStartService:
         focus_scope: str = "foreground",
         subscription_tier: str | None = None,
         route: IntervalRoute | None = None,
+        series_identity: Any = None,
     ) -> None:
         """Seed the currently-forming custom bucket from recent base bars."""
         symbol = symbol.upper()
@@ -175,8 +178,15 @@ class AggregatorWarmStartService:
             order="ASC",
             exchange=exchange,
             market_type=market_type,
+            series_identity=series_identity,
         )
-        base_key = SeriesKey(symbol, base_interval, exchange=exchange, market_type=market_type)
+        base_key = SeriesKey.create(
+            symbol,
+            base_interval,
+            exchange=exchange,
+            market_type=market_type,
+            identity=series_identity,
+        )
         rows_by_open_time = {int(row["open_time"]): dict(row) for row in rows}
         for open_time_ms, row in rows_by_open_time.items():
             row.setdefault(
@@ -281,6 +291,7 @@ class AggregatorWarmStartService:
             bucket_start_ms,
             exchange=exchange,
             market_type=market_type,
+            series_identity=series_identity,
         )
         if self._custom_bucket_is_synced(
             current_state,
@@ -289,7 +300,13 @@ class AggregatorWarmStartService:
             market_type=market_type,
         ):
             self._cache.upsert(
-                SeriesKey(symbol, interval, exchange=exchange, market_type=market_type),
+                SeriesKey.create(
+                    symbol,
+                    interval,
+                    exchange=exchange,
+                    market_type=market_type,
+                    identity=series_identity,
+                ),
                 BarData.from_bar_state(current_state),
             )
             return
@@ -329,6 +346,7 @@ class AggregatorWarmStartService:
                     explicit_fields=explicit_fields,
                 ),
                 sequence=open_time_ms,
+                series_identity=series_identity,
             ))
 
         rebuilt_state = await self._bar_aggregator.replay_components(
@@ -340,13 +358,15 @@ class AggregatorWarmStartService:
             bucket_start_ms=bucket_start_ms,
             expire_existing=True,
             emit_events=False,
+            series_identity=series_identity,
         )
         if rebuilt_state is not None:
-            key = SeriesKey(
+            key = SeriesKey.create(
                 symbol,
                 interval,
                 exchange=exchange,
                 market_type=market_type,
+                identity=series_identity,
             )
             rebuilt_bar = BarData.from_bar_state(rebuilt_state)
             # Component replay is an internal reconstruction, not N live bar

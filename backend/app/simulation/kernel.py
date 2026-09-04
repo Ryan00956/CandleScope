@@ -169,6 +169,29 @@ class SimulationKernel:
         )
         return self.account.position_qty + pending
 
+    def _opening_reserve_qty(self, order: SimulatedOrder) -> Decimal:
+        if order.reduce_only:
+            return Decimal("0")
+        if order.type == "MARKET":
+            return max(
+                Decimal("0"),
+                abs(self.projected_position_qty) - abs(self.account.position_qty),
+            )
+        same_side_pending = sum(
+            (
+                candidate.qty for candidate in self.orders
+                if candidate.status in {"OPEN", "PARTIAL"}
+                and not candidate.reduce_only
+                and candidate.side == order.side
+            ), Decimal("0"),
+        )
+        direction = Decimal("1") if order.side == "BUY" else Decimal("-1")
+        after = self.account.position_qty + direction * same_side_pending
+        prior = after - direction * order.qty
+        if order.side == "BUY":
+            return max(Decimal("0"), max(after, Decimal("0")) - max(prior, Decimal("0")))
+        return max(Decimal("0"), max(-after, Decimal("0")) - max(-prior, Decimal("0")))
+
     def snapshot(self) -> dict:
         return {
             "scale_stream_decisions": self.scale_stream_decisions,
@@ -696,15 +719,7 @@ class SimulationKernel:
             try:
                 self.account.reserve_order_margin(
                     order_id=order.order_id,
-                    qty=(
-                        Decimal("0")
-                        if order.reduce_only
-                        else max(
-                            Decimal("0"),
-                            abs(self.projected_position_qty)
-                            - abs(self.account.position_qty),
-                        )
-                    ),
+                    qty=self._opening_reserve_qty(order),
                     reference_price=reference,
                     estimated_fee=reference * order.qty * fee_bps / Decimal("10000"),
                 )
@@ -772,7 +787,7 @@ class SimulationKernel:
                     used = self._fill(
                         order,
                         event.sequence,
-                        _stop_price(order),
+                        _adverse_stop_fill_price(order, open_, self.slippage_bps),
                         "WORST_CASE_STOP",
                         remaining_capacity,
                     )
@@ -796,7 +811,7 @@ class SimulationKernel:
                     order,
                     event.sequence,
                     order.limit_price,
-                    "LIMIT_THROUGH",
+                    "LIMIT_THROUGH" if _limit_gapped(order, open_) else "LIMIT_TOUCH",
                     remaining_capacity,
                 )
             elif order.type == "STOP_LIMIT":
@@ -808,14 +823,14 @@ class SimulationKernel:
                         order,
                         event.sequence,
                         order.limit_price,
-                        "LIMIT_THROUGH",
+                        "LIMIT_THROUGH" if _limit_gapped(order, open_) else "LIMIT_TOUCH",
                         remaining_capacity,
                     )
             elif order.type == "STOP" and _stop_hit(order, high, low):
                 used = self._fill(
                     order,
                     event.sequence,
-                    _stop_price(order),
+                    _adverse_stop_fill_price(order, open_, self.slippage_bps),
                     "STOP_TRIGGER",
                     remaining_capacity,
                 )
@@ -870,7 +885,7 @@ class SimulationKernel:
         order.fill_sequence = sequence
         fee_bps = (
             self.maker_fee_bps
-            if order.type in {"LIMIT", "STOP_LIMIT"}
+            if reason in {"LIMIT_TOUCH"}
             else self.taker_fee_bps
         )
         fee = price * fill_qty * fee_bps / Decimal("10000")
@@ -1214,3 +1229,22 @@ def _stop_price(order: SimulatedOrder) -> Decimal:
         return order.limit_price
     assert order.stop_price is not None
     return order.stop_price
+
+
+def _limit_gapped(order: SimulatedOrder, open_price: Decimal) -> bool:
+    if order.limit_price is None:
+        return False
+    if order.side == "BUY":
+        return open_price < order.limit_price
+    return open_price > order.limit_price
+
+
+def _adverse_stop_fill_price(
+    order: SimulatedOrder,
+    open_price: Decimal,
+    slippage_bps: Decimal,
+) -> Decimal:
+    stop = _stop_price(order)
+    base = max(open_price, stop) if order.side == "BUY" else min(open_price, stop)
+    slip = base * slippage_bps / Decimal("10000")
+    return base + slip if order.side == "BUY" else base - slip

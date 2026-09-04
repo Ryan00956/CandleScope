@@ -48,3 +48,22 @@ export function createChartSessionTransition({
     createdAt: Date.now(),
   };
 }
+
+export type ControlledSessionApplyDecision = "ack" | "hold" | "apply";
+
+/**
+ * Local toolbar edits render before the workspace document echoes them.
+ * Hold any intermediate document key while local state has un-echoed edits;
+ * apply only when the cell is idle (local still matches the last applied key).
+ */
+export function decideControlledSessionApply(
+  controlledSessionKey: string,
+  sessionKey: string,
+  lastControlledSessionKey: string | null,
+): ControlledSessionApplyDecision {
+  if (controlledSessionKey === sessionKey) return "ack";
+  if (lastControlledSessionKey !== null && sessionKey !== lastControlledSessionKey) {
+    return "hold";
+  }
+  return "apply";
+}

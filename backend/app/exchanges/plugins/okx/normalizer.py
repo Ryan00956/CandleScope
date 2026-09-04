@@ -35,7 +35,6 @@ _OKX_INTERVALS_TO_INTERNAL = {
     "12Hutc": "12h",
     "1D": "1d",
     "1Dutc": "1d",
-    "2Dutc": "1d",
     "3D": "3d",
     "3Dutc": "3d",
     "1W": "1w",
@@ -53,29 +52,47 @@ class OkxNormalizer:
         self._descriptor = descriptor
 
     def parse(self, msg: RawMessage) -> MarketEvent | None:
+        events = self.parse_many(msg)
+        return events[-1] if events else None
+
+    def parse_many(self, msg: RawMessage) -> list[MarketEvent]:
         if msg.source == DataSource.WEBSOCKET:
-            return self._parse_ws(msg)
+            return self._parse_ws_many(msg)
         if msg.source in (DataSource.HTTP, DataSource.HTTP_BACKFILL):
-            return self._parse_http(msg)
+            event = self._parse_http(msg)
+            return [] if event is None else [event]
         logger.warning("Unknown data source: %s", msg.source)
-        return None
+        return []
 
     def _parse_ws(self, msg: RawMessage) -> MarketEvent | None:
+        events = self._parse_ws_many(msg)
+        return events[-1] if events else None
+
+    def _parse_ws_many(self, msg: RawMessage) -> list[MarketEvent]:
         payload = msg.payload
         if not isinstance(payload, dict):
-            return None
+            return []
 
         rows = payload.get("data")
         if not isinstance(rows, list) or not rows:
-            return None
+            return []
 
         arg = payload.get("arg") if isinstance(payload.get("arg"), dict) else {}
         channel = str(arg.get("channel", ""))
         if msg.stream_type in (StreamType.TICKER, StreamType.MINI_TICKER):
-            return self._parse_ticker_row(rows[0], msg)
+            event = self._parse_ticker_row(rows[0], msg)
+            return [] if event is None else [event]
         if msg.stream_type != StreamType.KLINE:
-            return None
-        return self._parse_kline_row(rows[0], msg, channel=channel)
+            return []
+        events = [
+            event
+            for event in (
+                self._parse_kline_row(row, msg, channel=channel) for row in rows
+            )
+            if event is not None
+        ]
+        events.sort(key=lambda item: item.event_time_ms)
+        return events
 
     def _parse_http(self, msg: RawMessage) -> MarketEvent | None:
         if msg.stream_type in (StreamType.TICKER, StreamType.MINI_TICKER):

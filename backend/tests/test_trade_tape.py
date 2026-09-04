@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -46,6 +47,7 @@ def _trade(
     price: str = "100",
     qty: str = "1",
     source_sequence: int | None = None,
+    is_buyer_maker: bool = False,
 ) -> MarketEvent:
     return MarketEvent(
         sequence=sequence,
@@ -57,7 +59,7 @@ def _trade(
             "tie_break": f"{kind}:{sequence}",
             "price": price,
             "qty": qty,
-            "is_buyer_maker": False,
+            "is_buyer_maker": is_buyer_maker,
         },
     )
 
@@ -122,6 +124,26 @@ def test_limit_uses_print_cross_not_bar_high_low() -> None:
     )
     with pytest.raises(MarketDatasetError):
         TradeSimulationKernel().run(bar_like, lambda *args: [])
+
+
+def test_resting_limit_fee_uses_trade_aggressor_side() -> None:
+    events = (
+        _trade(1, price="105"),
+        _trade(2, price="100", is_buyer_maker=True),
+    )
+
+    def place_bid(_visible, event):
+        if event.sequence == 1:
+            return [{"side": "BUY", "type": "LIMIT", "qty": "1", "limit_price": "100"}]
+        return []
+
+    result = TradeSimulationKernel(
+        maker_fee_bps=Decimal("2"),
+        taker_fee_bps=Decimal("10"),
+    ).run(events, place_bid)
+
+    assert result.fills[0]["reason"] == "PRINT_THROUGH"
+    assert Decimal(str(result.fills[0]["fee"])) == Decimal("0.02")
 
 
 def test_gap_and_sequence_reset_fail_closed() -> None:

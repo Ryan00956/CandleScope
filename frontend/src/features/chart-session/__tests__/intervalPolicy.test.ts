@@ -155,6 +155,15 @@ test("custom interval removal prefers recent custom then nearest native interval
     exchange: "binance",
     isNativeIntervalSupported: isNative,
   }), "1h");
+  assert.equal(getFallbackIntervalAfterCustomRemove({
+    removedInterval: "7m",
+    customIntervalRecords: [customInterval("45m", 2)],
+    nativeIntervals,
+    exchange: "twelvedata",
+    marketType: "stock",
+    isNativeIntervalSupported: isNative,
+    seriesIdentity: twelveDataNasdaqIdentity,
+  }), "1m");
   assert.equal(getFallbackIntervalAfterCustomClear({
     interval: "50m",
     nativeIntervals,

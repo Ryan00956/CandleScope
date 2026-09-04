@@ -671,7 +671,9 @@ def _reconcile(
     entries = account.get("ledger_entries") or []
     funding_entries = sum(
         (
-            _decimal(item.get("amount", "0"))
+            _decimal(
+                item.get("amount", (item.get("details") or {}).get("amount", "0"))
+            )
             for item in entries
             if item.get("kind") == "FUNDING"
         ),

@@ -1,13 +1,18 @@
 import {
+  CHART_DRAWING_LAYER_SET_IDS,
+  CELL_CHART_SETTING_KEYS,
   type ChartCellCreationMode,
+  type ChartCellChartSettings,
   type ChartCellId,
   type ChartCellState,
+  type ChartDrawingLayerSetId,
   type ChartWindowId,
   type ChartWindowState,
   type ChartWorkspaceDocument,
   type ChartWorkspaceSplitDirection,
   type ChartWorkspaceTemplateId,
 } from "./chartWorkspaceTypes.js";
+import { DEFAULT_SETTINGS } from "../settings/chartAppearanceSettings.js";
 import {
   LEGACY_VISIBLE_CELLS_PER_WINDOW,
   MAX_CELLS_PER_APP,
@@ -76,6 +81,21 @@ function copiedCell(source: ChartCellState, id: ChartCellId): ChartCellState {
   return { ...cloneSerializable(source), id };
 }
 
+function blankDrawingLayer(
+  source: ChartCellState,
+  existing: ChartCellState | undefined,
+): ChartDrawingLayerSetId {
+  return CHART_DRAWING_LAYER_SET_IDS.find((layer) => (
+    layer !== source.drawingLayerSet && layer !== existing?.drawingLayerSet
+  )) ?? "1";
+}
+
+function blankChartSettings(): ChartCellChartSettings {
+  return Object.fromEntries(
+    CELL_CHART_SETTING_KEYS.map((key) => [key, DEFAULT_SETTINGS[key]]),
+  ) as ChartCellChartSettings;
+}
+
 function blankCell(
   source: ChartCellState,
   existing: ChartCellState | undefined,
@@ -89,6 +109,8 @@ function blankCell(
     priceScale: { invertScale: false, priceScaleMode: 0 },
     indicators: [],
     strategyAttachment: null,
+    drawingLayerSet: blankDrawingLayer(source, existing),
+    chartSettings: blankChartSettings(),
   };
 }
 

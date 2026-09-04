@@ -6,9 +6,11 @@ from app.core.config import getenv as app_getenv
 import asyncio
 import hashlib
 import hmac
+import http.client
 import ipaddress
 import json
 import socket
+import ssl
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -216,20 +218,22 @@ class WebhookSender:
         parsed = urlsplit(destination)
         host = str(parsed.hostname or "")
         port = int(parsed.port or (443 if parsed.scheme.lower() == "https" else 80))
-        if not self.settings.allow_private_network:
-            try:
-                addresses = await asyncio.wait_for(
-                    self._resolver(host, port),
-                    timeout=self.settings.request_timeout_ms / 1000,
-                )
-            except TimeoutError:
-                return WebhookDeliveryResult(False, True, "dns_error:timeout")
-            except (OSError, socket.gaierror) as exc:
-                return WebhookDeliveryResult(False, True, f"dns_error:{type(exc).__name__}")
-            if not addresses:
-                return WebhookDeliveryResult(False, True, "dns_error:no_addresses")
-            if any(not _address_is_public(address) for address in addresses):
-                return WebhookDeliveryResult(False, False, "destination_not_public")
+        addresses: list[str] = []
+        try:
+            addresses = await asyncio.wait_for(
+                self._resolver(host, port),
+                timeout=self.settings.request_timeout_ms / 1000,
+            )
+        except TimeoutError:
+            return WebhookDeliveryResult(False, True, "dns_error:timeout")
+        except (OSError, socket.gaierror) as exc:
+            return WebhookDeliveryResult(False, True, f"dns_error:{type(exc).__name__}")
+        if not addresses:
+            return WebhookDeliveryResult(False, True, "dns_error:no_addresses")
+        if not self.settings.allow_private_network and any(
+            not _address_is_public(address) for address in addresses
+        ):
+            return WebhookDeliveryResult(False, False, "destination_not_public")
 
         payload = entry.get("payload") if isinstance(entry.get("payload"), dict) else {}
         body = json.dumps(
@@ -258,25 +262,39 @@ class WebhookSender:
             ).hexdigest()
             headers["X-CandleScope-Signature"] = f"sha256={digest}"
 
+        response_headers: dict[str, str] = {}
         try:
-            async with httpx.AsyncClient(
-                timeout=self.settings.request_timeout_ms / 1000,
-                follow_redirects=False,
-                trust_env=False,
-                transport=self._transport,
-            ) as client:
-                response = await client.post(destination, content=body, headers=headers)
-        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            if self._transport is not None:
+                async with httpx.AsyncClient(
+                    timeout=self.settings.request_timeout_ms / 1000,
+                    follow_redirects=False,
+                    trust_env=False,
+                    transport=self._transport,
+                ) as client:
+                    response = await client.post(destination, content=body, headers=headers)
+                    status = int(response.status_code)
+                    response_headers = {
+                        key.lower(): value for key, value in response.headers.items()
+                    }
+            else:
+                status, response_headers = await asyncio.to_thread(
+                    _pinned_post,
+                    parsed,
+                    addresses[0],
+                    body,
+                    headers,
+                    self.settings.request_timeout_ms / 1000,
+                )
+        except (httpx.TimeoutException, httpx.TransportError, TimeoutError, OSError) as exc:
             return WebhookDeliveryResult(False, True, f"transport_error:{type(exc).__name__}")
 
-        status = int(response.status_code)
         if 200 <= status < 300:
             return WebhookDeliveryResult(True, False, f"http_{status}", status_code=status)
 
         retryable = status in {408, 425, 429} or 500 <= status < 600
         retry_after_ms: int | None = None
         if retryable:
-            raw_retry_after = response.headers.get("Retry-After", "").strip()
+            raw_retry_after = response_headers.get("retry-after", "").strip()
             try:
                 retry_after_ms = max(0, int(raw_retry_after) * 1_000)
             except ValueError:
@@ -288,3 +306,63 @@ class WebhookSender:
             status_code=status,
             retry_after_ms=retry_after_ms,
         )
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, host: str, *, resolved_ip: str, port: int, timeout: float) -> None:
+        super().__init__(host, port, timeout=timeout, context=ssl.create_default_context())
+        self._resolved_ip = resolved_ip
+
+    def connect(self) -> None:
+        raw = socket.create_connection((self._resolved_ip, self.port), self.timeout)
+        try:
+            self.sock = self._context.wrap_socket(raw, server_hostname=self.host)
+        except BaseException:
+            raw.close()
+            raise
+
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, host: str, *, resolved_ip: str, port: int, timeout: float) -> None:
+        super().__init__(host, port, timeout=timeout)
+        self._resolved_ip = resolved_ip
+
+    def connect(self) -> None:
+        self.sock = socket.create_connection((self._resolved_ip, self.port), self.timeout)
+
+
+def _pinned_post(
+    parsed: Any,
+    resolved_ip: str,
+    body: bytes,
+    headers: dict[str, str],
+    timeout: float,
+) -> tuple[int, dict[str, str]]:
+    host = str(parsed.hostname or "")
+    port = int(parsed.port or (443 if parsed.scheme.lower() == "https" else 80))
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+    connection: http.client.HTTPConnection
+    if parsed.scheme.lower() == "https":
+        connection = _PinnedHTTPSConnection(
+            host,
+            resolved_ip=resolved_ip,
+            port=port,
+            timeout=timeout,
+        )
+    else:
+        connection = _PinnedHTTPConnection(
+            host,
+            resolved_ip=resolved_ip,
+            port=port,
+            timeout=timeout,
+        )
+    try:
+        connection.request("POST", path, body=body, headers=headers)
+        reply = connection.getresponse()
+        return int(reply.status), {
+            key.lower(): value for key, value in reply.getheaders()
+        }
+    finally:
+        connection.close()

@@ -29,6 +29,20 @@ test("drawing scopes preserve independent storage until drawing linking is enabl
   );
 });
 
+test("alternate drawing layers isolate unlinked cells without moving legacy default drawings", () => {
+  const document = createDefaultChartWorkspace();
+  const cell = chartWorkspaceCell(document, "cell-1");
+  cell.linkGroupId = null;
+  const legacyScope = chartCellDrawingScopeBase("workspace-default", document, "cell-1");
+  assert.equal(legacyScope, "workspace:cell-1:binance:spot:BTCUSDT");
+
+  cell.drawingLayerSet = "2";
+  assert.equal(
+    chartCellDrawingScopeBase("workspace-default", document, "cell-1"),
+    `${legacyScope}:layer-2`,
+  );
+});
+
 test("linked drawings require both full market identity and the same layer set", () => {
   const document = createDefaultChartWorkspace();
   document.linkGroups[DEFAULT_CHART_LINK_GROUP_ID]!.peerPolicy.drawings = true;

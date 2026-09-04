@@ -66,6 +66,43 @@ def test_long_flat_limit_stop_and_same_bar_ambiguity() -> None:
     assert result.fills[0]["reason"] == "WORST_CASE_STOP"
 
 
+def test_stop_gap_fills_at_adverse_open_not_stop_price() -> None:
+    events = _bars(
+        (1, "100", "101", "99", "100"),
+        (2, "110", "112", "110", "111"),
+    )
+
+    def stop(_visible, event):
+        if event.sequence != 1:
+            return []
+        return [{"side": "BUY", "type": "STOP", "qty": "1", "stop_price": "100"}]
+
+    result = SimulationKernel(slippage_bps=Decimal("0")).run(events, stop)
+    assert result.fills[0]["reason"] == "STOP_TRIGGER"
+    assert Decimal(result.fills[0]["price"]) == Decimal("110")
+
+
+def test_gapped_limit_is_charged_taker_fee() -> None:
+    events = _bars(
+        (1, "100", "101", "99", "100"),
+        (2, "90", "91", "89", "90"),
+    )
+
+    def limit(_visible, event):
+        if event.sequence != 1:
+            return []
+        return [{"side": "BUY", "type": "LIMIT", "qty": "1", "limit_price": "100"}]
+
+    kernel = SimulationKernel(
+        slippage_bps=Decimal("0"),
+        maker_fee_bps=Decimal("0"),
+        taker_fee_bps=Decimal("10"),
+    )
+    result = kernel.run(events, limit)
+    assert result.fills[0]["reason"] == "LIMIT_THROUGH"
+    assert Decimal(str(result.fills[0]["fee"])) == Decimal("0.1")
+
+
 def test_invalid_intents_are_rejected_not_filled() -> None:
     events = _bars((1, "100", "101", "99", "100"), (2, "100", "101", "99", "100"))
 

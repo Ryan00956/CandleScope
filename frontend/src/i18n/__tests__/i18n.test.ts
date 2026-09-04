@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { en } from "../catalogs/en.js";
 import { ja } from "../catalogs/ja.js";
+import { ko } from "../catalogs/ko.js";
 import { zhCN } from "../catalogs/zh-CN.js";
 import {
   DEFAULT_LOCALE,
@@ -492,6 +493,8 @@ test("Japanese dates, numbers, and document lang follow the shipped ja locale", 
     assert.equal(t("scale.auto"), "自動スケール");
     assert.match(t("replay.init.hedgeHybrid"), /HEDGE_HYBRID/);
     assert.doesNotMatch(t("replay.init.hedgeHybrid"), /资金费|資金費/);
+    assert.equal(hydrateLocale("ko-KR"), "ko");
+    assert.equal(getLocale(), "ko");
   } finally {
     if (previousDocument === undefined) {
       delete (globalThis as { document?: unknown }).document;
@@ -499,10 +502,108 @@ test("Japanese dates, numbers, and document lang follow the shipped ja locale", 
       (globalThis as { document: typeof previousDocument }).document = previousDocument;
     }
     setLocale(previous);
-    if (previousDocument === undefined) {
-      Reflect.deleteProperty(globalThis, "document");
-    } else {
-      globalThis.document = previousDocument;
-    }
   }
+});
+
+function placeholderKeys(value: string): string[] {
+  return [...value.matchAll(/\{([A-Za-z0-9_]+)\}/g)].map((match) => match[1]!).sort();
+}
+
+function stripKnownTokens(value: string): string {
+  return value
+    .replace(/\{[A-Za-z0-9_]+\}/g, " ")
+    .replace(/CandleScope|TradingView|Binance|OKX|WebSocket|REST|CSV|JSON|Pyne|Pine|ATR|UTC|SQLite|FastAPI|React/gi, " ")
+    .replace(/[A-Z][A-Z0-9_]{2,}/g, " ");
+}
+
+test("Korean locale registers, normalizes ko-KR, and applies document lang", () => {
+  assert.equal(isLocaleId("ko"), true);
+  assert.equal(isLocaleId("ko-KR"), false);
+  assert.equal(normalizeLocale("ko"), "ko");
+  assert.equal(normalizeLocale("ko-KR"), "ko");
+  assert.equal(normalizeLocale("KO-kr"), "ko");
+  assert.ok(LOCALE_OPTIONS.some((option) => option.id === "ko" && option.nativeLabel === "한국어"));
+  assert.equal(DEFAULT_LOCALE, "zh-CN");
+  assert.equal(localeDefinition("ko").direction, "ltr");
+
+  const previousDocument = (globalThis as { document?: unknown }).document;
+  (globalThis as { document: { documentElement: { lang?: string; dir?: string } } }).document = {
+    documentElement: {},
+  };
+  try {
+    withLocale("ko-KR", () => {
+      assert.equal(getLocale(), "ko");
+      assert.equal(document.documentElement.lang, "ko");
+      assert.equal(document.documentElement.dir, "ltr");
+      assert.equal(getDateTimeLocale(), "ko-KR");
+      assert.equal(getNumberLocale(), "ko-KR");
+    });
+  } finally {
+    if (previousDocument === undefined) delete (globalThis as { document?: unknown }).document;
+    else (globalThis as { document: unknown }).document = previousDocument;
+  }
+});
+
+test("Korean catalog translates host copy, preserves placeholders, and uses required terms", () => {
+  const hangul = /\p{Script=Hangul}/u;
+  const han = /\p{Script=Han}/u;
+  assert.equal(Object.keys(ko).length, Object.keys(zhCN).length);
+  for (const key of messageKeys()) {
+    const korean = ko[key];
+    const english = en[key];
+    const chinese = zhCN[key];
+    assert.equal(typeof korean, "string", key);
+    assert.ok(korean.trim(), key);
+    assert.deepEqual(placeholderKeys(korean), placeholderKeys(chinese), key);
+    const remainder = stripKnownTokens(english);
+    const translatable = han.test(chinese) || /[A-Za-z]{4,}/.test(remainder);
+    if (!translatable) continue;
+    assert.notEqual(korean, english, key);
+    assert.notEqual(korean, chinese, key);
+    assert.match(korean, hangul, key);
+  }
+
+  withLocale("ko", () => {
+    assert.equal(t("orderBook.title"), "호가창");
+    assert.equal(t("rail.orderBook"), "호가창");
+    assert.match(t("shell.replay"), /리플레이/);
+    assert.match(t("replay.hub.funding"), /펀딩비/);
+    assert.match(t("replay.control.positions"), /포지션/);
+    assert.match(t("replay.hub.marginMode"), /증거금/);
+    assert.match(t("drawing.position.rr"), /손익/);
+    assert.match(t("trade.tape"), /체결/);
+    assert.match(t("backtest.title"), /백테스트/);
+    assert.match(t("status.connectedTo", { exchange: "Binance" }), /Binance/);
+    assert.doesNotMatch(t("status.connectedTo", { exchange: "Binance" }), /\{exchange\}/);
+    assert.match(t("settings.exchange.verification.events", { count: 3546 }), /3546/);
+    assert.doesNotMatch(t("settings.exchange.verification.events", { count: 3546 }), /\{count\}/);
+    assert.equal(tPlural("status.barCount", 1), t("status.barCount", { count: 1 }));
+    assert.equal(tPlural("status.barCount", 2), t("status.barCount", { count: 2 }));
+    assert.match(tPlural("status.barCount", 2), /2/);
+    assert.doesNotMatch(tPlural("status.barCount", 2), /\{count\}/);
+    assert.match(tPlural("status.barCount", 1), hangul);
+    assert.doesNotMatch(t("replay.init.hedgeHybrid"), /资金费/);
+    assert.match(t("replay.init.hedgeHybrid"), /HEDGE_HYBRID/);
+  });
+});
+
+test("Korean format profiles and runtime switch stay on the shipped locale store", () => {
+  const hangul = /\p{Script=Hangul}/u;
+  withLocale("ko", () => {
+    assert.equal(getDateTimeLocale(), "ko-KR");
+    assert.equal(getNumberLocale(), "ko-KR");
+    assert.equal(translateWsStatus("fallback"), t("status.ws.fallback"));
+    assert.match(translateWsStatus("fallback"), hangul);
+    assert.equal(translateMarketType("spot"), t("market.spot"));
+    assert.match(translateMarketType("spot"), hangul);
+    assert.equal(translateMarketType("futures"), t("market.futures"));
+    assert.equal(translateMarketType("swap"), t("market.swap"));
+    assert.match(t("settings.workbench.name"), hangul);
+    assert.match(t("plugin.title"), hangul);
+    assert.doesNotMatch(t("plugin.title"), /插件|Plugin center/);
+  });
+  withLocale("en", () => {
+    assert.equal(t("shell.replay"), "Replay");
+    assert.equal(getDateTimeLocale(), "en-GB");
+  });
 });

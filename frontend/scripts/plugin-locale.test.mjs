@@ -58,7 +58,7 @@ test("Pyne sandbox follows locale lifecycle updates and falls back to its own En
   connect({
     source: parent,
     ports: [channel],
-    data: { protocol: "candlescope.ui-bridge/1", type: "host.connect", sequence: 1, payload: payload("ko") },
+    data: { protocol: "candlescope.ui-bridge/1", type: "host.connect", sequence: 1, payload: payload("de") },
   });
   assert.equal(document.documentElement.lang, "en");
   assert.equal(title.textContent, "Pyne Workbench");
@@ -71,6 +71,8 @@ test("Pyne sandbox follows locale lifecycle updates and falls back to its own En
     ["es-ES", "es", "Banco de trabajo Pyne"],
     ["fr-CA", "fr", "Atelier Pyne"],
     ["ja-JP", "ja", "Pyne ワークベンチ"],
+    ["ko-KR", "ko", "Pyne 작업대"],
+    ["ko", "ko", "Pyne 작업대"],
   ]) {
     channel.onmessage({ data: {
       protocol: "candlescope.ui-bridge/1", type: "host.lifecycle",

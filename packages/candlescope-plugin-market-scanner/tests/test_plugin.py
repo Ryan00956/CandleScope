@@ -19,7 +19,6 @@ from candlescope_plugin_market_scanner.plugin import (
 
 def test_plugin_error_localizations_accept_additional_languages_and_preserve_fallback(monkeypatch):
     error = PlatformContractError("invalid_request", "market scanner phase is invalid", "phase")
-    assert _localized_contract_error(error, "ko") is error
     translated = _localized_contract_error(error, "fr-CA")
     assert translated.message == "La phase du scanner de marché est invalide"
     assert (translated.code, translated.path) == (error.code, error.path)
@@ -86,6 +85,9 @@ def test_packaged_manifest_owns_entrypoint_and_localized_enum_labels() -> None:
     assert ja_interval["enumLabels"] == ["1分", "5分", "1時間"]
     assert results.localizations["ja"]["fields"]["symbol"] == "銘柄"
     assert results.localizations["ja"]["emptyState"] == "スキャナーを実行すると結果が表示されます"
+    korean = settings.localizations["ko"]["schema"]["properties"]["interval"]
+    assert korean["enumLabels"] == ["1분", "5분", "1시간"]
+    assert len(korean["enumLabels"]) == len(settings.configuration["schema"]["properties"]["interval"]["enum"])
 
 
 def test_spanish_contract_errors_follow_parent_locale() -> None:
@@ -99,6 +101,23 @@ def test_spanish_contract_errors_follow_parent_locale() -> None:
     )
     assert _localized_contract_error(error, "pt-BR") is error
     assert "es" in _CONTRACT_LOCALIZATIONS
+
+
+def test_packaged_manifest_owns_korean_contribution_copy() -> None:
+    manifest = market_scanner_manifest()
+    localized = [item for item in manifest.contributions if item.localizations]
+    assert localized, "every currently localized contribution needs Korean copy"
+    for item in localized:
+        assert "ko" in item.localizations, item.id
+        korean = item.localizations["ko"]
+        assert korean["title"]
+        chinese = item.localizations["zh-CN"]
+        if "fields" in chinese:
+            assert set(korean["fields"]) == set(chinese["fields"])
+        if "emptyState" in chinese:
+            assert korean["emptyState"]
+        if "schema" in chinese:
+            assert set(korean["schema"]["properties"]) == set(chinese["schema"]["properties"])
 
 
 def test_scan_preserves_invocation_locale_on_host_calls() -> None:
@@ -147,3 +166,22 @@ def test_plugin_owned_validation_error_follows_japanese_locale() -> None:
     )
     with pytest.raises(PlatformContractError, match="空のスキャンコマンドのみ"):
         plugin.invoke(request)
+
+
+def test_plugin_owned_korean_errors_follow_ko_and_ko_kr() -> None:
+    plugin = MarketScannerPlugin()
+    request = InvokeRequest(
+        contribution_id="scan",
+        input={"unexpected": True},
+        request_context=_context("ko-KR"),
+    )
+    with pytest.raises(PlatformContractError, match="빈 인자 스캔 명령만 허용"):
+        plugin.invoke(request)
+    error = PlatformContractError("invalid_request", "market scanner phase is invalid", "phase")
+    assert _localized_contract_error(error, "ko").message == "시장 스캐너 단계가 유효하지 않음"
+    assert _localized_contract_error(error, "ko-KR").message == "시장 스캐너 단계가 유효하지 않음"
+    capability = PlatformContractError("unavailable", "market.bars.read capability is unavailable")
+    assert _localized_contract_error(capability, "KO-kr").message == (
+        "market.bars.read 기능을 사용할 수 없음"
+    )
+    assert "ko" in _CONTRACT_LOCALIZATIONS

@@ -81,6 +81,54 @@
                 }
               }
             }
+          },
+          "fr": {
+            "title": "Exécuter Pyne sur le graphique actuel",
+            "schema": {
+              "properties": {
+                "source": {
+                  "title": "Source Pyne"
+                },
+                "paramsJson": {
+                  "title": "JSON des paramètres"
+                },
+                "lookbackBars": {
+                  "title": "Barres de rétrospection"
+                }
+              }
+            }
+          },
+          "ja": {
+            "title": "現在のチャートで Pyne を実行",
+            "schema": {
+              "properties": {
+                "source": {
+                  "title": "Pyne ソース"
+                },
+                "paramsJson": {
+                  "title": "パラメータ JSON"
+                },
+                "lookbackBars": {
+                  "title": "遡及本数"
+                }
+              }
+            }
+          },
+          "ko": {
+            "title": "현재 차트에서 Pyne 실행",
+            "schema": {
+              "properties": {
+                "source": {
+                  "title": "Pyne 소스"
+                },
+                "paramsJson": {
+                  "title": "파라미터 JSON"
+                },
+                "lookbackBars": {
+                  "title": "조회 캔들 수"
+                }
+              }
+            }
           }
         },
         "requiresUserAction": true,
@@ -162,6 +210,72 @@
                 },
                 "retentionBars": {
                   "title": "Barras conservadas"
+                }
+              }
+            }
+          },
+          "fr": {
+            "title": "Démarrer une session Pyne incrémentale",
+            "schema": {
+              "properties": {
+                "sessionId": {
+                  "title": "ID de session"
+                },
+                "source": {
+                  "title": "Source Pyne"
+                },
+                "paramsJson": {
+                  "title": "JSON des paramètres"
+                },
+                "lookbackBars": {
+                  "title": "Barres de rétrospection"
+                },
+                "retentionBars": {
+                  "title": "Barres conservées"
+                }
+              }
+            }
+          },
+          "ja": {
+            "title": "増分 Pyne セッションを開始",
+            "schema": {
+              "properties": {
+                "sessionId": {
+                  "title": "セッション ID"
+                },
+                "source": {
+                  "title": "Pyne ソース"
+                },
+                "paramsJson": {
+                  "title": "パラメータ JSON"
+                },
+                "lookbackBars": {
+                  "title": "遡及本数"
+                },
+                "retentionBars": {
+                  "title": "保持本数"
+                }
+              }
+            }
+          },
+          "ko": {
+            "title": "증분 Pyne 세션 시작",
+            "schema": {
+              "properties": {
+                "sessionId": {
+                  "title": "세션 ID"
+                },
+                "source": {
+                  "title": "Pyne 소스"
+                },
+                "paramsJson": {
+                  "title": "파라미터 JSON"
+                },
+                "lookbackBars": {
+                  "title": "조회 캔들 수"
+                },
+                "retentionBars": {
+                  "title": "유지 캔들 수"
                 }
               }
             }
@@ -278,6 +392,99 @@
                 }
               }
             }
+          },
+          "fr": {
+            "title": "Pousser une barre vers la session Pyne",
+            "schema": {
+              "properties": {
+                "sessionId": {
+                  "title": "ID de session"
+                },
+                "time": {
+                  "title": "Heure"
+                },
+                "open": {
+                  "title": "Ouverture"
+                },
+                "high": {
+                  "title": "Plus haut"
+                },
+                "low": {
+                  "title": "Plus bas"
+                },
+                "close": {
+                  "title": "Clôture"
+                },
+                "volume": {
+                  "title": "Volume"
+                },
+                "preview": {
+                  "title": "Aperçu uniquement"
+                }
+              }
+            }
+          },
+          "ja": {
+            "title": "Pyne セッションにローソク足を送る",
+            "schema": {
+              "properties": {
+                "sessionId": {
+                  "title": "セッション ID"
+                },
+                "time": {
+                  "title": "時刻"
+                },
+                "open": {
+                  "title": "始値"
+                },
+                "high": {
+                  "title": "高値"
+                },
+                "low": {
+                  "title": "安値"
+                },
+                "close": {
+                  "title": "終値"
+                },
+                "volume": {
+                  "title": "出来高"
+                },
+                "preview": {
+                  "title": "プレビューのみ"
+                }
+              }
+            }
+          },
+          "ko": {
+            "title": "Pyne 세션에 캔들 푸시",
+            "schema": {
+              "properties": {
+                "sessionId": {
+                  "title": "세션 ID"
+                },
+                "time": {
+                  "title": "시간"
+                },
+                "open": {
+                  "title": "시가"
+                },
+                "high": {
+                  "title": "고가"
+                },
+                "low": {
+                  "title": "저가"
+                },
+                "close": {
+                  "title": "종가"
+                },
+                "volume": {
+                  "title": "거래량"
+                },
+                "preview": {
+                  "title": "미리보기만"
+                }
+              }
+            }
           }
         },
         "requiresUserAction": true,
@@ -355,6 +562,36 @@
                 }
               }
             }
+          },
+          "fr": {
+            "title": "Créer un instantané de session Pyne",
+            "schema": {
+              "properties": {
+                "sessionId": {
+                  "title": "ID de session"
+                }
+              }
+            }
+          },
+          "ja": {
+            "title": "Pyne セッションのスナップショットを作成",
+            "schema": {
+              "properties": {
+                "sessionId": {
+                  "title": "セッション ID"
+                }
+              }
+            }
+          },
+          "ko": {
+            "title": "Pyne 세션 스냅샷 만들기",
+            "schema": {
+              "properties": {
+                "sessionId": {
+                  "title": "세션 ID"
+                }
+              }
+            }
           }
         },
         "requiresUserAction": true,
@@ -403,6 +640,36 @@
                 }
               }
             }
+          },
+          "fr": {
+            "title": "Fermer la session Pyne",
+            "schema": {
+              "properties": {
+                "sessionId": {
+                  "title": "ID de session"
+                }
+              }
+            }
+          },
+          "ja": {
+            "title": "Pyne セッションを閉じる",
+            "schema": {
+              "properties": {
+                "sessionId": {
+                  "title": "セッション ID"
+                }
+              }
+            }
+          },
+          "ko": {
+            "title": "Pyne 세션 닫기",
+            "schema": {
+              "properties": {
+                "sessionId": {
+                  "title": "세션 ID"
+                }
+              }
+            }
           }
         },
         "requiresUserAction": true,
@@ -437,6 +704,15 @@
           },
           "es": {
             "title": "Proveedor de estrategia de prueba retrospectiva Pyne"
+          },
+          "fr": {
+            "title": "Fournisseur de stratégie backtest Pyne"
+          },
+          "ja": {
+            "title": "Pyne バックテスト戦略プロバイダー"
+          },
+          "ko": {
+            "title": "Pyne 백테스트 전략 제공자"
           }
         },
         "inputModes": [
@@ -469,6 +745,15 @@
           },
           "es": {
             "title": "Banco de trabajo Pyne"
+          },
+          "fr": {
+            "title": "Atelier Pyne"
+          },
+          "ja": {
+            "title": "Pyne ワークベンチ"
+          },
+          "ko": {
+            "title": "Pyne 작업대"
           }
         },
         "slot": "sidePanel",
@@ -488,916 +773,15 @@
           },
           "es": {
             "title": "Salida Pyne"
-          }
-        },
-        "target": "main-chart",
-        "zOrder": "above-series",
-        "maxItems": 500,
-        "maxPoints": 20000,
-        "maxBytes": 524288,
-        "maxTextChars": 128
-      }
-    },
-    {
-      "id": "run",
-      "kind": "command/1",
-      "title": "Run Pyne on current chart",
-      "entrypoint": "main",
-      "configuration": {
-        "localizations": {
-          "zh-CN": {
-            "title": "在当前图表运行 Pyne",
-            "schema": {
-              "properties": {
-                "source": {
-                  "title": "Pyne 源码"
-                },
-                "paramsJson": {
-                  "title": "参数 JSON"
-                },
-                "lookbackBars": {
-                  "title": "回看 K 线数"
-                }
-              }
-            }
-          },
-          "fr": {
-            "title": "Exécuter Pyne sur le graphique actuel",
-            "schema": {
-              "properties": {
-                "source": {
-                  "title": "Source Pyne"
-                },
-                "paramsJson": {
-                  "title": "JSON des paramètres"
-                },
-                "lookbackBars": {
-                  "title": "Barres de rétrospection"
-                }
-              }
-            }
-          }
-        },
-        "requiresUserAction": true,
-        "placements": [
-          "commandPalette",
-          "topToolbar"
-        ],
-        "inputSchema": {
-          "type": "object",
-          "properties": {
-            "source": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 16384
-            },
-            "paramsJson": {
-              "type": "string",
-              "maxLength": 16384,
-              "default": "{}"
-            },
-            "lookbackBars": {
-              "type": "integer",
-              "minimum": 2,
-              "maximum": 5000,
-              "default": 500
-            }
-          },
-          "required": [
-            "source"
-          ],
-          "additionalProperties": false
-        }
-      }
-    },
-    {
-      "id": "start-session",
-      "kind": "command/1",
-      "title": "Start incremental Pyne session",
-      "entrypoint": "main",
-      "configuration": {
-        "localizations": {
-          "zh-CN": {
-            "title": "启动增量 Pyne 会话",
-            "schema": {
-              "properties": {
-                "sessionId": {
-                  "title": "会话 ID"
-                },
-                "source": {
-                  "title": "Pyne 源码"
-                },
-                "paramsJson": {
-                  "title": "参数 JSON"
-                },
-                "lookbackBars": {
-                  "title": "回看 K 线数"
-                },
-                "retentionBars": {
-                  "title": "保留 K 线数"
-                }
-              }
-            }
-          },
-          "fr": {
-            "title": "Démarrer une session Pyne incrémentale",
-            "schema": {
-              "properties": {
-                "sessionId": {
-                  "title": "ID de session"
-                },
-                "source": {
-                  "title": "Source Pyne"
-                },
-                "paramsJson": {
-                  "title": "JSON des paramètres"
-                },
-                "lookbackBars": {
-                  "title": "Barres de rétrospection"
-                },
-                "retentionBars": {
-                  "title": "Barres conservées"
-                }
-              }
-            }
-          }
-        },
-        "requiresUserAction": true,
-        "placements": [
-          "commandPalette"
-        ],
-        "inputSchema": {
-          "type": "object",
-          "properties": {
-            "sessionId": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128
-            },
-            "source": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 16384
-            },
-            "paramsJson": {
-              "type": "string",
-              "maxLength": 16384,
-              "default": "{}"
-            },
-            "lookbackBars": {
-              "type": "integer",
-              "minimum": 2,
-              "maximum": 5000,
-              "default": 500
-            },
-            "retentionBars": {
-              "type": "integer",
-              "minimum": 2,
-              "maximum": 100000,
-              "default": 10000
-            }
-          },
-          "required": [
-            "sessionId",
-            "source"
-          ],
-          "additionalProperties": false
-        }
-      }
-    },
-    {
-      "id": "push-bar",
-      "kind": "command/1",
-      "title": "Push bar to Pyne session",
-      "entrypoint": "main",
-      "configuration": {
-        "localizations": {
-          "zh-CN": {
-            "title": "向 Pyne 会话推送 K 线",
-            "schema": {
-              "properties": {
-                "sessionId": {
-                  "title": "会话 ID"
-                },
-                "time": {
-                  "title": "时间"
-                },
-                "open": {
-                  "title": "开盘价"
-                },
-                "high": {
-                  "title": "最高价"
-                },
-                "low": {
-                  "title": "最低价"
-                },
-                "close": {
-                  "title": "收盘价"
-                },
-                "volume": {
-                  "title": "成交量"
-                },
-                "preview": {
-                  "title": "仅预览"
-                }
-              }
-            }
-          },
-          "fr": {
-            "title": "Pousser une barre vers la session Pyne",
-            "schema": {
-              "properties": {
-                "sessionId": {
-                  "title": "ID de session"
-                },
-                "time": {
-                  "title": "Heure"
-                },
-                "open": {
-                  "title": "Ouverture"
-                },
-                "high": {
-                  "title": "Plus haut"
-                },
-                "low": {
-                  "title": "Plus bas"
-                },
-                "close": {
-                  "title": "Clôture"
-                },
-                "volume": {
-                  "title": "Volume"
-                },
-                "preview": {
-                  "title": "Aperçu uniquement"
-                }
-              }
-            }
-          }
-        },
-        "requiresUserAction": true,
-        "placements": [
-          "commandPalette"
-        ],
-        "inputSchema": {
-          "type": "object",
-          "properties": {
-            "sessionId": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128
-            },
-            "time": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "open": {
-              "type": "number"
-            },
-            "high": {
-              "type": "number"
-            },
-            "low": {
-              "type": "number"
-            },
-            "close": {
-              "type": "number"
-            },
-            "volume": {
-              "type": "number"
-            },
-            "preview": {
-              "type": "boolean",
-              "default": false
-            }
-          },
-          "required": [
-            "sessionId",
-            "time",
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume"
-          ],
-          "additionalProperties": false
-        }
-      }
-    },
-    {
-      "id": "snapshot-session",
-      "kind": "command/1",
-      "title": "Snapshot Pyne session",
-      "entrypoint": "main",
-      "configuration": {
-        "localizations": {
-          "zh-CN": {
-            "title": "创建 Pyne 会话快照",
-            "schema": {
-              "properties": {
-                "sessionId": {
-                  "title": "会话 ID"
-                }
-              }
-            }
-          },
-          "fr": {
-            "title": "Créer un instantané de session Pyne",
-            "schema": {
-              "properties": {
-                "sessionId": {
-                  "title": "ID de session"
-                }
-              }
-            }
-          }
-        },
-        "requiresUserAction": true,
-        "placements": [
-          "commandPalette"
-        ],
-        "inputSchema": {
-          "type": "object",
-          "properties": {
-            "sessionId": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128
-            }
-          },
-          "required": [
-            "sessionId"
-          ],
-          "additionalProperties": false
-        }
-      }
-    },
-    {
-      "id": "close-session",
-      "kind": "command/1",
-      "title": "Close Pyne session",
-      "entrypoint": "main",
-      "configuration": {
-        "localizations": {
-          "zh-CN": {
-            "title": "关闭 Pyne 会话",
-            "schema": {
-              "properties": {
-                "sessionId": {
-                  "title": "会话 ID"
-                }
-              }
-            }
-          },
-          "fr": {
-            "title": "Fermer la session Pyne",
-            "schema": {
-              "properties": {
-                "sessionId": {
-                  "title": "ID de session"
-                }
-              }
-            }
-          }
-        },
-        "requiresUserAction": true,
-        "placements": [
-          "commandPalette"
-        ],
-        "inputSchema": {
-          "type": "object",
-          "properties": {
-            "sessionId": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128
-            }
-          },
-          "required": [
-            "sessionId"
-          ],
-          "additionalProperties": false
-        }
-      }
-    },
-    {
-      "id": "pyne-strategy",
-      "kind": "strategy-provider/1",
-      "title": "Pyne backtest strategy provider",
-      "entrypoint": "pyne-workbench",
-      "configuration": {
-        "localizations": {
-          "zh-CN": {
-            "title": "Pyne 回测策略提供器"
-          },
-          "fr": {
-            "title": "Fournisseur de stratégie backtest Pyne"
-          }
-        },
-        "inputModes": [
-          "BAR_CLOSE"
-        ],
-        "outputModes": [
-          "SIGNAL",
-          "TARGET_POSITION"
-        ],
-        "stateModes": [
-          "SESSION_STATEFUL"
-        ],
-        "reproducibility": [
-          "DETERMINISTIC",
-          "SEEDED"
-        ],
-        "snapshotRestore": true,
-        "maxBatchObservations": 1
-      }
-    },
-    {
-      "id": "workbench-view",
-      "kind": "view/1",
-      "title": "Pyne Workbench",
-      "entrypoint": "main",
-      "configuration": {
-        "localizations": {
-          "zh-CN": {
-            "title": "Pyne 工作台"
-          },
-          "fr": {
-            "title": "Atelier Pyne"
-          }
-        },
-        "slot": "sidePanel",
-        "renderer": "sandbox",
-        "surface": "workbench-view"
-      }
-    },
-    {
-      "id": "pyne-output",
-      "kind": "chart-layer/2",
-      "title": "Pyne output",
-      "entrypoint": "main",
-      "configuration": {
-        "localizations": {
-          "zh-CN": {
-            "title": "Pyne 输出"
           },
           "fr": {
             "title": "Sortie Pyne"
-          }
-        },
-        "target": "main-chart",
-        "zOrder": "above-series",
-        "maxItems": 500,
-        "maxPoints": 20000,
-        "maxBytes": 524288,
-        "maxTextChars": 128
-      }
-    },
-    {
-      "id": "run",
-      "kind": "command/1",
-      "title": "Run Pyne on current chart",
-      "entrypoint": "main",
-      "configuration": {
-        "localizations": {
-          "zh-CN": {
-            "title": "在当前图表运行 Pyne",
-            "schema": {
-              "properties": {
-                "source": {
-                  "title": "Pyne 源码"
-                },
-                "paramsJson": {
-                  "title": "参数 JSON"
-                },
-                "lookbackBars": {
-                  "title": "回看 K 线数"
-                }
-              }
-            }
-          },
-          "ja": {
-            "title": "現在のチャートで Pyne を実行",
-            "schema": {
-              "properties": {
-                "source": {
-                  "title": "Pyne ソース"
-                },
-                "paramsJson": {
-                  "title": "パラメータ JSON"
-                },
-                "lookbackBars": {
-                  "title": "遡及本数"
-                }
-              }
-            }
-          }
-        },
-        "requiresUserAction": true,
-        "placements": [
-          "commandPalette",
-          "topToolbar"
-        ],
-        "inputSchema": {
-          "type": "object",
-          "properties": {
-            "source": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 16384
-            },
-            "paramsJson": {
-              "type": "string",
-              "maxLength": 16384,
-              "default": "{}"
-            },
-            "lookbackBars": {
-              "type": "integer",
-              "minimum": 2,
-              "maximum": 5000,
-              "default": 500
-            }
-          },
-          "required": [
-            "source"
-          ],
-          "additionalProperties": false
-        }
-      }
-    },
-    {
-      "id": "start-session",
-      "kind": "command/1",
-      "title": "Start incremental Pyne session",
-      "entrypoint": "main",
-      "configuration": {
-        "localizations": {
-          "zh-CN": {
-            "title": "启动增量 Pyne 会话",
-            "schema": {
-              "properties": {
-                "sessionId": {
-                  "title": "会话 ID"
-                },
-                "source": {
-                  "title": "Pyne 源码"
-                },
-                "paramsJson": {
-                  "title": "参数 JSON"
-                },
-                "lookbackBars": {
-                  "title": "回看 K 线数"
-                },
-                "retentionBars": {
-                  "title": "保留 K 线数"
-                }
-              }
-            }
-          },
-          "ja": {
-            "title": "増分 Pyne セッションを開始",
-            "schema": {
-              "properties": {
-                "sessionId": {
-                  "title": "セッション ID"
-                },
-                "source": {
-                  "title": "Pyne ソース"
-                },
-                "paramsJson": {
-                  "title": "パラメータ JSON"
-                },
-                "lookbackBars": {
-                  "title": "遡及本数"
-                },
-                "retentionBars": {
-                  "title": "保持本数"
-                }
-              }
-            }
-          }
-        },
-        "requiresUserAction": true,
-        "placements": [
-          "commandPalette"
-        ],
-        "inputSchema": {
-          "type": "object",
-          "properties": {
-            "sessionId": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128
-            },
-            "source": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 16384
-            },
-            "paramsJson": {
-              "type": "string",
-              "maxLength": 16384,
-              "default": "{}"
-            },
-            "lookbackBars": {
-              "type": "integer",
-              "minimum": 2,
-              "maximum": 5000,
-              "default": 500
-            },
-            "retentionBars": {
-              "type": "integer",
-              "minimum": 2,
-              "maximum": 100000,
-              "default": 10000
-            }
-          },
-          "required": [
-            "sessionId",
-            "source"
-          ],
-          "additionalProperties": false
-        }
-      }
-    },
-    {
-      "id": "push-bar",
-      "kind": "command/1",
-      "title": "Push bar to Pyne session",
-      "entrypoint": "main",
-      "configuration": {
-        "localizations": {
-          "zh-CN": {
-            "title": "向 Pyne 会话推送 K 线",
-            "schema": {
-              "properties": {
-                "sessionId": {
-                  "title": "会话 ID"
-                },
-                "time": {
-                  "title": "时间"
-                },
-                "open": {
-                  "title": "开盘价"
-                },
-                "high": {
-                  "title": "最高价"
-                },
-                "low": {
-                  "title": "最低价"
-                },
-                "close": {
-                  "title": "收盘价"
-                },
-                "volume": {
-                  "title": "成交量"
-                },
-                "preview": {
-                  "title": "仅预览"
-                }
-              }
-            }
-          },
-          "ja": {
-            "title": "Pyne セッションにローソク足を送る",
-            "schema": {
-              "properties": {
-                "sessionId": {
-                  "title": "セッション ID"
-                },
-                "time": {
-                  "title": "時刻"
-                },
-                "open": {
-                  "title": "始値"
-                },
-                "high": {
-                  "title": "高値"
-                },
-                "low": {
-                  "title": "安値"
-                },
-                "close": {
-                  "title": "終値"
-                },
-                "volume": {
-                  "title": "出来高"
-                },
-                "preview": {
-                  "title": "プレビューのみ"
-                }
-              }
-            }
-          }
-        },
-        "requiresUserAction": true,
-        "placements": [
-          "commandPalette"
-        ],
-        "inputSchema": {
-          "type": "object",
-          "properties": {
-            "sessionId": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128
-            },
-            "time": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "open": {
-              "type": "number"
-            },
-            "high": {
-              "type": "number"
-            },
-            "low": {
-              "type": "number"
-            },
-            "close": {
-              "type": "number"
-            },
-            "volume": {
-              "type": "number"
-            },
-            "preview": {
-              "type": "boolean",
-              "default": false
-            }
-          },
-          "required": [
-            "sessionId",
-            "time",
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume"
-          ],
-          "additionalProperties": false
-        }
-      }
-    },
-    {
-      "id": "snapshot-session",
-      "kind": "command/1",
-      "title": "Snapshot Pyne session",
-      "entrypoint": "main",
-      "configuration": {
-        "localizations": {
-          "zh-CN": {
-            "title": "创建 Pyne 会话快照",
-            "schema": {
-              "properties": {
-                "sessionId": {
-                  "title": "会话 ID"
-                }
-              }
-            }
-          },
-          "ja": {
-            "title": "Pyne セッションのスナップショットを作成",
-            "schema": {
-              "properties": {
-                "sessionId": {
-                  "title": "セッション ID"
-                }
-              }
-            }
-          }
-        },
-        "requiresUserAction": true,
-        "placements": [
-          "commandPalette"
-        ],
-        "inputSchema": {
-          "type": "object",
-          "properties": {
-            "sessionId": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128
-            }
-          },
-          "required": [
-            "sessionId"
-          ],
-          "additionalProperties": false
-        }
-      }
-    },
-    {
-      "id": "close-session",
-      "kind": "command/1",
-      "title": "Close Pyne session",
-      "entrypoint": "main",
-      "configuration": {
-        "localizations": {
-          "zh-CN": {
-            "title": "关闭 Pyne 会话",
-            "schema": {
-              "properties": {
-                "sessionId": {
-                  "title": "会话 ID"
-                }
-              }
-            }
-          },
-          "ja": {
-            "title": "Pyne セッションを閉じる",
-            "schema": {
-              "properties": {
-                "sessionId": {
-                  "title": "セッション ID"
-                }
-              }
-            }
-          }
-        },
-        "requiresUserAction": true,
-        "placements": [
-          "commandPalette"
-        ],
-        "inputSchema": {
-          "type": "object",
-          "properties": {
-            "sessionId": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128
-            }
-          },
-          "required": [
-            "sessionId"
-          ],
-          "additionalProperties": false
-        }
-      }
-    },
-    {
-      "id": "pyne-strategy",
-      "kind": "strategy-provider/1",
-      "title": "Pyne backtest strategy provider",
-      "entrypoint": "pyne-workbench",
-      "configuration": {
-        "localizations": {
-          "zh-CN": {
-            "title": "Pyne 回测策略提供器"
-          },
-          "ja": {
-            "title": "Pyne バックテスト戦略プロバイダー"
-          }
-        },
-        "inputModes": [
-          "BAR_CLOSE"
-        ],
-        "outputModes": [
-          "SIGNAL",
-          "TARGET_POSITION"
-        ],
-        "stateModes": [
-          "SESSION_STATEFUL"
-        ],
-        "reproducibility": [
-          "DETERMINISTIC",
-          "SEEDED"
-        ],
-        "snapshotRestore": true,
-        "maxBatchObservations": 1
-      }
-    },
-    {
-      "id": "workbench-view",
-      "kind": "view/1",
-      "title": "Pyne Workbench",
-      "entrypoint": "main",
-      "configuration": {
-        "localizations": {
-          "zh-CN": {
-            "title": "Pyne 工作台"
-          },
-          "ja": {
-            "title": "Pyne ワークベンチ"
-          }
-        },
-        "slot": "sidePanel",
-        "renderer": "sandbox",
-        "surface": "workbench-view"
-      }
-    },
-    {
-      "id": "pyne-output",
-      "kind": "chart-layer/2",
-      "title": "Pyne output",
-      "entrypoint": "main",
-      "configuration": {
-        "localizations": {
-          "zh-CN": {
-            "title": "Pyne 输出"
           },
           "ja": {
             "title": "Pyne 出力"
+          },
+          "ko": {
+            "title": "Pyne 출력"
           }
         },
         "target": "main-chart",

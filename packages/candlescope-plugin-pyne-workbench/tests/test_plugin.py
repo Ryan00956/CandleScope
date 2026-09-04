@@ -119,6 +119,8 @@ def test_sandbox_ui_owns_zh_cn_english_and_japanese_copy() -> None:
     assert "Atelier Pyne" in javascript
     assert "ja: {" in javascript
     assert "Pyne ワークベンチ" in javascript
+    assert "ko: {" in javascript
+    assert "Pyne 작업대" in javascript
     assert "applyLocale(payload.locale)" in javascript
     assert 'setStatus("statusRejected")' in javascript
 
@@ -212,6 +214,34 @@ def test_plugin_owned_errors_follow_japanese_locale() -> None:
                 RequestContext("unknown", True, 1, "trace-ja", "ja"),
             )
         )
+def test_plugin_owned_korean_errors_follow_ko_and_ko_kr() -> None:
+    plugin = _plugin()
+    with pytest.raises(PlatformContractError, match="호출할 수 없음"):
+        plugin.invoke(
+            InvokeRequest(
+                "not-a-command",
+                {},
+                RequestContext("not-a-command", True, 1, "trace-ko", locale="ko-KR"),
+            )
+        )
+    error = PlatformContractError("INVALID_CONTRACT", "workbench phase is invalid")
+    assert _localized_contract_error(error, "ko").message == "작업대 단계가 유효하지 않음"
+    assert _localized_contract_error(error, "ko-KR").message == "작업대 단계가 유효하지 않음"
+    english = PlatformContractError("INVALID_CONTRACT", "workbench phase is invalid")
+    assert _localized_contract_error(english, "en") is english
+
+
+def test_manifest_owns_korean_contribution_copy() -> None:
+    manifest = pyne_workbench_manifest()
+    localized = [item for item in manifest.contributions if item.localizations]
+    assert localized
+    for item in localized:
+        assert "ko" in item.localizations, item.id
+        korean = item.localizations["ko"]
+        assert korean["title"]
+        chinese = item.localizations["zh-CN"]
+        if "schema" in chinese:
+            assert set(korean["schema"]["properties"]) == set(chinese["schema"]["properties"])
 
 
 def test_batch_command_reads_chart_bars_and_publishes_render_v2() -> None:

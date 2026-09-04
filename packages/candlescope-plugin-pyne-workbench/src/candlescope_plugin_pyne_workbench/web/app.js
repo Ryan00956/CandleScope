@@ -84,6 +84,21 @@
       mainChart: "Graphique principal",
       theme: "Thème",
     },
+    ko: {
+      title: "Pyne 작업대",
+      statusWaiting: "CandleScope 연결 대기",
+      statusRejected: "연결 프로토콜이 거부됨",
+      statusConnected: "연결됨 · 플러그인 패널에서 명령을 실행하세요",
+      statusDisposed: "닫힘",
+      howTo: "사용 방법",
+      stepOpenChart: "지원 범위의 실시간 메인 차트를 엽니다.",
+      stepRunCommand: "플러그인 명령에서 “현재 차트에서 Pyne 실행”을 실행합니다.",
+      stepDebug: "봉 단위 디버깅이 필요하면 세션을 시작한 뒤 캔들을 푸시하거나 미리보기합니다.",
+      boundaryTitle: "현재 경계",
+      boundaryBody: "스크립트와 데이터는 Host 기능 호출만 사용합니다. 그래픽은 제한된 Render IR v2로 변환되며, 손실 없이 매핑할 수 없는 candle, table, linefill은 네이티브 Pyne 결과 요약에 남습니다.",
+      mainChart: "메인 차트",
+      theme: "테마",
+    },
   };
   let locale = "zh-CN";
 

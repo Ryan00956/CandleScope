@@ -57,6 +57,12 @@ test("settings category labels follow the active locale", () => {
     assert.equal(t("settings.saveAndClose"), "保存して閉じる");
     assert.equal(t("settings.language.title"), "表示言語");
   });
+  withLocale("ko", () => {
+    assert.match(t(SETTINGS_CATEGORIES[0].labelKey), /\p{Script=Hangul}/u);
+    assert.match(t("settings.saveAndClose"), /\p{Script=Hangul}/u);
+    assert.notEqual(t("settings.saveAndClose"), "Save and close");
+    assert.notEqual(t("settings.saveAndClose"), "保存并关闭");
+  });
 });
 
 test("status bar chrome switches between Chinese and English", () => {
@@ -99,6 +105,12 @@ test("status bar chrome switches between Chinese and English", () => {
   assert.match(ja, /リアルタイム（WebSocket）/);
   assert.match(ja, /Binance 現物/);
   assert.doesNotMatch(ja, /已连接|Connected to/);
+  const korean = withLocale("ko", () => renderToStaticMarkup(<StatusBar status={status} />));
+  assert.match(korean, /\p{Script=Hangul}/u);
+  assert.match(korean, /Binance/);
+  assert.doesNotMatch(korean, /已连接/);
+  assert.doesNotMatch(korean, /Connected to/);
+  assert.doesNotMatch(korean, /\{count\}|\{exchange\}/);
 });
 
 test("right-rail chrome follows the active locale", () => {
@@ -152,6 +164,18 @@ test("right-rail chrome follows the active locale", () => {
       layout={{ width: 360 }}
     />,
   ));
+  const korean = withLocale("ko", () => renderToStaticMarkup(
+    <MarketRightRailFrame
+      source="live"
+      views={viewsFor("ko")}
+      openViewIds={[]}
+      panelCollapsed
+      onToggleView={() => undefined}
+      onTogglePanelCollapsed={() => undefined}
+      renderView={() => null}
+      layout={{ width: 360 }}
+    />,
+  ));
   const ja = withLocale("ja", () => renderToStaticMarkup(
     <MarketRightRailFrame
       source="live"
@@ -172,6 +196,10 @@ test("right-rail chrome follows the active locale", () => {
   assert.match(ja, /サイドバーを表示/);
   assert.match(ja, /ウォッチリスト/);
   assert.doesNotMatch(ja, /市场侧栏|Market sidebar/);
+  assert.match(korean, /호가창/);
+  assert.match(korean, /관심종목/);
+  assert.doesNotMatch(korean, /市场侧栏/);
+  assert.doesNotMatch(korean, /Market sidebar/);
 });
 
 test("appearance panel exposes a language picker that lists both locales", () => {
@@ -185,6 +213,7 @@ test("appearance panel exposes a language picker that lists both locales", () =>
   assert.match(html, /Español/);
   assert.match(html, /Français/);
   assert.match(html, /日本語/);
+  assert.match(html, /한국어/);
 
   const en = withLocale("en", () => renderToStaticMarkup(
     <ChartAppearancePanel
@@ -196,6 +225,7 @@ test("appearance panel exposes a language picker that lists both locales", () =>
   assert.doesNotMatch(en, /界面语言/);
   assert.match(en, /Español/);
   assert.match(en, /Français/);
+  assert.match(en, /한국어/);
 
   const fr = withLocale("fr", () => renderToStaticMarkup(
     <ChartAppearancePanel
@@ -207,6 +237,17 @@ test("appearance panel exposes a language picker that lists both locales", () =>
   assert.match(fr, /Français/);
   assert.doesNotMatch(fr, /界面语言/);
   assert.doesNotMatch(fr, /Interface language/);
+
+  const korean = withLocale("ko", () => renderToStaticMarkup(
+    <ChartAppearancePanel
+      settings={{ ...DEFAULT_SETTINGS, locale: "ko" }}
+      onUpdate={() => undefined}
+    />,
+  ));
+  assert.match(korean, /한국어/);
+  assert.match(korean, /\p{Script=Hangul}/u);
+  assert.doesNotMatch(korean, /界面语言/);
+  assert.doesNotMatch(korean, /Interface language/);
 });
 
 test("status bar, right rail, and appearance chrome switch to Spanish", () => {

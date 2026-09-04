@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
+import { getLocale, setLocale } from "../../../i18n/index.js";
 import {
   assembleFrozenResearchContext,
   frozenContextCanonicalJson,
@@ -17,6 +18,7 @@ import {
   sha256HexUtf8,
   ResearchDataError,
 } from "../researchDataSourceModel.js";
+import { researchLibraryErrorMessage } from "../researchDataFormat.js";
 import {
   FORBIDDEN_ORDINARY_UI_TERMS,
   type ResearchSourceRefV1,
@@ -158,10 +160,37 @@ test("ordinary UI copy never includes internal identity terms", () => {
   assert.equal(ordinarySourceLabel("CURRENT_CHART", "ja"), "現在のチャート");
   assert.equal(ordinarySourceLabel("IMPORTED_DATASET", "ja"), "ローカルライブラリ");
   assert.equal(ordinarySourceLabel("COMPLETED_RUN", "ja"), "完了した結果");
+  assert.equal(ordinarySourceLabel("CURRENT_CHART", "ko"), "현재 차트");
+  assert.equal(ordinarySourceLabel("IMPORTED_DATASET", "ko"), "로컬 라이브러리");
+  assert.equal(ordinarySourceLabel("COMPLETED_RUN", "ko"), "완료 결과");
+  const previous = getLocale();
+  try {
+    setLocale("ko");
+    assert.equal(ordinarySourceLabel("CURRENT_CHART"), "현재 차트");
+    const koreanError = new ResearchDataError("MISSING_DATASET_IDENTITY", "datasetId is required");
+    assert.match(koreanError.action, /\p{Script=Hangul}/u);
+    assert.doesNotMatch(koreanError.action, /\p{Script=Han}/u);
+    assert.equal(researchLibraryErrorMessage(koreanError), koreanError.action);
+    const koreanCaps = projectResearchCapabilities({
+      sourceKind: "CURRENT_CHART",
+      runtimeMode: "LOCAL_OFFLINE",
+    });
+    assert.match(koreanCaps.capabilities.barApprox.userAction, /\p{Script=Hangul}/u);
+    assert.match(koreanCaps.capabilities.viewKlines.userReason, /\p{Script=Hangul}/u);
+    assert.doesNotMatch(koreanCaps.capabilities.barApprox.userAction, /\p{Script=Han}/u);
+    assert.doesNotMatch(koreanCaps.capabilities.viewKlines.userReason, /\p{Script=Han}/u);
+  } finally {
+    setLocale(previous);
+  }
+  assert.equal(
+    new ResearchDataError("MISSING_DATASET_IDENTITY", "datasetId is required").action,
+    "重新选择本地资料库中的数据版本",
+  );
   const joined = [
     ordinarySourceLabel("CURRENT_CHART", "en"),
     ordinarySourceLabel("IMPORTED_DATASET", "en"),
     ordinarySourceLabel("COMPLETED_RUN", "en"),
+    ordinarySourceLabel("CURRENT_CHART", "ko"),
   ].join(" ").toLowerCase();
   for (const term of FORBIDDEN_ORDINARY_UI_TERMS) {
     assert.equal(joined.includes(term.toLowerCase()), false);

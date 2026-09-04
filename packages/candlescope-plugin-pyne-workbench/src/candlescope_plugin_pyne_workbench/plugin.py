@@ -84,6 +84,23 @@ _CONTRACT_LOCALIZATIONS = {
         "capabilityUnavailable": "{permission} 能力は利用できません",
         "boundedString": "{key} は長さ制限のある文字列である必要があります",
     },
+    "ko": {
+        "Pyne workbench contribution is not invokable": "Pyne 작업대 기여는 호출할 수 없음",
+        "Pyne session is not active": "Pyne 세션이 활성 상태가 아님",
+        "preview must be a boolean": "preview는 불리언이어야 함",
+        "workbench completion token is stale": "작업대 완료 토큰이 만료됨",
+        "workbench phase is invalid": "작업대 단계가 유효하지 않음",
+        "lookbackBars must be from 2 to 5000": "lookbackBars는 2에서 5000 사이여야 함",
+        "paramsJson must be bounded JSON text": "paramsJson은 제한된 JSON 텍스트여야 함",
+        "paramsJson is invalid JSON": "paramsJson이 유효한 JSON이 아님",
+        "paramsJson must contain an object": "paramsJson은 객체여야 함",
+        "bar fields are invalid": "캔들 필드가 유효하지 않음",
+        "Host returned no market bars": "호스트가 시장 캔들을 반환하지 않음",
+        "Host bars are not all final": "호스트 캔들이 모두 확정이 아님",
+        "Host returned invalid bars": "호스트가 유효하지 않은 캔들을 반환함",
+        "capabilityUnavailable": "{permission} 기능을 사용할 수 없음",
+        "boundedString": "{key}은(는) 제한된 문자열이어야 함",
+    },
 }
 
 

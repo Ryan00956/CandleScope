@@ -18,6 +18,7 @@ import {
   sha256HexUtf8,
   ResearchDataError,
 } from "../researchDataSourceModel.js";
+import { researchLibraryErrorMessage } from "../researchDataFormat.js";
 import {
   FORBIDDEN_ORDINARY_UI_TERMS,
   type ResearchSourceRefV1,
@@ -163,9 +164,25 @@ test("ordinary UI copy never includes internal identity terms", () => {
   try {
     setLocale("ko");
     assert.equal(ordinarySourceLabel("CURRENT_CHART"), "현재 차트");
+    const koreanError = new ResearchDataError("MISSING_DATASET_IDENTITY", "datasetId is required");
+    assert.match(koreanError.action, /\p{Script=Hangul}/u);
+    assert.doesNotMatch(koreanError.action, /\p{Script=Han}/u);
+    assert.equal(researchLibraryErrorMessage(koreanError), koreanError.action);
+    const koreanCaps = projectResearchCapabilities({
+      sourceKind: "CURRENT_CHART",
+      runtimeMode: "LOCAL_OFFLINE",
+    });
+    assert.match(koreanCaps.capabilities.barApprox.userAction, /\p{Script=Hangul}/u);
+    assert.match(koreanCaps.capabilities.viewKlines.userReason, /\p{Script=Hangul}/u);
+    assert.doesNotMatch(koreanCaps.capabilities.barApprox.userAction, /\p{Script=Han}/u);
+    assert.doesNotMatch(koreanCaps.capabilities.viewKlines.userReason, /\p{Script=Han}/u);
   } finally {
     setLocale(previous);
   }
+  assert.equal(
+    new ResearchDataError("MISSING_DATASET_IDENTITY", "datasetId is required").action,
+    "重新选择本地资料库中的数据版本",
+  );
   const joined = [
     ordinarySourceLabel("CURRENT_CHART", "en"),
     ordinarySourceLabel("IMPORTED_DATASET", "en"),

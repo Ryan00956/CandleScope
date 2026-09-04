@@ -3,7 +3,9 @@ import {
   FROZEN_RESEARCH_CONTEXT_SCHEMA,
   FORBIDDEN_ORDINARY_UI_TERMS,
   ORDINARY_RESEARCH_TERMS,
+  RESEARCH_CAPABILITY_COPY,
   RESEARCH_CAPABILITY_IDS,
+  RESEARCH_ERROR_ACTIONS,
   RESEARCH_SOURCE_KINDS,
   RESEARCH_SOURCE_SCHEMA,
   type FrozenResearchContextV1,
@@ -17,15 +19,26 @@ import {
   type ResearchSourceRefV1,
 } from "./researchDataTypes.js";
 
-const ERROR_ACTIONS: Record<string, string> = {
-  INVALID_RESEARCH_SOURCE: "重新选择数据来源",
-  UNKNOWN_SOURCE_KIND: "重新选择数据来源",
-  MISSING_DATASET_IDENTITY: "重新选择本地资料库中的数据版本",
-  MISSING_SNAPSHOT_HASH: "从完成结果重新打开，不要手工填写身份",
-  INVALID_FROZEN_CONTEXT: "重新冻结数据后再运行",
-  CONTEXT_HASH_MISMATCH: "重新冻结数据后再运行",
-  FRONTEND_MUST_NOT_INVENT_SNAPSHOT: "等待后端返回已冻结身份",
-};
+type OrdinaryLocale = "en" | "zh" | "ko";
+
+function ordinaryLocale(locale?: OrdinaryLocale): OrdinaryLocale {
+  if (locale) return locale;
+  const host = getLocale();
+  if (host === "en" || host === "ko") return host;
+  return "zh";
+}
+
+function errorAction(code: string, locale?: OrdinaryLocale): string {
+  const id = ordinaryLocale(locale);
+  const entry = Object.prototype.hasOwnProperty.call(RESEARCH_ERROR_ACTIONS, code)
+    ? RESEARCH_ERROR_ACTIONS[code as keyof typeof RESEARCH_ERROR_ACTIONS]
+    : RESEARCH_ERROR_ACTIONS.fallback;
+  return entry[id];
+}
+
+function capabilityCopy(key: keyof typeof RESEARCH_CAPABILITY_COPY, locale?: OrdinaryLocale): string {
+  return RESEARCH_CAPABILITY_COPY[key][ordinaryLocale(locale)];
+}
 
 export class ResearchDataError extends Error {
   readonly code: string;
@@ -36,7 +49,7 @@ export class ResearchDataError extends Error {
     super(message);
     this.name = "ResearchDataError";
     this.code = code;
-    this.action = ERROR_ACTIONS[code] ?? "重新选择来源";
+    this.action = errorAction(code);
     this.details = details;
   }
 
@@ -225,48 +238,60 @@ export function projectResearchCapabilities(input: {
   const fidelityCeiling = hasFrozenTrades ? "TRADE_TAPE" : "BAR_APPROX";
 
   const capabilities: ResearchCapabilitySummaryV1["capabilities"] = {
-    viewKlines: allow("可以查看 K 线"),
+    viewKlines: allow(capabilityCopy("viewKlines")),
     importNewData: imported
-      ? allow("可以导入 CSV")
-      : deny("IMPORT_NOT_AVAILABLE", "当前来源不能导入新数据", "切换到本地资料库"),
+      ? allow(capabilityCopy("importCsv"))
+      : deny("IMPORT_NOT_AVAILABLE", capabilityCopy("importDenied"), capabilityCopy("switchLibrary")),
     modifyRevisionPointer: imported
-      ? allow("可以激活数据版本")
-      : deny("REVISION_POINTER_NOT_AVAILABLE", "当前来源不能修改数据版本", "在本地资料库中管理数据版本"),
+      ? allow(capabilityCopy("activateVersion"))
+      : deny(
+        "REVISION_POINTER_NOT_AVAILABLE",
+        capabilityCopy("versionDenied"),
+        capabilityCopy("manageVersions"),
+      ),
     barApprox: imported || completed || qualityOk
-      ? allow("基于 K 线估算")
-      : deny("DATA_GAP", "所选区间存在缺口", "缩短区间或导入完整数据"),
+      ? allow(capabilityCopy("barApprox"))
+      : deny("DATA_GAP", capabilityCopy("gapDenied"), capabilityCopy("shortenOrImport")),
     tradeTape: hasFrozenTrades
-      ? allow("已有冻结成交")
-      : deny("UNSUPPORTED_FIDELITY", "当前数据不支持逐笔精度，只能基于 K 线估算", "使用 K 线估算或导入成交数据"),
+      ? allow(capabilityCopy("frozenTape"))
+      : deny("UNSUPPORTED_FIDELITY", capabilityCopy("tapeDenied"), capabilityCopy("useBarsOrTape")),
     onlineBackfill: offline
-      ? deny("OFFLINE_LIVE_SOURCE_UNAVAILABLE", "离线运行时没有实时行情", "选择本地资料库")
+      ? deny("OFFLINE_LIVE_SOURCE_UNAVAILABLE", capabilityCopy("offlineLive"), capabilityCopy("chooseLibrary"))
       : chart
-        ? allow("用户确认后可准备缺失历史")
-        : deny("IMPORTED_DATASET_NEVER_NETWORKS", "导入数据不会联网补历史", "使用已导入的数据或缩短区间"),
+        ? allow(capabilityCopy("prepareHistory"))
+        : deny(
+          "IMPORTED_DATASET_NEVER_NETWORKS",
+          capabilityCopy("noNetworkBackfill"),
+          capabilityCopy("useImportedOrShorten"),
+        ),
     indicators: completed
-      ? allow("只读结果能力")
+      ? allow(capabilityCopy("readOnlyResults"))
       : imported
-        ? allow("本地显式-bars 指标")
+        ? allow(capabilityCopy("localBars"))
         : !offline
-          ? allow("当前行情指标")
-          : deny("OFFLINE_LIVE_SOURCE_UNAVAILABLE", "离线运行时没有实时行情指标", "选择本地资料库"),
+          ? allow(capabilityCopy("liveIndicators"))
+          : deny(
+            "OFFLINE_LIVE_SOURCE_UNAVAILABLE",
+            capabilityCopy("offlineIndicators"),
+            capabilityCopy("chooseLibrary"),
+          ),
     drawingsEvents: completed
-      ? allow("独立复核范围")
+      ? allow(capabilityCopy("independentReview"))
       : imported
-        ? allow("绑定当前数据版本")
-        : allow("绑定当前图表"),
+        ? allow(capabilityCopy("bindVersion"))
+        : allow(capabilityCopy("bindChart")),
   };
 
   if (offline && chart) {
     capabilities.viewKlines = deny(
       "OFFLINE_LIVE_SOURCE_UNAVAILABLE",
-      "离线运行时没有实时行情",
-      "选择本地资料库",
+      capabilityCopy("offlineLive"),
+      capabilityCopy("chooseLibrary"),
     );
     capabilities.barApprox = deny(
       "OFFLINE_LIVE_SOURCE_UNAVAILABLE",
-      "离线运行时不能运行当前图表策略",
-      "选择本地资料库",
+      capabilityCopy("offlineChartStrategy"),
+      capabilityCopy("chooseLibrary"),
     );
   }
 
@@ -342,15 +367,6 @@ export async function parseFrozenResearchContext(value: unknown): Promise<Frozen
     throw new ResearchDataError("INVALID_FROZEN_CONTEXT", "capabilitySummary must be an object");
   }
   return assembleFrozenResearchContext(value, capability as unknown as ResearchCapabilitySummaryV1);
-}
-
-type OrdinaryLocale = "en" | "zh" | "ko";
-
-function ordinaryLocale(locale?: OrdinaryLocale): OrdinaryLocale {
-  if (locale) return locale;
-  const host = getLocale();
-  if (host === "en" || host === "ko") return host;
-  return "zh";
 }
 
 export function ordinarySourceLabel(kind: ResearchSourceKind, locale?: OrdinaryLocale): string {

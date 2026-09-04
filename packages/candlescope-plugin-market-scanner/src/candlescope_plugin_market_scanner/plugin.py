@@ -67,6 +67,20 @@ _CONTRACT_LOCALIZATIONS = {
         "market scanner phase is invalid": "시장 스캐너 단계가 유효하지 않음",
         "capabilityUnavailable": "{permission} 기능을 사용할 수 없음",
     },
+    "pt-BR": {
+        "market scanner accepts only an empty scan command": (
+            "O scanner de mercado aceita apenas um comando de varredura sem parâmetros"
+        ),
+        "market scanner completion token is stale": (
+            "O token de conclusão do scanner de mercado expirou"
+        ),
+        "Host returned invalid scanner settings": (
+            "O Host devolveu configurações inválidas do scanner"
+        ),
+        "Host returned an invalid symbol page": ("O Host devolveu uma página de ativos inválida"),
+        "market scanner phase is invalid": "A fase do scanner de mercado é inválida",
+        "capabilityUnavailable": "A capacidade {permission} não está disponível",
+    },
 }
 
 

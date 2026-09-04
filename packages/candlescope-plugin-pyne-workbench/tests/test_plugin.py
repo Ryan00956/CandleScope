@@ -97,6 +97,11 @@ def test_manifest_is_independent_v2_plugin_with_bounded_capabilities() -> None:
         "strategy-provider/1",
     }
     assert "pyne-workbench" in {item.id for item in manifest.backend_entrypoints}
+    run = next(item for item in manifest.contributions if item.id == "run")
+    assert run.localizations["pt-BR"]["title"] == "Executar Pyne no gráfico atual"
+    assert run.localizations["pt-BR"]["schema"]["properties"]["source"]["title"] == (
+        "Código-fonte Pyne"
+    )
     assert [item.id for item in manifest.permissions.required] == [
         "chart.context.read",
         "market.bars.read",
@@ -121,8 +126,15 @@ def test_sandbox_ui_owns_zh_cn_english_and_japanese_copy() -> None:
     assert "Pyne ワークベンチ" in javascript
     assert "ko: {" in javascript
     assert "Pyne 작업대" in javascript
+    assert '"pt-BR": {' in javascript
+    assert "Aguardando conexão do CandleScope" in javascript
+    assert "Executar Pyne no gráfico atual" in javascript
     assert "applyLocale(payload.locale)" in javascript
     assert 'setStatus("statusRejected")' in javascript
+    assert "ecrã" not in javascript
+    assert "ficheiro" not in javascript
+    assert "utilizador" not in javascript
+    assert "percentagem" not in javascript
 
 
 def test_packaged_manifest_owns_spanish_localizations() -> None:

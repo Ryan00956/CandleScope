@@ -47,6 +47,11 @@ test("settings normalization defaults locale to zh-CN and accepts English aliase
   assert.equal(normalizeSettings({ locale: "ko" }).locale, "ko");
   assert.equal(normalizeSettings({ locale: "ko-KR" }).locale, "ko");
   assert.equal(normalizeSettings({ locale: "KO-kr" }).locale, "ko");
+  assert.equal(normalizeSettings({ locale: "pt-BR" }).locale, "pt-BR");
+  assert.equal(normalizeSettings({ locale: "pt-br" }).locale, "pt-BR");
+  assert.equal(normalizeSettings({ locale: "PT-BR" }).locale, "pt-BR");
+  assert.equal(normalizeSettings({ locale: "pt" }).locale, "zh-CN");
+  assert.equal(normalizeSettings({ locale: "pt-PT" }).locale, "zh-CN");
 });
 
 test("settings storage changes synchronize the complete settings snapshot across windows", () => {
@@ -75,6 +80,16 @@ test("settings storage changes synchronize the complete settings snapshot across
   assert.equal(settingsFromStorageChange("candlescope-settings", JSON.stringify({
     locale: "ja-JP",
   }))?.locale, "ja");
+
+  const ptIncoming = settingsFromStorageChange("candlescope-settings", JSON.stringify({
+    theme: "dark",
+    locale: "pt-br",
+  }));
+  assert.equal(ptIncoming?.locale, "pt-BR");
+  assert.equal(
+    settingsFromStorageChange("candlescope-settings", JSON.stringify({ locale: "pt-PT" }))?.locale,
+    "zh-CN",
+  );
 });
 
 test("settings normalization preserves supported chart types and rejects stale values", () => {

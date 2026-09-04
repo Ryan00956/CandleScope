@@ -129,6 +129,22 @@
                 }
               }
             }
+          },
+          "pt-BR": {
+            "title": "Executar Pyne no gráfico atual",
+            "schema": {
+              "properties": {
+                "source": {
+                  "title": "Código-fonte Pyne"
+                },
+                "paramsJson": {
+                  "title": "JSON de parâmetros"
+                },
+                "lookbackBars": {
+                  "title": "Barras de lookback"
+                }
+              }
+            }
           }
         },
         "requiresUserAction": true,
@@ -276,6 +292,28 @@
                 },
                 "retentionBars": {
                   "title": "유지 캔들 수"
+                }
+              }
+            }
+          },
+          "pt-BR": {
+            "title": "Iniciar sessão incremental do Pyne",
+            "schema": {
+              "properties": {
+                "sessionId": {
+                  "title": "ID da sessão"
+                },
+                "source": {
+                  "title": "Código-fonte Pyne"
+                },
+                "paramsJson": {
+                  "title": "JSON de parâmetros"
+                },
+                "lookbackBars": {
+                  "title": "Barras de lookback"
+                },
+                "retentionBars": {
+                  "title": "Barras retidas"
                 }
               }
             }
@@ -485,6 +523,37 @@
                 }
               }
             }
+          },
+          "pt-BR": {
+            "title": "Enviar barra para a sessão Pyne",
+            "schema": {
+              "properties": {
+                "sessionId": {
+                  "title": "ID da sessão"
+                },
+                "time": {
+                  "title": "Tempo"
+                },
+                "open": {
+                  "title": "Abertura"
+                },
+                "high": {
+                  "title": "Máxima"
+                },
+                "low": {
+                  "title": "Mínima"
+                },
+                "close": {
+                  "title": "Fechamento"
+                },
+                "volume": {
+                  "title": "Volume"
+                },
+                "preview": {
+                  "title": "Somente prévia"
+                }
+              }
+            }
           }
         },
         "requiresUserAction": true,
@@ -592,6 +661,16 @@
                 }
               }
             }
+          },
+          "pt-BR": {
+            "title": "Criar snapshot da sessão Pyne",
+            "schema": {
+              "properties": {
+                "sessionId": {
+                  "title": "ID da sessão"
+                }
+              }
+            }
           }
         },
         "requiresUserAction": true,
@@ -670,6 +749,16 @@
                 }
               }
             }
+          },
+          "pt-BR": {
+            "title": "Encerrar sessão Pyne",
+            "schema": {
+              "properties": {
+                "sessionId": {
+                  "title": "ID da sessão"
+                }
+              }
+            }
           }
         },
         "requiresUserAction": true,
@@ -713,6 +802,9 @@
           },
           "ko": {
             "title": "Pyne 백테스트 전략 제공자"
+          },
+          "pt-BR": {
+            "title": "Provedor de estratégia de backtest Pyne"
           }
         },
         "inputModes": [
@@ -754,6 +846,9 @@
           },
           "ko": {
             "title": "Pyne 작업대"
+          },
+          "pt-BR": {
+            "title": "Pyne Workbench"
           }
         },
         "slot": "sidePanel",
@@ -782,6 +877,9 @@
           },
           "ko": {
             "title": "Pyne 출력"
+          },
+          "pt-BR": {
+            "title": "Saída Pyne"
           }
         },
         "target": "main-chart",

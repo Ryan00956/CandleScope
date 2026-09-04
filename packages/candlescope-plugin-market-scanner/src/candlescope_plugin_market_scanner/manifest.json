@@ -44,6 +44,9 @@
           },
           "ko": {
             "title": "승인된 시장 스캔"
+          },
+          "pt-BR": {
+            "title": "Escanear mercados autorizados"
           }
         },
         "requiresUserAction": true,
@@ -200,6 +203,33 @@
                 }
               }
             }
+          },
+          "pt-BR": {
+            "title": "Configurações do scanner de mercado",
+            "schema": {
+              "properties": {
+                "quoteAsset": {
+                  "title": "Ativo de cotação"
+                },
+                "symbolsLimit": {
+                  "title": "Quantidade de ativos a escanear"
+                },
+                "interval": {
+                  "title": "Intervalo",
+                  "enumLabels": [
+                    "1 minuto",
+                    "5 minutos",
+                    "1 hora"
+                  ]
+                },
+                "lookbackBars": {
+                  "title": "Barras de lookback"
+                },
+                "minimumMovePct": {
+                  "title": "Variação mínima (%)"
+                }
+              }
+            }
           }
         },
         "schema": {
@@ -309,6 +339,16 @@
               "time": "종가 시각"
             },
             "emptyState": "스캐너를 실행하면 결과가 여기에 표시됩니다"
+          },
+          "pt-BR": {
+            "title": "Resultados do scanner de mercado",
+            "fields": {
+              "symbol": "Ativo",
+              "changePct": "Variação",
+              "close": "Fechamento",
+              "time": "Horário de fechamento"
+            },
+            "emptyState": "Execute o scanner para preencher os resultados"
           }
         },
         "slot": "sidePanel",
@@ -393,6 +433,14 @@
               "interval": "주기"
             },
             "emptyState": "스캐너 대기 중"
+          },
+          "pt-BR": {
+            "title": "Resumo do scanner de mercado",
+            "fields": {
+              "scannedSymbols": "Escaneados",
+              "interval": "Intervalo"
+            },
+            "emptyState": "Scanner ocioso"
           }
         },
         "slot": "statusArea",
@@ -439,6 +487,9 @@
           },
           "ko": {
             "title": "시장 스캔 신호"
+          },
+          "pt-BR": {
+            "title": "Sinais do scanner de mercado"
           }
         },
         "target": "main-chart",

@@ -37,6 +37,20 @@ def test_plugin_error_localizations_accept_additional_languages_and_preserve_fal
     assert _localized_contract_error(capability, "ja").message == (
         "market.bars.read 能力は利用できません"
     )
+    assert _localized_contract_error(error, "pt-BR").message == (
+        "A fase do scanner de mercado é inválida"
+    )
+    assert _localized_contract_error(error, "pt-br").message == (
+        "A fase do scanner de mercado é inválida"
+    )
+    assert _localized_contract_error(error, "pt") is error
+    assert _localized_contract_error(error, "pt-PT") is error
+    capability_pt = PlatformContractError(
+        "unavailable", "market.bars.read capability is unavailable"
+    )
+    assert _localized_contract_error(capability_pt, "pt-BR").message == (
+        "A capacidade market.bars.read não está disponível"
+    )
 
 
 def _context(locale: str = "en") -> RequestContext:
@@ -88,6 +102,14 @@ def test_packaged_manifest_owns_entrypoint_and_localized_enum_labels() -> None:
     korean = settings.localizations["ko"]["schema"]["properties"]["interval"]
     assert korean["enumLabels"] == ["1분", "5분", "1시간"]
     assert len(korean["enumLabels"]) == len(settings.configuration["schema"]["properties"]["interval"]["enum"])
+    pt_interval = settings.localizations["pt-BR"]["schema"]["properties"]["interval"]
+    assert pt_interval["enumLabels"] == ["1 minuto", "5 minutos", "1 hora"]
+    assert settings.localizations["pt-BR"]["title"] == "Configurações do scanner de mercado"
+    assert results.localizations["pt-BR"]["fields"]["symbol"] == "Ativo"
+    assert results.localizations["pt-BR"]["emptyState"] == (
+        "Execute o scanner para preencher os resultados"
+    )
+    assert summary.localizations["pt-BR"]["emptyState"] == "Scanner ocioso"
 
 
 def test_spanish_contract_errors_follow_parent_locale() -> None:
@@ -99,7 +121,6 @@ def test_spanish_contract_errors_follow_parent_locale() -> None:
     assert _localized_contract_error(capability, "es-ES").message == (
         "Capacidad no disponible: market.bars.read"
     )
-    assert _localized_contract_error(error, "pt-BR") is error
     assert "es" in _CONTRACT_LOCALIZATIONS
 
 
@@ -118,8 +139,6 @@ def test_packaged_manifest_owns_korean_contribution_copy() -> None:
             assert korean["emptyState"]
         if "schema" in chinese:
             assert set(korean["schema"]["properties"]) == set(chinese["schema"]["properties"])
-
-
 def test_scan_preserves_invocation_locale_on_host_calls() -> None:
     plugin = MarketScannerPlugin()
     manifest = plugin.manifest()

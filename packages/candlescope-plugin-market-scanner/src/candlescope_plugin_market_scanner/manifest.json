@@ -47,6 +47,9 @@
           },
           "pt-BR": {
             "title": "Escanear mercados autorizados"
+          },
+          "ru": {
+            "title": "Сканировать разрешённые рынки"
           }
         },
         "requiresUserAction": true,
@@ -230,6 +233,33 @@
                 }
               }
             }
+          },
+          "ru": {
+            "title": "Настройки сканера рынка",
+            "schema": {
+              "properties": {
+                "quoteAsset": {
+                  "title": "Котируемый актив"
+                },
+                "symbolsLimit": {
+                  "title": "Число инструментов"
+                },
+                "interval": {
+                  "title": "Интервал",
+                  "enumLabels": [
+                    "1 минута",
+                    "5 минут",
+                    "1 час"
+                  ]
+                },
+                "lookbackBars": {
+                  "title": "Свечей назад"
+                },
+                "minimumMovePct": {
+                  "title": "Мин. изменение, %"
+                }
+              }
+            }
           }
         },
         "schema": {
@@ -349,6 +379,16 @@
               "time": "Horário de fechamento"
             },
             "emptyState": "Execute o scanner para preencher os resultados"
+          },
+          "ru": {
+            "title": "Результаты сканера рынка",
+            "fields": {
+              "symbol": "Инструмент",
+              "changePct": "Изменение",
+              "close": "Закрытие",
+              "time": "Время закрытия"
+            },
+            "emptyState": "Результаты появятся здесь после запуска сканера"
           }
         },
         "slot": "sidePanel",
@@ -441,6 +481,14 @@
               "interval": "Intervalo"
             },
             "emptyState": "Scanner ocioso"
+          },
+          "ru": {
+            "title": "Сводка сканера рынка",
+            "fields": {
+              "scannedSymbols": "Просканировано",
+              "interval": "Интервал"
+            },
+            "emptyState": "Сканер простаивает"
           }
         },
         "slot": "statusArea",
@@ -490,6 +538,9 @@
           },
           "pt-BR": {
             "title": "Sinais do scanner de mercado"
+          },
+          "ru": {
+            "title": "Сигналы сканера рынка"
           }
         },
         "target": "main-chart",

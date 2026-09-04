@@ -145,6 +145,22 @@
                 }
               }
             }
+          },
+          "ru": {
+            "title": "Запустить Pyne на текущем графике",
+            "schema": {
+              "properties": {
+                "source": {
+                  "title": "Исходный код Pyne"
+                },
+                "paramsJson": {
+                  "title": "JSON параметров"
+                },
+                "lookbackBars": {
+                  "title": "Свечей назад"
+                }
+              }
+            }
           }
         },
         "requiresUserAction": true,
@@ -314,6 +330,28 @@
                 },
                 "retentionBars": {
                   "title": "Barras retidas"
+                }
+              }
+            }
+          },
+          "ru": {
+            "title": "Запустить инкрементальную сессию Pyne",
+            "schema": {
+              "properties": {
+                "sessionId": {
+                  "title": "ID сессии"
+                },
+                "source": {
+                  "title": "Исходный код Pyne"
+                },
+                "paramsJson": {
+                  "title": "JSON параметров"
+                },
+                "lookbackBars": {
+                  "title": "Свечей назад"
+                },
+                "retentionBars": {
+                  "title": "Сохраняемых свечей"
                 }
               }
             }
@@ -554,6 +592,37 @@
                 }
               }
             }
+          },
+          "ru": {
+            "title": "Отправить свечу в сессию Pyne",
+            "schema": {
+              "properties": {
+                "sessionId": {
+                  "title": "ID сессии"
+                },
+                "time": {
+                  "title": "Время"
+                },
+                "open": {
+                  "title": "Открытие"
+                },
+                "high": {
+                  "title": "Максимум"
+                },
+                "low": {
+                  "title": "Минимум"
+                },
+                "close": {
+                  "title": "Закрытие"
+                },
+                "volume": {
+                  "title": "Объём"
+                },
+                "preview": {
+                  "title": "Только предпросмотр"
+                }
+              }
+            }
           }
         },
         "requiresUserAction": true,
@@ -671,6 +740,16 @@
                 }
               }
             }
+          },
+          "ru": {
+            "title": "Снимок сессии Pyne",
+            "schema": {
+              "properties": {
+                "sessionId": {
+                  "title": "ID сессии"
+                }
+              }
+            }
           }
         },
         "requiresUserAction": true,
@@ -759,6 +838,16 @@
                 }
               }
             }
+          },
+          "ru": {
+            "title": "Закрыть сессию Pyne",
+            "schema": {
+              "properties": {
+                "sessionId": {
+                  "title": "ID сессии"
+                }
+              }
+            }
           }
         },
         "requiresUserAction": true,
@@ -805,6 +894,9 @@
           },
           "pt-BR": {
             "title": "Provedor de estratégia de backtest Pyne"
+          },
+          "ru": {
+            "title": "Поставщик стратегий бэктеста Pyne"
           }
         },
         "inputModes": [
@@ -849,6 +941,9 @@
           },
           "pt-BR": {
             "title": "Pyne Workbench"
+          },
+          "ru": {
+            "title": "Верстак Pyne"
           }
         },
         "slot": "sidePanel",
@@ -880,6 +975,9 @@
           },
           "pt-BR": {
             "title": "Saída Pyne"
+          },
+          "ru": {
+            "title": "Вывод Pyne"
           }
         },
         "target": "main-chart",

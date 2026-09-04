@@ -51,6 +51,8 @@ def test_plugin_error_localizations_accept_additional_languages_and_preserve_fal
     assert _localized_contract_error(capability_pt, "pt-BR").message == (
         "A capacidade market.bars.read não está disponível"
     )
+    assert _localized_contract_error(error, "ru").message == "Недопустимая фаза сканера рынка"
+    assert _localized_contract_error(error, "ru-RU").message == "Недопустимая фаза сканера рынка"
 
 
 def _context(locale: str = "en") -> RequestContext:
@@ -110,6 +112,8 @@ def test_packaged_manifest_owns_entrypoint_and_localized_enum_labels() -> None:
         "Execute o scanner para preencher os resultados"
     )
     assert summary.localizations["pt-BR"]["emptyState"] == "Scanner ocioso"
+    ru_interval = settings.localizations["ru"]["schema"]["properties"]["interval"]
+    assert ru_interval["enumLabels"] == ["1 минута", "5 минут", "1 час"]
 
 
 def test_spanish_contract_errors_follow_parent_locale() -> None:
@@ -139,6 +143,8 @@ def test_packaged_manifest_owns_korean_contribution_copy() -> None:
             assert korean["emptyState"]
         if "schema" in chinese:
             assert set(korean["schema"]["properties"]) == set(chinese["schema"]["properties"])
+
+
 def test_scan_preserves_invocation_locale_on_host_calls() -> None:
     plugin = MarketScannerPlugin()
     manifest = plugin.manifest()
@@ -163,6 +169,13 @@ def test_plugin_owned_validation_error_follows_request_locale() -> None:
     )
     with pytest.raises(PlatformContractError, match="只接受空参数"):
         plugin.invoke(request)
+    russian = InvokeRequest(
+        contribution_id="scan",
+        input={"unexpected": True},
+        request_context=_context("ru"),
+    )
+    with pytest.raises(PlatformContractError, match="без параметров"):
+        plugin.invoke(russian)
 
 
 def test_plugin_owned_validation_error_follows_french_regional_locale() -> None:

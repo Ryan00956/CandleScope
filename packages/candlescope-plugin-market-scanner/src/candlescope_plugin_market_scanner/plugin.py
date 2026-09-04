@@ -81,6 +81,14 @@ _CONTRACT_LOCALIZATIONS = {
         "market scanner phase is invalid": "A fase do scanner de mercado é inválida",
         "capabilityUnavailable": "A capacidade {permission} não está disponível",
     },
+    "ru": {
+        "market scanner accepts only an empty scan command": "Сканер рынка принимает только команду сканирования без параметров",
+        "market scanner completion token is stale": "Токен завершения сканера рынка устарел",
+        "Host returned invalid scanner settings": "Host вернул недопустимые настройки сканера",
+        "Host returned an invalid symbol page": "Host вернул недопустимую страницу инструментов",
+        "market scanner phase is invalid": "Недопустимая фаза сканера рынка",
+        "capabilityUnavailable": "Возможность {permission} недоступна",
+    },
 }
 
 

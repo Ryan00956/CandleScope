@@ -52,6 +52,8 @@ test("settings normalization defaults locale to zh-CN and accepts English aliase
   assert.equal(normalizeSettings({ locale: "PT-BR" }).locale, "pt-BR");
   assert.equal(normalizeSettings({ locale: "pt" }).locale, "zh-CN");
   assert.equal(normalizeSettings({ locale: "pt-PT" }).locale, "zh-CN");
+  assert.equal(normalizeSettings({ locale: "ru" }).locale, "ru");
+  assert.equal(normalizeSettings({ locale: "ru-RU" }).locale, "ru");
 });
 
 test("settings storage changes synchronize the complete settings snapshot across windows", () => {
@@ -65,6 +67,12 @@ test("settings storage changes synchronize the complete settings snapshot across
     locale: "ko-KR",
   }));
   assert.equal(korean?.locale, "ko");
+  const russian = settingsFromStorageChange("candlescope-settings", JSON.stringify({
+    theme: "dark",
+    locale: "ru-RU",
+  }));
+  assert.equal(russian?.locale, "ru");
+  assert.equal(parseStoredSettings(JSON.stringify({ locale: "ru" })).locale, "ru");
   assert.equal(settingsFromStorageChange("unrelated-key", "{}"), null);
   assert.equal(settingsFromStorageChange(null, null)?.locale, "zh-CN");
   const spanish = settingsFromStorageChange("candlescope-settings", JSON.stringify({

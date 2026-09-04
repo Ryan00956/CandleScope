@@ -129,6 +129,8 @@ def test_sandbox_ui_owns_zh_cn_english_and_japanese_copy() -> None:
     assert '"pt-BR": {' in javascript
     assert "Aguardando conexão do CandleScope" in javascript
     assert "Executar Pyne no gráfico atual" in javascript
+    assert "ru: {" in javascript
+    assert "Верстак Pyne" in javascript
     assert "applyLocale(payload.locale)" in javascript
     assert 'setStatus("statusRejected")' in javascript
     assert "ecrã" not in javascript

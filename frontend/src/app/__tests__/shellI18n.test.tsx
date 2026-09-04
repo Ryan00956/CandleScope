@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -68,6 +69,12 @@ test("settings category labels follow the active locale", () => {
     assert.equal(t("settings.saveAndClose"), "Salvar e fechar");
     assert.doesNotMatch(t("settings.saveAndClose"), /ecrã|ficheiro|utilizador|percentagem/);
   });
+  withLocale("ru", () => {
+    assert.match(t(SETTINGS_CATEGORIES[0].labelKey), /\p{Script=Cyrillic}/u);
+    assert.doesNotMatch(t(SETTINGS_CATEGORIES[0].labelKey), /\p{Script=Han}/u);
+    assert.match(t("settings.saveAndClose"), /\p{Script=Cyrillic}/u);
+    assert.doesNotMatch(t("settings.saveAndClose"), /\p{Script=Han}/u);
+  });
 });
 
 test("status bar chrome switches between Chinese and English", () => {
@@ -122,6 +129,12 @@ test("status bar chrome switches between Chinese and English", () => {
   assert.match(pt, /Ao vivo \(WebSocket\)/);
   assert.match(pt, /Binance Spot/);
   assert.doesNotMatch(pt, /Connected to|已连接|ecrã|ficheiro|utilizador|percentagem/);
+  const ru = withLocale("ru", () => renderToStaticMarkup(<StatusBar status={status} />));
+  assert.match(ru, /Binance/);
+  assert.match(ru, /\p{Script=Cyrillic}/u);
+  assert.doesNotMatch(ru, /\p{Script=Han}/u);
+  assert.doesNotMatch(ru, /Connected to/);
+  assert.doesNotMatch(ru, /已连接/);
 });
 
 test("right-rail chrome follows the active locale", () => {
@@ -167,6 +180,18 @@ test("right-rail chrome follows the active locale", () => {
     <MarketRightRailFrame
       source="live"
       views={viewsFor("fr")}
+      openViewIds={[]}
+      panelCollapsed
+      onToggleView={() => undefined}
+      onTogglePanelCollapsed={() => undefined}
+      renderView={() => null}
+      layout={{ width: 360 }}
+    />,
+  ));
+  const ru = withLocale("ru", () => renderToStaticMarkup(
+    <MarketRightRailFrame
+      source="live"
+      views={viewsFor("ru")}
       openViewIds={[]}
       panelCollapsed
       onToggleView={() => undefined}
@@ -227,6 +252,10 @@ test("right-rail chrome follows the active locale", () => {
   assert.match(pt, /Mostrar barra lateral/);
   assert.match(pt, /Lista de observação/);
   assert.doesNotMatch(pt, /Market sidebar|市场侧栏|ecrã|ficheiro|Watchlist/);
+  assert.match(ru, /\p{Script=Cyrillic}/u);
+  assert.doesNotMatch(ru, /\p{Script=Han}/u);
+  assert.doesNotMatch(ru, /Market sidebar/);
+  assert.doesNotMatch(ru, /市场侧栏/);
 });
 
 test("appearance panel exposes a language picker that lists both locales", () => {
@@ -242,6 +271,7 @@ test("appearance panel exposes a language picker that lists both locales", () =>
   assert.match(html, /日本語/);
   assert.match(html, /한국어/);
   assert.match(html, /Português \(Brasil\)/);
+  assert.match(html, /Русский/);
 
   const en = withLocale("en", () => renderToStaticMarkup(
     <ChartAppearancePanel
@@ -340,4 +370,35 @@ test("status bar, right rail, and appearance chrome switch to Spanish", () => {
   assert.match(pt, /Português \(Brasil\)/);
   assert.match(pt, /value="pt-BR"/);
   assert.doesNotMatch(pt, /界面语言|Interface language|ecrã|ficheiro|utilizador|percentagem/);
+
+  withLocale("ru", () => {
+    const ru = renderToStaticMarkup(
+      <ChartAppearancePanel
+        settings={{ ...DEFAULT_SETTINGS, locale: "ru" }}
+        onUpdate={() => undefined}
+      />,
+    );
+    assert.match(ru, /data-settings-locale="true"/);
+    assert.match(ru, /Русский/);
+    assert.match(t("settings.language.title"), /\p{Script=Cyrillic}/u);
+    assert.doesNotMatch(t("settings.language.title"), /\p{Script=Han}/u);
+    assert.doesNotMatch(ru, /界面语言/);
+    assert.match(t("settings.language.description"), /\p{Script=Cyrillic}/u);
+    assert.ok(t("settings.language.description").length > t("settings.language.description", undefined, "en").length);
+  });
+});
+
+test("Russian layout CSS keeps long chrome wrapping and a Cyrillic-capable font stack", () => {
+  const css = fs.readFileSync(new URL("../../index.css", import.meta.url), "utf8");
+  const settingsCss = fs.readFileSync(
+    new URL("../../features/settings/SettingsModalStyles.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(css, /Segoe UI/);
+  assert.match(css, /Noto Sans/);
+  assert.match(css, /html\[lang="ru"\] \.market-rail-accordion-trigger strong/);
+  const main = fs.readFileSync(new URL("../../main.tsx", import.meta.url), "utf8");
+  assert.match(main, /@fontsource\/inter\/cyrillic-400\.css/);
+  assert.match(settingsCss, /html\[lang="ru"\] \.st-group-title/);
+  assert.match(settingsCss, /overflow-wrap: break-word/);
 });

@@ -4,6 +4,7 @@ import test from "node:test";
 import { en } from "../catalogs/en.js";
 import { ja } from "../catalogs/ja.js";
 import { ko } from "../catalogs/ko.js";
+import { ru } from "../catalogs/ru.js";
 import { zhCN } from "../catalogs/zh-CN.js";
 import {
   DEFAULT_LOCALE,
@@ -53,6 +54,8 @@ test("locale normalization keeps the product default and accepts English aliases
   assert.equal(normalizeLocale("ja"), "ja");
   assert.equal(normalizeLocale("ja-JP"), "ja");
   assert.equal(normalizeLocale("JA-jp"), "ja");
+  assert.equal(normalizeLocale("ru"), "ru");
+  assert.equal(normalizeLocale("ru-RU"), "ru");
 });
 
 test("pt-BR is recognized from BCP 47 case variants and is not aliased from bare pt", () => {
@@ -83,6 +86,9 @@ test("every registered locale exposes all host keys and a language-picker option
   assert.equal(isLocaleId("fr-FR"), false);
   assert.ok(LOCALE_OPTIONS.some((option) => option.id === "fr" && option.nativeLabel === "Français"));
   assert.equal(isLocaleId("ja-JP"), false);
+  assert.equal(isLocaleId("ru"), true);
+  assert.equal(DEFAULT_LOCALE, "zh-CN");
+  assert.equal(LOCALE_OPTIONS.find((option) => option.id === "ru")?.nativeLabel, "Русский");
   assert.deepEqual(messageKeys().slice().sort(), Object.keys(zhCN).sort());
   const japanese = LOCALE_OPTIONS.find((option) => option.id === "ja");
   assert.equal(japanese?.nativeLabel, "日本語");
@@ -140,6 +146,10 @@ test("format profiles preserve existing English dates and numbers and follow run
     assert.equal(getNumberLocale(), "pt-BR");
     assert.match(new Intl.NumberFormat(getNumberLocale()).format(1234567.89), /1\.234\.567,89/);
     assert.equal(new Intl.NumberFormat(getNumberLocale()).format(1.5).includes(","), true);
+  });
+  withLocale("ru", () => {
+    assert.equal(getDateTimeLocale(), "ru-RU");
+    assert.equal(getNumberLocale(), "ru-RU");
   });
 });
 
@@ -206,6 +216,20 @@ test("t interpolates and switches with the locale store", () => {
       /4 horas/,
     );
   });
+  withLocale("ru", () => {
+    for (const [key, vars] of [
+      ["shell.replay", undefined],
+      ["shell.settings", undefined],
+      ["status.loading", undefined],
+      ["settings.language.title", undefined],
+      ["status.connectedTo", { exchange: "Binance" }],
+    ] as const) {
+      const value = t(key, vars);
+      assert.match(value, /\p{Script=Cyrillic}/u, key);
+      assert.doesNotMatch(value, /\p{Script=Han}/u, key);
+    }
+    assert.match(t("status.connectedTo", { exchange: "Binance" }), /Binance/);
+  });
 });
 
 test("plural forms keep Chinese invariant and distinguish English one/other", () => {
@@ -229,6 +253,35 @@ test("plural forms keep Chinese invariant and distinguish English one/other", ()
     assert.equal(tPlural("status.barCount", 2), "2 本");
     assert.equal(new Intl.PluralRules("ja").select(1), "other");
     assert.equal(new Intl.PluralRules("ja").select(2), "other");
+  });
+  withLocale("ru", () => {
+    const rules = new Intl.PluralRules("ru");
+    const shipped = (key: "status.barCount" | "status.exchangeLimitationCount", count: number) => {
+      const category = rules.select(count);
+      const catalogKey = category === "other" ? key : `${key}.${category}`;
+      const template = ru[catalogKey as keyof typeof ru];
+      assert.equal(typeof template, "string", catalogKey);
+      return String(template).replace("{count}", String(count));
+    };
+    for (const count of [1, 2, 5, 21, 22, 25, 1.5, 2.5]) {
+      assert.equal(tPlural("status.barCount", count), shipped("status.barCount", count), String(count));
+      assert.equal(
+        tPlural("status.exchangeLimitationCount", count),
+        shipped("status.exchangeLimitationCount", count),
+        String(count),
+      );
+    }
+    assert.equal(rules.select(1), "one");
+    assert.equal(rules.select(21), "one");
+    assert.equal(rules.select(2), "few");
+    assert.equal(rules.select(22), "few");
+    assert.equal(rules.select(5), "many");
+    assert.equal(rules.select(25), "many");
+    assert.equal(rules.select(1.5), "other");
+    assert.notEqual(tPlural("status.barCount", 1), tPlural("status.barCount", 2));
+    assert.notEqual(tPlural("status.barCount", 2), tPlural("status.barCount", 5));
+    assert.notEqual(tPlural("status.barCount", 1), tPlural("status.barCount", 1.5));
+    assert.match(tPlural("status.barCount", 1), /\p{Script=Cyrillic}/u);
   });
 });
 
@@ -430,6 +483,33 @@ test("pt-BR host chrome uses Brazilian trading copy rather than English clones o
   });
 });
 
+test("Russian chrome uses the required trading glossary", () => {
+  withLocale("ru", () => {
+    assert.match(t("shell.replay"), /Воспроизведение/);
+    assert.match(t("rail.orderBook"), /книга ордеров/i);
+    assert.match(t("settings.exchange.channel.fundingRate"), /ставка финансирования/i);
+    assert.match(t("backtest.title"), /[Бб]эктест/);
+    assert.match(t("replay.wb.positions"), /Позици/);
+    assert.match(t("replay.wb.im"), /марж/i);
+    assert.match(t("replay.shell.ordersFills"), /[Оо]рдер/);
+    assert.match(t("replay.liq.fill"), /Исполнение/);
+    assert.match(t("replay.wb.pnl"), /прибыль и убыток/i);
+    assert.doesNotMatch(t("shell.replay"), /\bReplay\b/);
+    assert.doesNotMatch(t("rail.orderBook"), /\bOrder book\b/i);
+  });
+});
+
+test("Russian number and date profiles use a decimal comma", () => {
+  withLocale("ru", () => {
+    assert.equal(getNumberLocale(), "ru-RU");
+    assert.equal(getDateTimeLocale(), "ru-RU");
+    assert.equal((1.5).toLocaleString(getNumberLocale()), "1,5");
+    assert.match((1234.5).toLocaleString(getNumberLocale()), /1[\u00a0\u202f ]?234,5/);
+    const stamp = new Date(Date.UTC(2026, 8, 4, 12, 0, 0));
+    assert.match(stamp.toLocaleDateString(getDateTimeLocale(), { timeZone: "UTC" }), /04\.09\.2026|4\.09\.2026/);
+  });
+});
+
 test("websocket status keys stay stable across locales", () => {
   withLocale("zh-CN", () => {
     assert.equal(translateWsStatus("fallback"), "轮询回退");
@@ -558,6 +638,8 @@ test("hydrateLocale updates the store and is idempotent for the same value", () 
     assert.equal(setLocale("en"), "en");
     assert.equal(notifications, 1);
     assert.equal(documentElement.lang, "en");
+    assert.equal(hydrateLocale("ru-RU"), "ru");
+    assert.equal(getLocale(), "ru");
   } finally {
     unsubscribe();
     setLocale(previous);
@@ -854,6 +936,25 @@ test("hydrateLocale writes pt-BR document lang and ltr direction for case varian
       delete (globalThis as { document?: unknown }).document;
     } else {
       (globalThis as { document: unknown }).document = previousDocument;
+    }
+  }
+});
+
+test("setLocale writes Russian document lang and ltr direction", () => {
+  const previousDocument = globalThis.document;
+  const documentElement = { lang: "", dir: "" };
+  globalThis.document = { documentElement } as unknown as Document;
+  const previous = getLocale();
+  try {
+    assert.equal(setLocale("ru-RU"), "ru");
+    assert.equal(documentElement.lang, "ru");
+    assert.equal(documentElement.dir, "ltr");
+  } finally {
+    setLocale(previous);
+    if (previousDocument === undefined) {
+      Reflect.deleteProperty(globalThis, "document");
+    } else {
+      globalThis.document = previousDocument;
     }
   }
 });

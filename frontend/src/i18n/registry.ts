@@ -4,6 +4,7 @@ import { fr } from "./catalogs/fr.js";
 import { ja } from "./catalogs/ja.js";
 import { ko } from "./catalogs/ko.js";
 import { ptBR } from "./catalogs/pt-BR.js";
+import { ru } from "./catalogs/ru.js";
 import { zhCN } from "./catalogs/zh-CN.js";
 import type { MessageCatalog } from "./messageCatalog.js";
 
@@ -64,6 +65,14 @@ export const LOCALE_REGISTRY = {
     numberLocale: "pt-BR",
     direction: "ltr",
     messages: ptBR,
+  },
+  ru: {
+    nativeLabel: "Русский",
+    aliases: ["ru-RU"],
+    dateTimeLocale: "ru-RU",
+    numberLocale: "ru-RU",
+    direction: "ltr",
+    messages: ru,
   },
 } as const satisfies Readonly<Record<string, LocaleDefinition>>;
 

@@ -28,8 +28,24 @@ CHART = {
 BARS = {
     "data": [
         {"time": 60, "open": 10, "high": 11, "low": 9, "close": 10, "volume": 1, "is_closed": True},
-        {"time": 120, "open": 10, "high": 12, "low": 9, "close": 11, "volume": 2, "is_closed": True},
-        {"time": 180, "open": 11, "high": 13, "low": 10, "close": 12, "volume": 3, "is_closed": True},
+        {
+            "time": 120,
+            "open": 10,
+            "high": 12,
+            "low": 9,
+            "close": 11,
+            "volume": 2,
+            "is_closed": True,
+        },
+        {
+            "time": 180,
+            "open": 11,
+            "high": 13,
+            "low": 10,
+            "close": 12,
+            "volume": 3,
+            "is_closed": True,
+        },
     ],
     "coverage": {"allRowsFinal": True},
 }
@@ -91,8 +107,37 @@ def test_sandbox_ui_owns_zh_cn_and_english_copy() -> None:
     assert 'data-i18n="statusWaiting"' in html
     assert '"zh-CN": {' in javascript
     assert "en: {" in javascript
+    assert "es: {" in javascript
+    assert "Banco de trabajo Pyne" in javascript
+    assert "Esperando a CandleScope" in javascript
     assert "applyLocale(payload.locale)" in javascript
     assert 'setStatus("statusRejected")' in javascript
+
+
+def test_packaged_manifest_owns_spanish_localizations() -> None:
+    manifest = pyne_workbench_manifest()
+    by_id = {item.id: item for item in manifest.contributions}
+    assert by_id["run"].localizations["es"]["title"] == "Ejecutar Pyne en el gráfico actual"
+    run_schema = by_id["run"].localizations["es"]["schema"]["properties"]
+    assert run_schema["source"]["title"] == "Código fuente Pyne"
+    assert run_schema["lookbackBars"]["title"] == "Barras de retrospectiva"
+    assert (
+        by_id["start-session"].localizations["es"]["title"] == "Iniciar sesión incremental de Pyne"
+    )
+    push_schema = by_id["push-bar"].localizations["es"]["schema"]["properties"]
+    assert push_schema["open"]["title"] == "Apertura"
+    assert push_schema["close"]["title"] == "Cierre"
+    assert (
+        by_id["snapshot-session"].localizations["es"]["title"]
+        == "Crear instantánea de la sesión Pyne"
+    )
+    assert by_id["close-session"].localizations["es"]["title"] == "Cerrar sesión Pyne"
+    assert (
+        by_id["pyne-strategy"].localizations["es"]["title"]
+        == "Proveedor de estrategia de prueba retrospectiva Pyne"
+    )
+    assert by_id["workbench-view"].localizations["es"]["title"] == "Banco de trabajo Pyne"
+    assert by_id["pyne-output"].localizations["es"]["title"] == "Salida Pyne"
 
 
 def test_batch_command_reads_chart_bars_and_publishes_render_v2() -> None:
@@ -122,8 +167,7 @@ def test_batch_command_brokers_exact_request_data_before_publish() -> None:
         "run",
         {
             "source": (
-                'requested = request.security("BTCUSDT", "5m", close)\n'
-                'plot(requested, "Requested")'
+                'requested = request.security("BTCUSDT", "5m", close)\nplot(requested, "Requested")'
             ),
             "lookbackBars": 3,
         },

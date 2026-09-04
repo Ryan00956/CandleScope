@@ -26,7 +26,8 @@
       "entrypoint": "main",
       "configuration": {
         "localizations": {
-          "zh-CN": { "title": "扫描已授权市场" }
+          "zh-CN": { "title": "扫描已授权市场" },
+          "es": { "title": "Escanear mercados autorizados" }
         },
         "requiresUserAction": true,
         "placements": ["commandPalette", "topToolbar"],
@@ -57,6 +58,21 @@
                 },
                 "lookbackBars": { "title": "回看 K 线数" },
                 "minimumMovePct": { "title": "最小涨跌幅百分比" }
+              }
+            }
+          },
+          "es": {
+            "title": "Ajustes del escáner de mercado",
+            "schema": {
+              "properties": {
+                "quoteAsset": { "title": "Activo de cotización" },
+                "symbolsLimit": { "title": "Número de símbolos a escanear" },
+                "interval": {
+                  "title": "Intervalo",
+                  "enumLabels": ["1 minuto", "5 minutos", "1 hora"]
+                },
+                "lookbackBars": { "title": "Barras de retrospectiva" },
+                "minimumMovePct": { "title": "Variación mínima porcentual" }
               }
             }
           }
@@ -104,6 +120,16 @@
               "time": "收盘时间"
             },
             "emptyState": "运行扫描器后将在此显示结果"
+          },
+          "es": {
+            "title": "Resultados del escáner de mercado",
+            "fields": {
+              "symbol": "Símbolo",
+              "changePct": "Variación",
+              "close": "Cierre",
+              "time": "Cerrado a las"
+            },
+            "emptyState": "Ejecute el escáner para mostrar resultados aquí"
           }
         },
         "slot": "sidePanel",
@@ -135,6 +161,11 @@
             "title": "市场扫描摘要",
             "fields": { "scannedSymbols": "已扫描", "interval": "周期" },
             "emptyState": "扫描器空闲"
+          },
+          "es": {
+            "title": "Resumen del escáner de mercado",
+            "fields": { "scannedSymbols": "Escaneados", "interval": "Intervalo" },
+            "emptyState": "Escáner inactivo"
           }
         },
         "slot": "statusArea",
@@ -159,7 +190,8 @@
       "entrypoint": "main",
       "configuration": {
         "localizations": {
-          "zh-CN": { "title": "市场扫描信号" }
+          "zh-CN": { "title": "市场扫描信号" },
+          "es": { "title": "Señales del escáner de mercado" }
         },
         "target": "main-chart",
         "zOrder": "above-series",
